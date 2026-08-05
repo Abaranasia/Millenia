@@ -1,0 +1,25 @@
+# JUCE / Projucer generated content — regenerated from Millenia.jucer, never hand-edited
+Builds/
+JuceLibraryCode/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build output
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+ipch/
+*.ilk
+*.pdb
+*.obj
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
