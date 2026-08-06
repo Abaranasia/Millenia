@@ -30,13 +30,15 @@ Real-time pitch shifting inside a feedback loop has two competing approaches:
 
 **We're using the dual-delay-line approach.** Not just because it's cheaper — the grain artifacts it introduces get re-diffused by the tank's allpass stages on every pass, and that texture is actually part of what makes shimmer reverbs sound "shimmery" rather than a defect to eliminate.
 
+**The shift amount is bipolar, not just an upward "shimmer" knob.** Positive values give the classic ascending shimmer; negative values use the exact same mechanism (the read pointer just advances slower than it writes) to produce a darker, descending tail instead — a legitimate second character, not a hack. The control is called **Pitch Shift**, not "Pitch Interval," because it needs to read naturally at negative values too. The one real cost: extending the range downward means the shifter's grain-window buffer has to be sized for the slowest read-rate in range, not just the +12 st default — see `shimmer-reverb-architecture.md` for the exact math.
+
 ## Architecture decisions
 
 | Decision | Choice | Why |
 |---|---|---|
 | Tank topology | Dattorro plate | Single clear feedback injection point, proven low-parameter design |
 | Pitch shift method | Dual-delay-line crossfade | Zero added latency, cheap, artifact character fits the genre |
-| Default shift interval | +12 semitones (octave) | Most common shimmer setting; +7 (fifth) as a secondary preset later |
+| Shift range | −24 to +24 semitones, continuous dial + quick presets at +7/+12/+19 | One bipolar parameter; presets are shortcuts to it, not separate modes. Default +12 (octave) |
 | Delay-line interpolation | 3rd-order Lagrange | Needed because the pitch shifter reads at a fractional, constantly-changing rate — linear interpolation would dull the signal too much |
 | Feedback graph in JUCE | Hand-written `DelayLine` + manual read/write, **not** `dsp::ProcessorChain` | `ProcessorChain` is strictly linear/feed-forward — it cannot express a loop |
 

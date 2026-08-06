@@ -30,8 +30,8 @@ Do not build the feedback loop with `juce::dsp::ProcessorChain` — it is strict
 
 | Parameter | Starting value | Notes |
 |---|---|---|
-| Pitch shift interval | +12 semitones | +7 semitones as a secondary preset |
-| Crossfade window | ~20–30 ms | Shorter = more audible zipper noise, longer = more smearing |
+| Pitch shift interval | Continuous parameter, −24 to +24 semitones; quick-select presets at +7/+12/+19 | One parameter, not two — presets just set the same value. Negative values trade the ascending shimmer character for a darker, descending tail; still the same shifter algorithm |
+| Crossfade window | ~20–30 ms at the +12 st default | Must be sized for the *slowest* read-rate the range allows (see pitfall below), not just the default |
 | Feedback gain | 0.6–0.85, strictly < 1.0 | Must account for shifter's own gain; tune by ear, never assume unity is safe |
 | Delay-line lengths | Empirically tuned, mutually-prime-ish | Reference Dattorro's (1997) and Freeverb's published tunings as a *starting point*, not a literal port |
 
@@ -45,6 +45,7 @@ Do not build the feedback loop with `juce::dsp::ProcessorChain` — it is strict
 | Mono collapse | Per-channel decorrelation: different delay lengths/modulation per channel, or quadrature-offset pitch shifting (see Airwindows `Galactic`) |
 | DC offset accumulation | DC-blocking filter at loop input or output |
 | Denormal CPU stalls on long decaying tails | `juce::ScopedNoDenormals` at the top of `processBlock` (already a hard rule in this skill) |
+| Bidirectional pitch range makes the grain window too short at extreme downward shifts | Read rate = 2^(semitones/12); at −24 st the read pointer advances at 0.25× the write rate, so it needs proportionally more buffer to cover the same real-time grain window. Size the pitch shifter's circular buffer for the *most negative* semitone value the parameter range allows, not for the +12 st default |
 
 ## Real-time safety (ties to this skill's Hard Rules)
 
