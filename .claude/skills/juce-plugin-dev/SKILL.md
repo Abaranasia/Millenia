@@ -24,6 +24,7 @@ Apply when writing or editing: `PluginProcessor`, `PluginEditor`, any DSP class,
 | Situation | Do this |
 |---|---|
 | Adding a new plugin parameter | Add it in one place, `createParameterLayout()`; give it a stable string ID that never changes across versions |
+| Renaming/removing a parameter ID, narrowing its range, or changing its type (float→choice etc.) on a parameter that has ever shipped | Breaking change once any preset/session/automation exists — it silently invalidates saved automation and preset values. Before doing it, confirm no preset relies on the old ID/range; if unsure, add the new one alongside instead of mutating in place |
 | DSP needs a buffer bigger than one block | Allocate/resize in `prepareToPlay`, never inside `processBlock` |
 | GUI thread needs data from the audio thread | `std::atomic` for scalars, `AbstractFifo`/ring buffer for block data — never a `juce::CriticalSection` on the audio thread |
 

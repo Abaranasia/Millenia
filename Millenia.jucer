@@ -2,7 +2,7 @@
 
 <JUCERPROJECT id="JWoctb" name="Millenia" projectType="audioplug" useAppConfig="0"
               addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" companyName="Altera"
-              companyWebsite="www.alteraorbe.com">
+              companyWebsite="www.alteraorbe.com" pluginFormats="buildVST3,buildAU,buildStandalone">
   <MAINGROUP id="yZeShd" name="Millenia">
     <GROUP id="{FFED4634-69E5-8D4C-1849-D7AC761AD94F}" name="Source">
       <FILE id="aSKNtM" name="PluginProcessor.cpp" compile="1" resource="0"
@@ -12,6 +12,28 @@
       <FILE id="yuo7Hd" name="PluginEditor.cpp" compile="1" resource="0"
             file="Source/PluginEditor.cpp"/>
       <FILE id="CDCs3F" name="PluginEditor.h" compile="0" resource="0" file="Source/PluginEditor.h"/>
+      <GROUP id="{A3E914B2-4C1A-4E2A-9C3D-1B7F6E2D5A80}" name="DSP">
+        <FILE id="dspSRE1" name="ShimmerReverbEngine.cpp" compile="1" resource="0"
+              file="Source/DSP/ShimmerReverbEngine.cpp"/>
+        <FILE id="dspSRE2" name="ShimmerReverbEngine.h" compile="0" resource="0"
+              file="Source/DSP/ShimmerReverbEngine.h"/>
+        <FILE id="dspDAT1" name="DattorroTank.cpp" compile="1" resource="0"
+              file="Source/DSP/DattorroTank.cpp"/>
+        <FILE id="dspDAT2" name="DattorroTank.h" compile="0" resource="0"
+              file="Source/DSP/DattorroTank.h"/>
+        <FILE id="dspPS1" name="PitchShifter.cpp" compile="1" resource="0"
+              file="Source/DSP/PitchShifter.cpp"/>
+        <FILE id="dspPS2" name="PitchShifter.h" compile="0" resource="0"
+              file="Source/DSP/PitchShifter.h"/>
+        <FILE id="dspDCB1" name="DCBlocker.h" compile="0" resource="0"
+              file="Source/DSP/DCBlocker.h"/>
+        <FILE id="dspLIM1" name="SafetyLimiter.h" compile="0" resource="0"
+              file="Source/DSP/SafetyLimiter.h"/>
+        <FILE id="dspSST1" name="ScratchSchroederTank.cpp" compile="1" resource="0"
+              file="Source/DSP/ScratchSchroederTank.cpp"/>
+        <FILE id="dspSST2" name="ScratchSchroederTank.h" compile="0" resource="0"
+              file="Source/DSP/ScratchSchroederTank.h"/>
+      </GROUP>
     </GROUP>
   </MAINGROUP>
   <MODULES>
@@ -26,6 +48,7 @@
     <MODULE id="juce_audio_utils" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_core" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_data_structures" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_dsp" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_events" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_graphics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_gui_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
@@ -48,6 +71,7 @@
         <MODULEPATH id="juce_audio_utils" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_core" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_data_structures" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_dsp" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_events" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_graphics" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_gui_basics" path="../../Projucer/modules"/>
