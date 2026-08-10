@@ -37,10 +37,42 @@ Running log of what's actually been built against [`shimmer-reverb-implementatio
   - Listening to it. Nobody has fed an impulse/transient through the Standalone or a DAW and confirmed the tail actually sounds dense and smooth with no clicks/crackling. This is Phase 1's actual "Definition of done" and it's still open.
   - Live sample-rate/block-size switching while the plugin is loaded in a host. Code review confirms `prepare()` always resizes from the live `spec` rather than a cached value, which is the correct *implementation*, but that's not the same as having actually watched it survive a live 44.1→48→96 kHz switch.
 
+## Phase 7 (partial) — test runner, pulled forward
+
+**Status: complete for the runner itself; test coverage is currently limited to `ScratchSchroederTank`.**
+
+The user asked to make sure tests get added "if needed" going forward. Rather than force-fit tests onto Phase 1's throwaway tank under time pressure, or silently defer everything to Phase 7 as originally planned, the test *runner* itself was pulled forward now so every DSP class from Phase 2 onward can get a test the moment it's implemented, instead of waiting for a dedicated infrastructure phase.
+
+### What was built
+
+- **`Tests/MilleniaTests.jucer`** (new) — a separate Projucer `consoleapp` project, sibling to the main plugin project. References `Source/DSP/*.cpp` by relative path (not copies), so tests always compile against the real, current DSP code. Module closure: `juce_core`, `juce_audio_basics`, `juce_audio_formats`, `juce_dsp` — verified against JUCE's own module dependency declarations (`juce_dsp` → `juce_audio_formats` → `juce_audio_basics` → `juce_core`), not guessed.
+- **`Tests/Source/Main.cpp`** (new) — a `juce::UnitTestRunner` subclass that logs to stdout (the default logs to the platform debugger output, invisible outside an attached debugger) and returns a non-zero process exit code on any failure, so the suite is checkable from a plain shell.
+- **`Tests/Source/ScratchSchroederTankTests.cpp`** (new) — two tests:
+  1. *Impulse response is bounded, decaying, and finite* — feeds a single-sample impulse, runs 40 blocks (~460ms), asserts every sample stays finite, every block's peak stays under a safety bound (10.0, well above what feedback coefficients `<1.0` should ever produce), and the tail decays past its peak rather than sustaining or growing.
+  2. *Tail settles to near-silence well before feedback decay would require it* — same excitation, run out to 300 blocks (~3.5s), asserts the final peak is below `1e-4`. (First draft of this test only fed silence to an already-silent, freshly-reset tank — trivially true and not really testing anything. Caught and fixed before treating this as done: it now excites the tank first, same as test 1, so it actually exercises the decay-to-silence property.)
+- **Build quirk hit and fixed**: Projucer only adds `JuceLibraryCode` and module paths to the include search path, not the folder of every individually-referenced source file — `#include "ScratchSchroederTank.h"` had to become `#include "../../Source/DSP/ScratchSchroederTank.h"` in the test file.
+
+### Verification
+
+Built `Tests/Builds/VisualStudio2026/MilleniaTests.sln` via MSBuild, ran the resulting `MilleniaTests.exe` directly (independently, twice — once after the initial implementation, once after strengthening test 2):
+
+```
+Starting tests in: ScratchSchroederTankTests / Impulse response is bounded, decaying, and finite...
+Completed tests in ScratchSchroederTankTests / Impulse response is bounded, decaying, and finite
+Starting tests in: ScratchSchroederTankTests / Tail settles to near-silence well before feedback decay would require it...
+Completed tests in ScratchSchroederTankTests / Tail settles to near-silence well before feedback decay would require it
+
+ALL TESTS PASSED (0 failures)
+```
+Exit code `0`. This closes the objective half of Phase 1's "impulse response" Definition of Done bullet (see above) — the subjective "does it actually sound good" half is still ear-only.
+
+**Note**: standing up this project also lazily initialized a `.codegraph/` index at the repo root (per this machine's CodeGraph policy for real project roots) — it ships its own self-contained `.gitignore` so the database file itself never gets committed, only the ignore rule does. Not something this pass did deliberately, just a side effect worth recording.
+
 ## Still open (carried into Phase 2+)
 
-- **Ear pass for Phase 1** (see above) — do this before or alongside starting Phase 2; if the scratch tank sounds wrong, better to know before the real Dattorro topology is built on the same JUCE plumbing.
+- **Ear pass for Phase 1** — do this before or alongside starting Phase 2; if the scratch tank sounds wrong, better to know before the real Dattorro topology is built on the same JUCE plumbing.
 - **Live sample-rate/block-size switch test for Phase 1** — same, quick to do once the ear pass happens.
+- **Add a `DattorroTankTests.cpp`/`PitchShifterTests.cpp` etc. to `Tests/` as each class lands in Phase 2+** — the runner now exists specifically so this is a small increment per class, not a project.
 - Phase 2 onward proceeds exactly as scoped in the implementation plan — nothing about this pass changed any of the "Committed, non-negotiable" decisions at the top of that doc.
 
 ## References
