@@ -9,6 +9,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "DSP/ScratchSchroederTank.h"
 
 //==============================================================================
 /**
@@ -55,5 +56,12 @@ public:
 
 private:
     //==============================================================================
+    // Phase 1 plumbing-validation tank — throwaway, removed in Phase 2.
+    ScratchSchroederTank scratchTank;
+
+    // Phase 1 plumbing-validation scratch buffer — pre-sized in
+    // prepareToPlay so processBlock never allocates. Removed in Phase 2.
+    juce::AudioBuffer<float> monoScratch;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)
 };

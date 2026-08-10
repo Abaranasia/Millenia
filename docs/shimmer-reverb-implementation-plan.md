@@ -13,7 +13,13 @@ This is the phased, checklist-level build plan for Millenia's shimmer reverb DSP
 
 ## Current state
 
-The project is the untouched Projucer default template. `PluginProcessor.h/.cpp` and `PluginEditor.h/.cpp` contain only the generated boilerplate — no DSP, no `AudioProcessorValueTreeState`, no custom classes, `processBlock` does nothing but clear unfilled output channels, and the editor just paints "Hello World!". `Millenia.jucer` declares an `audioplug` project with a standard module set (`juce_audio_basics`, `juce_audio_devices`, `juce_audio_formats`, `juce_audio_plugin_client`, `juce_audio_processors`, `juce_audio_processors_headless`, `juce_audio_utils`, `juce_core`, `juce_data_structures`, `juce_events`, `juce_graphics`, `juce_gui_basics`, `juce_gui_extra`) — **`juce_dsp` is not in the module list yet**, and the top-level `JUCERPROJECT` element has no explicit `pluginFormats`/channel-config attributes, meaning current build targets and I/O layout should be treated as unconfirmed defaults, not a deliberate decision. There is no test target of any kind in the project.
+*Updated after Phase 0 and Phase 1 — see [`reverb-dev-journal.md`](./reverb-dev-journal.md) for the full account.*
+
+Phase 0 is complete: `juce_dsp` is in `Millenia.jucer`'s `<MODULES>`/VS2026 `<MODULEPATHS>`, and `Source/DSP/` exists with `ShimmerReverbEngine`, `DattorroTank`, `PitchShifter`, `DCBlocker`, `SafetyLimiter` skeletons (all still empty stubs — Phase 2+ work). `pluginFormats="buildVST3,buildAU,buildStandalone"` and the stereo-in/stereo-out `BusesProperties` in `PluginProcessor`'s constructor have been reviewed and confirmed as this project's actual targets (VST3 + Standalone are what the VS2026 exporter builds; `buildAU` is declared but inert with no Xcode exporter configured, left in place in case one's added later) — no longer an unexamined default.
+
+Phase 1 is complete: `Source/DSP/ScratchSchroederTank.h/.cpp` (a mono Freeverb-style 6-comb + 2-allpass tank) exists and is wired into `PluginProcessor::processBlock` behind a `constexpr bool kPhase1ScratchTankTestMode = true` block — the plugin currently outputs this scratch tank's mono wet signal on every channel instead of a pass-through, by design, as a throwaway plumbing validation. `PluginEditor` is still the unmodified "Hello World!" template — GUI work starts at Phase 6. There is still no test-runner target in the project (Phase 7's job).
+
+**Still true from the original assessment:** no `AudioProcessorValueTreeState`, no real parameters, no DC blocker/limiter wired up yet, no test target of any kind.
 
 ## Phased plan
 
@@ -22,15 +28,15 @@ The project is the untouched Projucer default template. `PluginProcessor.h/.cpp`
 **Goal**: Make the project buildable as a DSP project (module + file skeleton) with zero behavior change, so every later phase is additive.
 
 Tasks:
-- [ ] Add the `juce_dsp` module to `Millenia.jucer` (`<MODULES>` list and `<MODULEPATH>` under the VS2026 exporter) — required for `juce::dsp::DelayLine`, `juce::dsp::IIR::Filter`, `juce::dsp::Oversampling`, `juce::dsp::ProcessSpec`.
-- [ ] Decide and set explicit plugin format targets and channel configuration on the `JUCERPROJECT` element (see Open Decisions) instead of leaving them at Projucer defaults.
-- [ ] Create the `Source/DSP/` subfolder and add empty class skeletons (declared but not implemented) to establish the file layout from the start: `ShimmerReverbEngine.h/.cpp`, `DattorroTank.h/.cpp`, `PitchShifter.h/.cpp`, `DCBlocker.h`, `SafetyLimiter.h`. (See "File/class structure proposal" below for what each owns.)
-- [ ] Add these new files to `Millenia.jucer`'s `<GROUP>` listing (or regenerate via Projucer) so they compile in VS2026.
-- [ ] Re-save the `.jucer` in Projucer and regenerate the Visual Studio 2026 project so the new module and files show up in the IDE.
+- [x] Add the `juce_dsp` module to `Millenia.jucer` (`<MODULES>` list and `<MODULEPATH>` under the VS2026 exporter) — required for `juce::dsp::DelayLine`, `juce::dsp::IIR::Filter`, `juce::dsp::Oversampling`, `juce::dsp::ProcessSpec`.
+- [x] Decide and set explicit plugin format targets and channel configuration on the `JUCERPROJECT` element (see Open Decisions) instead of leaving them at Projucer defaults. — Reviewed and ratified rather than changed: `pluginFormats="buildVST3,buildAU,buildStandalone"` with VST3+Standalone as the actual VS2026-exporter targets (AU is inert here, no Xcode exporter), stereo-in/stereo-out `BusesProperties` confirmed as the deliberate channel config for a reverb effect.
+- [x] Create the `Source/DSP/` subfolder and add empty class skeletons (declared but not implemented) to establish the file layout from the start: `ShimmerReverbEngine.h/.cpp`, `DattorroTank.h/.cpp`, `PitchShifter.h/.cpp`, `DCBlocker.h`, `SafetyLimiter.h`. (See "File/class structure proposal" below for what each owns.)
+- [x] Add these new files to `Millenia.jucer`'s `<GROUP>` listing (or regenerate via Projucer) so they compile in VS2026.
+- [x] Re-save the `.jucer` in Projucer and regenerate the Visual Studio 2026 project so the new module and files show up in the IDE.
 
 Definition of done:
-- Project builds and loads in a host (or Standalone) exactly as before — no audio behavior change, just new empty files compiling and linking.
-- `juce_dsp` headers are includable from `PluginProcessor.cpp` without error.
+- [x] Project builds and loads in a host (or Standalone) exactly as before — no audio behavior change, just new empty files compiling and linking. — confirmed via `MSBuild Millenia.sln` (Debug/x64): VST3 and Standalone both build clean.
+- [x] `juce_dsp` headers are includable from `PluginProcessor.cpp` without error. — confirmed by the same build.
 
 Pitfalls to watch: none DSP-specific yet; this phase exists specifically to avoid discovering the missing `juce_dsp` module mid-way through Phase 1 or 2.
 
@@ -39,17 +45,17 @@ Pitfalls to watch: none DSP-specific yet; this phase exists specifically to avoi
 **Goal**: Validate the JUCE DSP plumbing (delay lines, `prepareToPlay` sizing, real-time safety) with the simplest tank design, before spending effort on Dattorro's more complex topology.
 
 Tasks:
-- [ ] Implement a throwaway/reference mono comb+allpass tank (Freeverb-style: 4–8 parallel feedback comb filters + 2 series allpass filters) as a standalone class, e.g. `Source/DSP/ScratchSchroederTank.h`, *not* wired into the permanent `ShimmerReverbEngine` — this is a plumbing test, not final product code.
-- [ ] Use `juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear>` for the comb delay lines (linear interpolation is fine here — this stage never does fractional-rate pitch-shift reads, so Lagrange3rd isn't required yet).
-- [ ] Size all delay lines via `prepare (juce::dsp::ProcessSpec)` inside `MilleniaAudioProcessor::prepareToPlay`, never inside `processBlock`.
-- [ ] Wire this scratch tank into `processBlock` behind a temporary "test mode" so it's audible end-to-end (mono in, wet mono tail out) through a DAW or the Standalone target.
-- [ ] Add `juce::ScopedNoDenormals` at the top of `processBlock` (should already exist from the template — confirm it's still there once real DSP is added).
-- [ ] Confirm `prepareToPlay` is correctly re-invoked and re-sizes buffers on sample-rate/block-size changes (test by changing the host's sample rate/block size while the plugin is loaded).
+- [x] Implement a throwaway/reference mono comb+allpass tank (Freeverb-style: 4–8 parallel feedback comb filters + 2 series allpass filters) as a standalone class, e.g. `Source/DSP/ScratchSchroederTank.h`, *not* wired into the permanent `ShimmerReverbEngine` — this is a plumbing test, not final product code. — 6 combs (`35.3/36.7/33.9/30.5/28.9/25.3` ms) + 2 series allpasses (`5.0/1.7` ms), classic Freeverb difference equations.
+- [x] Use `juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear>` for the comb delay lines (linear interpolation is fine here — this stage never does fractional-rate pitch-shift reads, so Lagrange3rd isn't required yet).
+- [x] Size all delay lines via `prepare (juce::dsp::ProcessSpec)` inside `MilleniaAudioProcessor::prepareToPlay`, never inside `processBlock`.
+- [x] Wire this scratch tank into `processBlock` behind a temporary "test mode" so it's audible end-to-end (mono in, wet mono tail out) through a DAW or the Standalone target. — wired and builds; **not yet listened to** (see Definition of done below).
+- [x] Add `juce::ScopedNoDenormals` at the top of `processBlock` (should already exist from the template — confirm it's still there once real DSP is added). — confirmed present.
+- [ ] Confirm `prepareToPlay` is correctly re-invoked and re-sizes buffers on sample-rate/block-size changes (test by changing the host's sample rate/block size while the plugin is loaded). — **not done.** This requires an interactive DAW/Standalone session; code review confirms `prepare()` always resizes from the live `spec.sampleRate`/`maximumBlockSize` rather than a cached value, but that's not a substitute for the actual live test.
 
 Definition of done:
-- Feeding an impulse or short transient produces an audibly dense, smooth decaying tail with no crackling, denormal stalls, or per-block clicks.
-- Changing host sample rate (e.g. 44.1 kHz → 48 kHz → 96 kHz) and block size does not crash or corrupt the tail.
-- No allocation occurs inside `processBlock` (verify by inspection — this is also asserted structurally in Phase 7's testing pass).
+- [ ] Feeding an impulse or short transient produces an audibly dense, smooth decaying tail with no crackling, denormal stalls, or per-block clicks. — **needs a human ear pass**; not verified here.
+- [ ] Changing host sample rate (e.g. 44.1 kHz → 48 kHz → 96 kHz) and block size does not crash or corrupt the tail. — **needs a live DAW/Standalone session**; not verified here.
+- [x] No allocation occurs inside `processBlock` (verify by inspection — this is also asserted structurally in Phase 7's testing pass). — verified by code review: `monoScratch` and every `DelayLine` are sized only in `prepareToPlay`/`prepare()`; `processBlock`/`process()` only call `popSample`/`pushSample`/buffer read-write helpers.
 
 Pitfalls (`shimmer-reverb-concepts.md` §Known pitfalls, `shimmer-reverb-architecture.md` §Real-time safety):
 - Denormal CPU stalls on long decaying tails — `ScopedNoDenormals` is mandatory here, not optional, because this is the first place a genuine feedback tail exists.
@@ -234,8 +240,8 @@ General rule from the skill (applied throughout, not just Phase 7): test DSP cor
 
 These are genuinely unresolved by the three source docs; flagging them honestly rather than inventing false certainty:
 
-- **`juce_dsp` module is currently absent from `Millenia.jucer`.** This is a fact, not a decision — it must be added in Phase 0 or nothing in Phases 1–4 compiles.
-- **Plugin formats and channel configuration are not explicit in the `.jucer` file.** The `JUCERPROJECT` element has no visible `pluginFormats` attribute, so current build targets (VST3? AU? Standalone?) and whether mono input is supported are Projucer defaults, not a deliberate choice. Someone should open the project in Projucer (or explicitly edit the XML) and set these intentionally before Phase 0 is "done."
+- ~~**`juce_dsp` module is currently absent from `Millenia.jucer`.**~~ **Resolved in Phase 0.** Module + VS2026 `<MODULEPATH>` added, confirmed by a clean build.
+- ~~**Plugin formats and channel configuration are not explicit in the `.jucer` file.**~~ **Resolved in Phase 0** (by review, not by editing): `pluginFormats="buildVST3,buildAU,buildStandalone"` — VST3+Standalone are what the VS2026 exporter actually produces; `buildAU` is harmless/inert without an Xcode exporter and was deliberately left rather than stripped, in case a macOS exporter is added later. Channel config is the JUCE template's stereo-in/stereo-out `BusesProperties`, confirmed as the intended config for a reverb effect (not touched).
 - **Exact Dattorro delay-line lengths.** Both source docs are explicit that Dattorro's (1997) and Freeverb's published values are a *starting point, not a literal port*. The actual shipped lengths need empirical tuning during Phase 2 against this project's target decay character — no one has picked final numbers yet.
 - **Exact safety limiter design.** The docs specify "a soft-clip/limiter safety net," not a specific algorithm (simple `tanh`/`std::clamp` soft-clip vs. a proper lookahead peak limiter vs. something else). This needs a decision during Phase 4, and it affects both CPU cost and how audibly it announces itself when it engages.
 - **Decorrelation method.** `shimmer-reverb-concepts.md` explicitly presents this as an "or": different delay lengths/modulation per channel, *or* quadrature-offset pitch shifting (Airwindows `Galactic`-style). The docs don't pick one — Phase 4 needs a deliberate choice, ideally informed by a quick A/B rather than defaulting to whichever is easier to code.
@@ -250,3 +256,4 @@ These are genuinely unresolved by the three source docs; flagging them honestly 
 - [`../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md`](../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md)
 - [`shimmer-reverb-open-source-survey.md`](./shimmer-reverb-open-source-survey.md)
 - [`reverb-design-research-notes.md`](./reverb-design-research-notes.md)
+- [`reverb-dev-journal.md`](./reverb-dev-journal.md) — running log of what's actually been built against this plan, phase by phase

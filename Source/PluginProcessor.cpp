@@ -95,6 +95,13 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
+
+    // Phase 1 plumbing validation — remove in Phase 2.
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
+    scratchTank.prepare (spec);
+    scratchTank.reset();
+
+    monoScratch.setSize (1, samplesPerBlock);
 }
 
 void MilleniaAudioProcessor::releaseResources()
@@ -131,6 +138,9 @@ bool MilleniaAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts)
 
 void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    // Phase 1 plumbing validation — remove this whole block in Phase 2.
+    constexpr bool kPhase1ScratchTankTestMode = true;
+
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -143,6 +153,40 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
+
+    if constexpr (kPhase1ScratchTankTestMode)
+    {
+        const auto numSamples = buffer.getNumSamples();
+
+        // Sum (or pass through) the input to mono in the pre-sized scratch buffer.
+        auto* monoData = monoScratch.getWritePointer (0);
+
+        if (totalNumInputChannels <= 1)
+        {
+            auto* inData = totalNumInputChannels == 1 ? buffer.getReadPointer (0) : nullptr;
+
+            for (int i = 0; i < numSamples; ++i)
+                monoData[i] = inData != nullptr ? inData[i] : 0.0f;
+        }
+        else
+        {
+            monoScratch.copyFrom (0, 0, buffer, 0, 0, numSamples);
+
+            for (int channel = 1; channel < totalNumInputChannels; ++channel)
+                monoScratch.addFrom (0, 0, buffer, channel, 0, numSamples);
+
+            monoScratch.applyGain (0, 0, numSamples, 1.0f / (float) totalNumInputChannels);
+        }
+
+        juce::dsp::AudioBlock<float> monoBlock (monoScratch);
+        monoBlock = monoBlock.getSubBlock (0, (size_t) numSamples);
+        scratchTank.process (monoBlock);
+
+        for (int channel = 0; channel < totalNumOutputChannels; ++channel)
+            buffer.copyFrom (channel, 0, monoScratch, 0, 0, numSamples);
+
+        return;
+    }
 
     // This is the place where you'd normally do the guts of your plugin's
     // audio processing...
