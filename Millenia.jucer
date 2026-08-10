@@ -29,6 +29,10 @@
               file="Source/DSP/DCBlocker.h"/>
         <FILE id="dspLIM1" name="SafetyLimiter.h" compile="0" resource="0"
               file="Source/DSP/SafetyLimiter.h"/>
+        <FILE id="dspSST1" name="ScratchSchroederTank.cpp" compile="1" resource="0"
+              file="Source/DSP/ScratchSchroederTank.cpp"/>
+        <FILE id="dspSST2" name="ScratchSchroederTank.h" compile="0" resource="0"
+              file="Source/DSP/ScratchSchroederTank.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>

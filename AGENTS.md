@@ -14,3 +14,5 @@ Project-scoped skills under `.claude/skills/`, applied automatically by trigger 
 - [.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md](.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md) — dense implementation reference (topology, JUCE class mapping, pitfalls) linked from `juce-plugin-dev`
 - [troubleshooting/](troubleshooting/README.md) — solved-bug knowledge base (schema in `.claude/skills/troubleshooting-docs/schema.yaml`)
 - [docs/reference/](docs/reference/README.md) — external design/DSP docs from comparable reverb plugins (LushVerb, FlutterVerb), imported for comparison against our own shimmer reverb design
+- [docs/shimmer-reverb-implementation-plan.md](docs/shimmer-reverb-implementation-plan.md) — phased, checklist-level build plan for the shimmer reverb DSP and plugin shell
+- [docs/reverb-dev-journal.md](docs/reverb-dev-journal.md) — running log of what's actually been built against the implementation plan, phase by phase
