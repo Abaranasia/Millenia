@@ -9,7 +9,6 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "DSP/ScratchSchroederTank.h"
 #include "DSP/DattorroTank.h"
 
 //==============================================================================
@@ -57,16 +56,11 @@ public:
 
 private:
     //==============================================================================
-    // Phase 1 plumbing-validation tank — kept alongside dattorroTank for A/B
-    // comparison until a human confirms the Dattorro tank sounds right by
-    // ear; not removed yet (see docs/shimmer-reverb-implementation-plan.md).
-    ScratchSchroederTank scratchTank;
-
     // Phase 2 committed topology.
     DattorroTank dattorroTank;
 
-    // Mono scratch buffer shared by both test-mode tanks above — pre-sized
-    // in prepareToPlay so processBlock never allocates.
+    // Mono scratch buffer for the tank above — pre-sized in prepareToPlay so
+    // processBlock never allocates.
     juce::AudioBuffer<float> monoScratch;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)

@@ -17,13 +17,13 @@ This is the phased, checklist-level build plan for Millenia's shimmer reverb DSP
 
 Phase 0 is complete: `juce_dsp` is in `Millenia.jucer`'s `<MODULES>`/VS2026 `<MODULEPATHS>`, and `Source/DSP/` exists with `ShimmerReverbEngine`, `DattorroTank`, `PitchShifter`, `DCBlocker`, `SafetyLimiter` skeletons (all still empty stubs — Phase 2+ work). `pluginFormats="buildVST3,buildAU,buildStandalone"` and the stereo-in/stereo-out `BusesProperties` in `PluginProcessor`'s constructor have been reviewed and confirmed as this project's actual targets (VST3 + Standalone are what the VS2026 exporter builds; `buildAU` is declared but inert with no Xcode exporter configured, left in place in case one's added later) — no longer an unexamined default.
 
-Phase 1 is fully complete, including its live-session items: `Source/DSP/ScratchSchroederTank.h/.cpp` (a mono Freeverb-style 6-comb + 2-allpass tank) exists and is wired into `PluginProcessor::processBlock`. A live Standalone session confirmed sample-rate changes (44.1/48/96 kHz) don't crash or corrupt the tail, and mic input through the tank has no clicks/crackling.
+Phase 1 is fully complete: it built and validated `ScratchSchroederTank`, a mono Freeverb-style 6-comb + 2-allpass throwaway tank, confirming the DSP plumbing (delay lines, `prepareToPlay` sizing, real-time safety) and that sample-rate changes (44.1/48/96 kHz) don't crash or corrupt the tail. That tank has since been removed as part of closing Phase 2 (see below) — it was always scoped as temporary.
 
-Phase 2 is in progress: `Source/DSP/DattorroTank.h/.cpp` implements the committed Dattorro plate topology (4-stage input diffuser, two cross-feeding tank branches with one-pole damping filters in the feedback path, figure-eight cross-feed) and is now wired into `processBlock` as the default (`kPhase2DattorroTankTestMode = true`, `kPhase1ScratchTankTestMode = false`) — the scratch tank stays available for A/B comparison, not yet removed. Builds clean. **Still needed to close Phase 2**: a live ear pass confirming the Dattorro tank actually sounds like a plate reverb, then removing the Phase 1 scratch tank. A real bug was caught and fixed during implementation: `shimmer-reverb-architecture.md` originally specified the wrong JUCE primitive (`IIR::Filter::makeAllPass()`, a frequency-domain biquad) for the diffusion/tank allpass stages; corrected to the delay-based Schroeder allpass Dattorro's design actually requires.
+Phase 2 is complete: `Source/DSP/DattorroTank.h/.cpp` implements the committed Dattorro plate topology (4-stage input diffuser, two cross-feeding tank branches with one-pole leaky-integrator damping, figure-eight cross-feed, and the algorithm's real 7-tap output formula) and is the sole reverb path wired into `processBlock` — the Phase 1 `ScratchSchroederTank` scratch tank has been fully removed (files, wiring, tests, `.jucer` references). Confirmed sounding like a real plate reverb across two independent live Standalone sessions with different audio sources. Three real bugs were caught and fixed along the way (wrong allpass formula causing an audio blowup, damping ~600x too aggressive, a single dominant output tap making it sound like a delay instead of a reverb) — see Phase 2's section below for details. A JUCE-framework-only Standalone crash (audio device hot-swap race, unrelated to this project's DSP) was also found, root-caused, and documented rather than blocking the phase.
 
-`PluginEditor` is still the unmodified "Hello World!" template — GUI work starts at Phase 6.
+`PluginEditor` is still the unmodified "Hello World!" template — GUI work starts at Phase 6. Phase 3 (pitch shifter insertion) is next.
 
-**Still true from the original assessment:** no `AudioProcessorValueTreeState`, no real parameters, no DC blocker/limiter wired up yet, no test target of any kind.
+**Still true from the original assessment:** no `AudioProcessorValueTreeState`, no real parameters, no DC blocker/limiter wired up yet.
 
 ## Phased plan
 
@@ -73,17 +73,23 @@ Pitfalls (`shimmer-reverb-concepts.md` §Known pitfalls, `shimmer-reverb-archite
 Tasks:
 - [x] Implement `Source/DSP/DattorroTank.h/.cpp`: input diffuser as 4 series hand-rolled Schroeder allpass stages (`DelayLine` + manual feedback/feedforward — **not** `IIR::Filter::makeAllPass()`; the architecture doc's original mapping table was wrong on this point and has been corrected, see below), feeding two cross-feeding delay/allpass "tank" branches (A and B) with damping filters in the feedback path.
 - [x] Use `juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>` for every delay line inside the tank (not `Linear`).
-- [x] Implement the damping filter as `juce::dsp::IIR::Filter<float>` configured as a one-pole low-pass (`makeFirstOrderLowPass`), placed inside each feedback branch (between `delay1` and `allpass2`), not just at the wet output.
-- [x] Choose starting delay-line lengths from Dattorro's (1997) published tank tunings as a *starting point* (converted from the paper's 29761 Hz reference rate) — empirical adjustment for this project's target decay character is still open, deferred to a live ear pass.
-- [ ] Remove or archive the Phase 1 scratch tank once the Dattorro tank is audibly working; do not ship both. — **not yet**: both tanks stay wired (`kPhase1ScratchTankTestMode = false`, `kPhase2DattorroTankTestMode = true`, easy to flip back for A/B) until a human confirms the Dattorro tank sounds right in a live Standalone session.
+- [x] Implement the damping filter as a one-pole low-pass, placed inside each feedback branch (between `delay1` and `allpass2`), not just at the wet output. — **not** `juce::dsp::IIR::Filter` as originally planned: verified against a reference Dattorro port and reimplemented as the algorithm's actual plain one-pole leaky integrator (`y[k] = damping*y[k-1] + (1-damping)*x[k]`, `damping ≈ 0.0005`); the `IIR::Filter::makeFirstOrderLowPass` version was a real bug, ~600x too aggressive (see corrections below).
+- [x] Choose starting delay-line lengths from Dattorro's (1997) published tank tunings as a *starting point* (converted from the paper's 29761 Hz reference rate) — cross-checked against a reference implementation (louiscouka.com/code/datorro-reverb-implementation) using the exact same values, confirming fidelity to the original algorithm.
+- [x] Remove or archive the Phase 1 scratch tank once the Dattorro tank is audibly working; do not ship both. — **done**: `ScratchSchroederTank.h/.cpp`, its `PluginProcessor` wiring, its unit test, and its `.jucer` file references are fully removed. `DattorroTank` is now the sole, permanent tank; `processBlock` no longer has a test-mode toggle.
 - [x] Confirm stereo handling at this stage is at minimum "not broken" (mono-summed input into one tank) — true stereo decorrelation is deferred to Phase 4.
 
-**Correction made during implementation**: `shimmer-reverb-architecture.md`'s JUCE class mapping table originally specified `IIR::Filter<float>` + `makeAllPass()` for the diffusion/tank allpass stages. That's a frequency-domain biquad allpass (phase shift only, no meaningful time delay) and cannot produce Dattorro's diffusion, which structurally requires a delay-based Schroeder allpass (100–900 sample delay with feedback/feedforward) — the same structure `ScratchSchroederTank::processAllpass` already used in Phase 1. The architecture doc has been corrected; `DattorroTank` implements the correct hand-rolled version.
+**Corrections made during implementation** (all verified against a reference Dattorro port whose delay lengths/coefficients match this class exactly — louiscouka.com/code/datorro-reverb-implementation):
+1. `shimmer-reverb-architecture.md`'s JUCE class mapping table originally specified `IIR::Filter<float>` + `makeAllPass()` for the diffusion/tank allpass stages. That's a frequency-domain biquad allpass (phase shift only, no meaningful time delay) and cannot produce Dattorro's diffusion, which structurally requires a delay-based Schroeder allpass (100–900 sample delay with feedback/feedforward). The architecture doc has been corrected; `DattorroTank` implements the correct hand-rolled version.
+2. The initial hand-rolled allpass formula (`-input + bufOut`, copied from Phase 1's `ScratchSchroederTank`) is only a true unity-gain allpass at one specific feedback value; at Dattorro's actual tank feedback values (−0.7/0.5) it amplified certain frequencies inside the recirculating loop, causing a real audio blowup after ~2s of live input. Fixed with the correct one-multiply Schroeder allpass form.
+3. The damping stage used the wrong JUCE primitive entirely (see task list above) — over 600x more aggressive than the algorithm's actual value, making the tail sound like discrete dull "thuds" instead of a bright continuous wash.
+4. The output was originally a single dominant tap per branch (the full recirculating chain output) plus minor extra taps — even after fixing #2 and #3, this still sounded like an echo/delay, not a reverb, because one tap dominated the mix. Replaced with the algorithm's real output formula: seven roughly-equal-weight taps from both branches' delay lines, alternating signs, no single dominant tap — this is what actually made it sound like a plate reverb rather than a repeating delay.
 
 Definition of done:
-- [ ] An impulse response through the Dattorro tank sounds like a plate reverb: smooth, dense, no audible flutter/metallic ringing, tail decays cleanly to silence. — **needs a live ear pass** (Standalone session), not done yet.
-- [ ] Coefficient changes to the allpass filters (if exposed while tuning) don't produce audible clicks — not yet tested; smoothing decision deferred to Phase 5 as planned.
-- [x] No `juce::dsp::ProcessorChain` is used anywhere in the loop-carrying path — confirmed by code review: the whole tank is hand-written `DelayLine`/`IIR::Filter` with manual read/write, no `ProcessorChain`.
+- [x] An impulse response through the Dattorro tank sounds like a plate reverb: smooth, dense, no audible flutter/metallic ringing, tail decays cleanly to silence. — confirmed in two separate live Standalone sessions with independent audio sources (live mic, and a loopback-routed music source via Stereo Mix + a Focusrite monitoring output), after the corrections above landed. Described live as "sounds with a deep distant reverb."
+- [x] Coefficient changes to the allpass filters (if exposed while tuning) don't produce audible clicks — N/A for Phase 2: no coefficients are modulated or changed at runtime yet (`setDamping`/`setDecay` exist as plain setters but aren't driven by anything live); real-time coefficient smoothing remains Phase 5's job as planned.
+- [x] No `juce::dsp::ProcessorChain` is used anywhere in the loop-carrying path — confirmed by code review: the whole tank is hand-written `DelayLine` with manual read/write, no `ProcessorChain`.
+
+**Also found and resolved during this phase (not a Phase 2 DSP bug, documented for the record)**: two Standalone crashes (`0xc0000005`) while testing, root-caused via crash-dump analysis (`cdb.exe`/WinDbg) to a JUCE 9.0.0 `AudioProcessorPlayer`/`AudioDeviceManager` race condition triggered by switching the Standalone's audio device live while audio was streaming. Neither crash's stack touched any Millenia code — confirmed framework-only, Standalone-wrapper-only (a real VST3/AU host never triggers this path), and not a blocker for this phase. See `troubleshooting/runtime-issues/standalone-audio-device-switch-crash-20260811.md` and `troubleshooting/patterns/common-solutions.md`.
 
 Pitfalls (`shimmer-reverb-architecture.md` §Pitfalls, §JUCE class mapping):
 - `juce::dsp::Reverb` must not be used or referenced anywhere — it's closed/opaque with no injection point (confirmed dead end per the architecture doc's cited forum thread).
@@ -207,23 +213,23 @@ Source/
                                  limiter, and DC blocker into the full signal path. Exposes
                                  prepare(ProcessSpec) and process(AudioBlock<float>&); this is the
                                  only DSP class PluginProcessor talks to directly.
-    DattorroTank.h/.cpp          Input diffuser (4x series allpass) + two cross-feeding tank branches
-                                 with damping. Owns its own DelayLine<Lagrange3rd> and
-                                 IIR::Filter instances; exposes tunable points (delay lengths,
-                                 damping cutoff) as plain setters, not parameters itself.
+    DattorroTank.h/.cpp          Input diffuser (4x series hand-rolled Schroeder allpass) + two
+                                 cross-feeding tank branches with damping. Owns its own
+                                 DelayLine<Lagrange3rd> instances; damping is a plain one-pole
+                                 leaky integrator, not an IIR::Filter. Exposes tunable points
+                                 (decay gain, damping coefficient) as plain setters, not
+                                 parameters itself. The sole tank in the signal path as of
+                                 Phase 2 completion — Phase 1's throwaway ScratchSchroederTank
+                                 has been removed.
     PitchShifter.h/.cpp          Hand-rolled dual-delay-line crossfade shifter: circular buffer,
                                  two read pointers, interpolator(s), crossfade logic. Takes a
                                  pitch-ratio (or semitone) value per block; owns no parameter
                                  knowledge itself.
     DCBlocker.h                  One-pole DC-blocking filter, used at the feedback loop boundary.
     SafetyLimiter.h/.cpp          Soft-clip/limiter safety net placed inside the feedback loop.
-
-  (Phase 1 only, removed by Phase 2 completion)
-    ScratchSchroederTank.h        Throwaway mono comb+allpass tank used solely to validate DSP
-                                 plumbing before Dattorro is built; not part of the shipped signal path.
 ```
 
-This keeps every class that participates in the feedback loop hand-written and explicit (no `ProcessorChain` anywhere under `DSP/`), matches the "PluginProcessor stays thin" convention implied by the `juce-plugin-dev` skill's parameter/state rules, and gives the test runner (`Tests/MilleniaTests.jucer`, standing since Phase 1 — see Phase 7's task list and "Risks / open decisions") a natural one-class-per-file target for unit tests (`PitchShifterTests.cpp`, `DattorroTankTests.cpp`, etc., one per `DSP/` class, alongside the existing `ScratchSchroederTankTests.cpp`).
+This keeps every class that participates in the feedback loop hand-written and explicit (no `ProcessorChain` anywhere under `DSP/`), matches the "PluginProcessor stays thin" convention implied by the `juce-plugin-dev` skill's parameter/state rules, and gives the test runner (`Tests/MilleniaTests.jucer`, standing since Phase 1 — see Phase 7's task list and "Risks / open decisions") a natural one-class-per-file target for unit tests (`PitchShifterTests.cpp`, etc., one per `DSP/` class, alongside the existing `DattorroTankTests.cpp`).
 
 ## Testing strategy
 

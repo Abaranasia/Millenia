@@ -96,12 +96,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
 
-    // Both test-mode tanks stay prepared so flipping kPhase2DattorroTankTestMode
-    // back to the scratch tank for A/B comparison stays trivial.
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
-    scratchTank.prepare (spec);
-    scratchTank.reset();
-
     dattorroTank.prepare (spec);
     dattorroTank.reset();
 
@@ -142,13 +137,6 @@ bool MilleniaAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts)
 
 void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    // Phase 2 committed topology now runs by default; the Phase 1 scratch
-    // tank stays wired for A/B comparison until a human confirms the
-    // Dattorro tank sounds right by ear (see
-    // docs/shimmer-reverb-implementation-plan.md, Phase 2).
-    constexpr bool kPhase1ScratchTankTestMode = false;
-    constexpr bool kPhase2DattorroTankTestMode = true;
-
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -162,56 +150,39 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    if constexpr (kPhase1ScratchTankTestMode || kPhase2DattorroTankTestMode)
+    // Phase 2 committed topology: the Dattorro tank is the sole, permanent
+    // reverb path (see docs/shimmer-reverb-implementation-plan.md, Phase 2).
+    // This is still 100% wet with no dry/wet mix yet — Phase 5 adds real
+    // parameters, including mix.
+    const auto numSamples = buffer.getNumSamples();
+
+    // Sum (or pass through) the input to mono in the pre-sized scratch buffer.
+    auto* monoData = monoScratch.getWritePointer (0);
+
+    if (totalNumInputChannels <= 1)
     {
-        const auto numSamples = buffer.getNumSamples();
+        auto* inData = totalNumInputChannels == 1 ? buffer.getReadPointer (0) : nullptr;
 
-        // Sum (or pass through) the input to mono in the pre-sized scratch buffer.
-        auto* monoData = monoScratch.getWritePointer (0);
+        for (int i = 0; i < numSamples; ++i)
+            monoData[i] = inData != nullptr ? inData[i] : 0.0f;
+    }
+    else
+    {
+        monoScratch.copyFrom (0, 0, buffer, 0, 0, numSamples);
 
-        if (totalNumInputChannels <= 1)
-        {
-            auto* inData = totalNumInputChannels == 1 ? buffer.getReadPointer (0) : nullptr;
+        for (int channel = 1; channel < totalNumInputChannels; ++channel)
+            monoScratch.addFrom (0, 0, buffer, channel, 0, numSamples);
 
-            for (int i = 0; i < numSamples; ++i)
-                monoData[i] = inData != nullptr ? inData[i] : 0.0f;
-        }
-        else
-        {
-            monoScratch.copyFrom (0, 0, buffer, 0, 0, numSamples);
-
-            for (int channel = 1; channel < totalNumInputChannels; ++channel)
-                monoScratch.addFrom (0, 0, buffer, channel, 0, numSamples);
-
-            monoScratch.applyGain (0, 0, numSamples, 1.0f / (float) totalNumInputChannels);
-        }
-
-        juce::dsp::AudioBlock<float> monoBlock (monoScratch);
-        monoBlock = monoBlock.getSubBlock (0, (size_t) numSamples);
-
-        if constexpr (kPhase2DattorroTankTestMode)
-            dattorroTank.process (monoBlock);
-        else
-            scratchTank.process (monoBlock);
-
-        for (int channel = 0; channel < totalNumOutputChannels; ++channel)
-            buffer.copyFrom (channel, 0, monoScratch, 0, 0, numSamples);
-
-        return;
+        monoScratch.applyGain (0, 0, numSamples, 1.0f / (float) totalNumInputChannels);
     }
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
+    juce::dsp::AudioBlock<float> monoBlock (monoScratch);
+    monoBlock = monoBlock.getSubBlock (0, (size_t) numSamples);
 
-        // ..do something to the data...
-    }
+    dattorroTank.process (monoBlock);
+
+    for (int channel = 0; channel < totalNumOutputChannels; ++channel)
+        buffer.copyFrom (channel, 0, monoScratch, 0, 0, numSamples);
 }
 
 //==============================================================================
