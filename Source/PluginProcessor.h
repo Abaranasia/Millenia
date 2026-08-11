@@ -9,6 +9,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "DSP/DattorroTank.h"
 
 //==============================================================================
 /**
@@ -55,5 +56,12 @@ public:
 
 private:
     //==============================================================================
+    // Phase 2 committed topology.
+    DattorroTank dattorroTank;
+
+    // Mono scratch buffer for the tank above — pre-sized in prepareToPlay so
+    // processBlock never allocates.
+    juce::AudioBuffer<float> monoScratch;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)
 };
