@@ -96,10 +96,14 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
 
-    // Phase 1 plumbing validation — remove in Phase 2.
+    // Both test-mode tanks stay prepared so flipping kPhase2DattorroTankTestMode
+    // back to the scratch tank for A/B comparison stays trivial.
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
     scratchTank.prepare (spec);
     scratchTank.reset();
+
+    dattorroTank.prepare (spec);
+    dattorroTank.reset();
 
     monoScratch.setSize (1, samplesPerBlock);
 }
@@ -138,8 +142,12 @@ bool MilleniaAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts)
 
 void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    // Phase 1 plumbing validation — remove this whole block in Phase 2.
-    constexpr bool kPhase1ScratchTankTestMode = true;
+    // Phase 2 committed topology now runs by default; the Phase 1 scratch
+    // tank stays wired for A/B comparison until a human confirms the
+    // Dattorro tank sounds right by ear (see
+    // docs/shimmer-reverb-implementation-plan.md, Phase 2).
+    constexpr bool kPhase1ScratchTankTestMode = false;
+    constexpr bool kPhase2DattorroTankTestMode = true;
 
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
@@ -154,7 +162,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    if constexpr (kPhase1ScratchTankTestMode)
+    if constexpr (kPhase1ScratchTankTestMode || kPhase2DattorroTankTestMode)
     {
         const auto numSamples = buffer.getNumSamples();
 
@@ -180,7 +188,11 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
         juce::dsp::AudioBlock<float> monoBlock (monoScratch);
         monoBlock = monoBlock.getSubBlock (0, (size_t) numSamples);
-        scratchTank.process (monoBlock);
+
+        if constexpr (kPhase2DattorroTankTestMode)
+            dattorroTank.process (monoBlock);
+        else
+            scratchTank.process (monoBlock);
 
         for (int channel = 0; channel < totalNumOutputChannels; ++channel)
             buffer.copyFrom (channel, 0, monoScratch, 0, 0, numSamples);

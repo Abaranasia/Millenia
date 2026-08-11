@@ -8,11 +8,17 @@
       <FILE id="tstMain" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
       <FILE id="tstSSTT" name="ScratchSchroederTankTests.cpp" compile="1"
             resource="0" file="Source/ScratchSchroederTankTests.cpp"/>
+      <FILE id="tstDTT" name="DattorroTankTests.cpp" compile="1"
+            resource="0" file="Source/DattorroTankTests.cpp"/>
       <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
         <FILE id="tstSSTC" name="ScratchSchroederTank.cpp" compile="1" resource="0"
               file="../Source/DSP/ScratchSchroederTank.cpp"/>
         <FILE id="tstSSTH" name="ScratchSchroederTank.h" compile="0" resource="0"
               file="../Source/DSP/ScratchSchroederTank.h"/>
+        <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
+              file="../Source/DSP/DattorroTank.cpp"/>
+        <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0"
+              file="../Source/DSP/DattorroTank.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
