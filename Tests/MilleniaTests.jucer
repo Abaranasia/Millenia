@@ -12,6 +12,10 @@
             resource="0" file="Source/PitchShifterTests.cpp"/>
       <FILE id="tstSRT" name="ShimmerReverbEngineTests.cpp" compile="1"
             resource="0" file="Source/ShimmerReverbEngineTests.cpp"/>
+      <FILE id="tstDCT" name="DCBlockerTests.cpp" compile="1"
+            resource="0" file="Source/DCBlockerTests.cpp"/>
+      <FILE id="tstLIT" name="SafetyLimiterTests.cpp" compile="1"
+            resource="0" file="Source/SafetyLimiterTests.cpp"/>
       <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
         <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
               file="../Source/DSP/DattorroTank.cpp"/>
@@ -25,6 +29,10 @@
               file="../Source/DSP/ShimmerReverbEngine.cpp"/>
         <FILE id="tstSRH" name="ShimmerReverbEngine.h" compile="0" resource="0"
               file="../Source/DSP/ShimmerReverbEngine.h"/>
+        <FILE id="tstDCH" name="DCBlocker.h" compile="0" resource="0"
+              file="../Source/DSP/DCBlocker.h"/>
+        <FILE id="tstLIC" name="SafetyLimiter.cpp" compile="1" resource="0"
+              file="../Source/DSP/SafetyLimiter.cpp"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
