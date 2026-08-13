@@ -9,7 +9,7 @@
 #pragma once
 
 #include <JuceHeader.h>
-#include "DSP/DattorroTank.h"
+#include "DSP/ShimmerReverbEngine.h"
 
 //==============================================================================
 /**
@@ -56,12 +56,10 @@ public:
 
 private:
     //==============================================================================
-    // Phase 2 committed topology.
-    DattorroTank dattorroTank;
-
-    // Mono scratch buffer for the tank above — pre-sized in prepareToPlay so
-    // processBlock never allocates.
-    juce::AudioBuffer<float> monoScratch;
+    // Phase 3 committed topology: the shimmer engine owns the tank, the
+    // pitch shifter, and its own mono scratch buffer internally.
+    // PluginProcessor just forwards prepare/process calls.
+    ShimmerReverbEngine shimmerReverbEngine;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)
 };
