@@ -7,6 +7,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
 {
     tank.prepare (spec);
     shifter.prepare (spec);
+    feedbackDcBlocker.prepare (spec);
 
     shifter.setPitchShiftSemitones (shiftSemitones);
 
@@ -19,6 +20,7 @@ void ShimmerReverbEngine::reset()
 {
     tank.reset();
     shifter.reset();
+    feedbackDcBlocker.reset();
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -56,11 +58,21 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // recirculation.
         float shiftedFeedback = shifter.processSample (tank.peekFeedbackSignal());
 
+        // Phase 4: remove DC/subsonic bias from the recirculating signal
+        // before it hits the tanh soft-clip below -- DC removal has to
+        // precede nonlinear shaping (a DC-biased signal clips asymmetrically
+        // through tanh), and has to happen here, inside the loop, rather
+        // than only at the final output, since the shifter's grain-
+        // crossfade interpolation can introduce subsonic bias on every
+        // recirculation (see DCBlocker.h and shimmer-reverb-architecture.md's
+        // "DC offset accumulation" pitfall).
+        float dcBlockedFeedback = feedbackDcBlocker.processSample (shiftedFeedback);
+
         // Safety net on the recirculating content itself (same tanh
         // soft-clip role as before, just relocated to wrap the signal
         // that's about to be scaled by DattorroTank's own decayGain
         // internally, rather than a separately-gained external term).
-        float safeFeedback = std::tanh (shiftedFeedback);
+        float safeFeedback = std::tanh (dcBlockedFeedback);
 
         float tankOut = tank.processSample (monoData[i], safeFeedback);
 

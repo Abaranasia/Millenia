@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "DattorroTank.h"
 #include "PitchShifter.h"
+#include "DCBlocker.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -33,7 +34,16 @@ public:
     // shimmer-reverb-architecture.md's documented topology, rather than
     // running as a separate, weaker parallel feedback loop (see
     // docs/shimmer-reverb-implementation-plan.md's Phase 3/4 correction
-    // note for the root cause this replaced). Because of this, the tank's
+    // note for the root cause this replaced).
+    //
+    // Phase 4 adds a one-pole DCBlocker (feedbackDcBlocker) into that same
+    // recirculation path, between the shifter and the tanh soft-clip: DC
+    // removal has to precede the nonlinear tanh shaping (a DC-biased signal
+    // clips asymmetrically through tanh), and has to happen inside the loop
+    // itself (not just at the final output) since the pitch shifter's
+    // grain-crossfade interpolation can introduce subsonic bias on every
+    // recirculation, per shimmer-reverb-architecture.md's "DC offset
+    // accumulation" pitfall. Because of this, the tank's
     // own decayGain (DattorroTank::setDecay(), default 0.6f, already inside
     // the architecture doc's documented 0.6-0.85 "feedback gain" range) is
     // now the single knob controlling both how much sustains AND how much
@@ -51,6 +61,7 @@ private:
 
     DattorroTank tank;
     PitchShifter shifter;
+    DCBlocker feedbackDcBlocker;
 
     // Mono scratch buffer, pre-sized in prepare() so process() never
     // allocates.
