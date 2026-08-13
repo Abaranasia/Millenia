@@ -8,6 +8,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     tank.prepare (spec);
     shifter.prepare (spec);
     feedbackDcBlocker.prepare (spec);
+    safetyLimiter.prepare (spec);
 
     shifter.setPitchShiftSemitones (shiftSemitones);
 
@@ -21,6 +22,7 @@ void ShimmerReverbEngine::reset()
     tank.reset();
     shifter.reset();
     feedbackDcBlocker.reset();
+    safetyLimiter.reset();
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -68,11 +70,16 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // "DC offset accumulation" pitfall).
         float dcBlockedFeedback = feedbackDcBlocker.processSample (shiftedFeedback);
 
-        // Safety net on the recirculating content itself (same tanh
-        // soft-clip role as before, just relocated to wrap the signal
-        // that's about to be scaled by DattorroTank's own decayGain
-        // internally, rather than a separately-gained external term).
-        float safeFeedback = std::tanh (dcBlockedFeedback);
+        // Phase 4: real permanent safety net, replacing the bare
+        // std::tanh(...) stopgap that used to live here. SafetyLimiter is a
+        // memoryless soft-knee shaper (see SafetyLimiter.h for why a
+        // lookahead peak limiter was rejected for this exact spot inside
+        // the feedback loop) that is EXACTLY unity below its threshold
+        // (0.8f by default) -- unlike bare tanh, which very slightly
+        // compresses every sample, even small ones. Only the genuinely
+        // loud tail gets shaped now; small/moderate recirculating signal
+        // passes through untouched.
+        float safeFeedback = safetyLimiter.processSample (dcBlockedFeedback);
 
         float tankOut = tank.processSample (monoData[i], safeFeedback);
 
