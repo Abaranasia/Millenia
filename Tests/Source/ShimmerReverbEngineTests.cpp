@@ -209,6 +209,180 @@ public:
                                                     "differences: " + juce::String (sumAbsDifference) + ") -- "
                                                     "stereo decorrelation is not happening");
         }
+
+        // Phase 5 (see docs/shimmer-reverb-implementation-plan.md): dry/wet
+        // mix and bypass tests. All three feed a deliberately distinct
+        // stereo signal (different fixed per-channel values, not a
+        // mono-identical burst) so a bug that collapsed the dry path to
+        // mono, or that used the wrong channel's dry sample, would show up
+        // as a mismatch rather than being masked by L==R inputs.
+        beginTest ("Mix = 0 produces exact dry passthrough");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 20;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setMix (0.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (112233);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                // Distinct per-channel values (not the same noise on both
+                // channels) so a dry path that accidentally used the
+                // mono-summed signal, or swapped L/R, would fail this test.
+                auto* left = buffer.getWritePointer (0);
+                auto* right = buffer.getWritePointer (1);
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    left[i] = random.nextFloat() * 0.6f - 0.3f;
+                    right[i] = random.nextFloat() * 0.4f - 0.2f; // different range from left, on purpose
+                }
+
+                juce::AudioBuffer<float> dryReference;
+                dryReference.makeCopyOf (buffer);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                // No epsilon needed: with mix clamped to exactly 0.0f, the
+                // blend formula is dry * (1 - 0.0f) + wet * 0.0f, i.e.
+                // dry * 1.0f + wet * 0.0f. Multiplying a finite float by
+                // exactly 1.0f returns the identical bit pattern, and
+                // multiplying any finite, non-NaN wet by exactly 0.0f
+                // returns exactly 0.0f (IEEE 754), so dry + 0.0f reproduces
+                // the original dry sample exactly -- this is a case where
+                // an epsilon would hide a real bug (e.g. dry captured from
+                // the wrong channel/sample) rather than tolerate float
+                // noise, so exact equality is used.
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* processed = buffer.getReadPointer (ch);
+                    auto* dry = dryReference.getReadPointer (ch);
+
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expectEquals (processed[i], dry[i], "Mix=0 output did not exactly match dry input at "
+                                                                 "channel " + juce::String (ch) + ", block "
+                                                                 + juce::String (b) + ", sample " + juce::String (i));
+                    }
+                }
+            }
+        }
+
+        beginTest ("Mix = 1 (default) stays finite and bounded, matching the pre-existing fully-wet behavior");
+        {
+            // Regression guard: confirms the default engine (no setMix()
+            // call at all, relying purely on the 1.0f member default) is
+            // still finite/bounded exactly like it was before this mix
+            // feature existed -- same input convention as the file's first
+            // ("30s+ boundedness") test above, just over a shorter window
+            // since this test only needs to prove "unchanged", not
+            // re-prove the full 30s safety margin.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 200;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (998877);
+
+            float maxPeak = 0.0f;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block "
+                                                              + juce::String (b) + ", sample " + juce::String (i));
+                        maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                    }
+                }
+            }
+
+            expect (maxPeak <= 10.0f, "Default (mix=1, fully wet) output exceeded safety bound of 10.0 "
+                                       "(peak: " + juce::String (maxPeak) + ") -- default behavior regressed");
+        }
+
+        beginTest ("Bypass forces dry passthrough even when mix is fully wet");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 20;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+
+            // Deliberately set mix fully wet FIRST, then bypass -- proves
+            // bypass overrides the stored mix value in the blend rather
+            // than combining with it (e.g. averaging or adding).
+            engine.setMix (1.0f);
+            engine.setBypassed (true);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (445566);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                auto* left = buffer.getWritePointer (0);
+                auto* right = buffer.getWritePointer (1);
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    left[i] = random.nextFloat() * 0.6f - 0.3f;
+                    right[i] = random.nextFloat() * 0.4f - 0.2f;
+                }
+
+                juce::AudioBuffer<float> dryReference;
+                dryReference.makeCopyOf (buffer);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                // Same exact-equality reasoning as the mix=0 test above:
+                // bypassed forces effectiveMix to exactly 0.0f regardless
+                // of the stored mix value, so the blend collapses to dry
+                // bit-exactly.
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* processed = buffer.getReadPointer (ch);
+                    auto* dry = dryReference.getReadPointer (ch);
+
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expectEquals (processed[i], dry[i], "Bypassed output did not exactly match dry input at "
+                                                                 "channel " + juce::String (ch) + ", block "
+                                                                 + juce::String (b) + ", sample " + juce::String (i));
+                    }
+                }
+            }
+        }
     }
 };
 
