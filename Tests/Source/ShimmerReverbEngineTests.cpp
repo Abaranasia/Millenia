@@ -142,16 +142,32 @@ public:
                                                  + juce::String (lastSecondPeak) + ") -- loop is self-oscillating, not decaying");
         }
 
-        beginTest ("Both stereo output channels carry the same mono tank result even with different L/R input");
+        beginTest ("Stereo output channels stay finite and are decorrelated (not identical) with quadrature pitch shifting");
         {
-            // Regression check for the architecture change moving the
-            // mono-summing/write-back contract from PluginProcessor up into
-            // ShimmerReverbEngine::process() -- exactly mirrors
-            // DattorroTank::process()'s own mono-handling contract. Not
-            // affected by the feedback-path restructuring above.
+            // Phase 4 stereo decorrelation replaces the old mono-collapse
+            // contract this test used to check (L==R was correct before
+            // Phase 4, when both channels only ever carried the tank's own
+            // mono result -- see the removed test this replaces). Now L/R
+            // deliberately draw from different quadrature-offset voice
+            // pairs in PitchShifter (see PitchShifter.h's class comment and
+            // ShimmerReverbEngine::process()'s mix-formula comment), so L==R
+            // would mean decorrelation silently isn't happening. This test
+            // asserts both halves of the new contract: (a) output stays
+            // finite over the whole buffer, and (b) the channels actually
+            // differ for a nontrivial fraction of samples given noise input.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;
+            // Long enough to clear DattorroTank's own feedback round-trip
+            // (branch A+B's combined allpass/delay lengths are several
+            // hundred ms -- see DattorroTank.h's branchA/branchBDelay*Ms
+            // constants) before measuring: until real signal has actually
+            // travelled through peekFeedbackSignal() and back, both
+            // safeFeedback and the quadrature-pair's safe signal are
+            // exactly 0.0, so L and R are trivially identical -- not a
+            // decorrelation failure, just nothing to decorrelate yet. ~3s
+            // gives comfortable margin above that round-trip.
+            constexpr int numBlocks = 260;
 
             ShimmerReverbEngine engine;
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
@@ -161,21 +177,37 @@ public:
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (2020);
 
-            for (int ch = 0; ch < numChannels; ++ch)
+            double sumAbsDifference = 0.0;
+
+            for (int b = 0; b < numBlocks; ++b)
             {
-                auto* data = buffer.getWritePointer (ch);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                auto* left = buffer.getReadPointer (0);
+                auto* right = buffer.getReadPointer (1);
+
                 for (int i = 0; i < blockSize; ++i)
-                    data[i] = random.nextFloat() * 0.6f - 0.3f;
+                {
+                    expect (std::isfinite (left[i]), "Left channel is not finite at block " + juce::String (b)
+                                                          + ", sample " + juce::String (i));
+                    expect (std::isfinite (right[i]), "Right channel is not finite at block " + juce::String (b)
+                                                           + ", sample " + juce::String (i));
+
+                    sumAbsDifference += std::abs ((double) left[i] - (double) right[i]);
+                }
             }
 
-            juce::dsp::AudioBlock<float> block (buffer);
-            engine.process (block);
-
-            auto* left = buffer.getReadPointer (0);
-            auto* right = buffer.getReadPointer (1);
-
-            for (int i = 0; i < blockSize; ++i)
-                expectEquals (left[i], right[i], "Output channels diverged at sample " + juce::String (i));
+            expect (sumAbsDifference > 1.0e-3, "Left and right channels are effectively identical (sum of abs "
+                                                    "differences: " + juce::String (sumAbsDifference) + ") -- "
+                                                    "stereo decorrelation is not happening");
         }
     }
 };

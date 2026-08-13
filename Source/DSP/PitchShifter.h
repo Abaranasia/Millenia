@@ -11,6 +11,26 @@
 // only ever sees DattorroTank's mono output, one sample at a time from
 // ShimmerReverbEngine's feedback loop. Owns no parameter knowledge itself;
 // Phase 5 wires setPitchShiftSemitones() to a real APVTS parameter.
+//
+// Phase 4 stereo decorrelation adds a SECOND crossfaded voice pair (C/D),
+// quadrature-offset from the primary pair by exactly 0.25 (90 degrees) of a
+// grain cycle: C starts at phase 0.25, D is locked 0.5 ahead of C (phase
+// 0.75), same fixed-offset relationship voiceB already has to voiceA. This
+// is Airwindows Galactic-style quadrature-offset pitch shifting (chosen over
+// per-channel tank duplication -- see
+// docs/shimmer-reverb-implementation-plan.md's Phase 4 section -- precisely
+// because it needs no second tank/delay line and cannot disturb
+// DattorroTank's already-tuned recirculating loop). Both pairs read the
+// exact same shared delayLine -- same history, same instant -- so C/D pitch-
+// shift identical source content by the identical ratio as A/B; only the
+// grain-phase offset differs, which is what makes C/D's instantaneous output
+// decorrelated from A/B's despite processing the same input. The crossfade
+// identity hannEnvelope(p) + hannEnvelope(p+0.5) == 1 holds for ANY phase p,
+// not just p=0, so C/D's crossfade is exactly as artifact-free as A/B's by
+// the same algebra -- no new invariant to prove. processSample()'s signature
+// and return value (the primary A/B pair's output) are unchanged; C/D are
+// advanced internally in lockstep and their crossfaded result is cached in
+// quadratureOutput, readable via getQuadratureOutput().
 class PitchShifter
 {
 public:
@@ -29,6 +49,15 @@ public:
     float getPitchRatio() const noexcept { return pitchRatio; }
 
     float processSample (float input);
+
+    // Read-only peek at the quadrature (C/D) voice pair's crossfaded output
+    // from the most recent processSample() call -- mirrors the "process,
+    // then peek a simultaneously-computed side value" idiom already used by
+    // DattorroTank::peekFeedbackSignal(). Not a second processSample()-like
+    // method the caller has to invoke separately; C/D are advanced inside
+    // processSample() itself, this just reads what that call already
+    // computed.
+    float getQuadratureOutput() const noexcept { return quadratureOutput; }
 
 private:
     using DelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>;
@@ -97,6 +126,15 @@ private:
     float pitchRatio = 1.0f;
 
     Voice voiceA, voiceB;
+
+    // Phase 4: quadrature-offset second voice pair for stereo decorrelation
+    // (see class-level comment above). Reads the same shared delayLine as
+    // A/B, just at a 0.25-grain-cycle phase offset.
+    Voice voiceC, voiceD;
+
+    // Cached crossfaded output of the C/D pair from the most recent
+    // processSample() call, exposed via getQuadratureOutput().
+    float quadratureOutput = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PitchShifter)
 };
