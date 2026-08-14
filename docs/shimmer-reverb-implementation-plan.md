@@ -253,6 +253,8 @@ Definition of done:
 
 Pitfalls: this phase exists specifically because the earlier phases' "definition of done" criteria are mostly ear/behavior-based; Phase 7 is where that gets backed by the project's actual test discipline instead of remaining implicit.
 
+**Known issue flagged for this phase, 2026-08-14 (found while checking Phase 6's editor by ear/eye, not yet investigated):** user reports the pitch-shifted signal sounds **metallic and robotic — not smooth or harmonic — so the overall effect doesn't read as a shimmer reverb at all.** This is distinct from the earlier "sounds detuned" bug (Phase 3 section above, root-caused as phase incoherence between crossfaded voices and fixed via the SOLA grain-pool redesign) — the SOLA fix corrected the measured pitch *accuracy*, but this is a separate *timbral/character* complaint on top of an already pitch-accurate signal. Likely suspects, not yet ruled in or out: `PitchShifter`'s grain-splice artifacts (short `crossfadeFraction=0.1` hop introduced by the SOLA fix could itself be a new source of audible graininess/metallic ringing, trading the old phase-cancellation bug for a new splicing artifact), `grainLengthMs`'s current value, or `DattorroTank`'s damping/decay interacting badly with a shifted signal. **Not investigated yet — explicitly deferred to a later session**, but this is exactly the kind of defect this phase's own Definition of Done ("absence of audible metallic ringing/comb coloration") already anticipated, so treat it as a known pre-existing finding for that check, not a fresh discovery when Phase 7 starts.
+
 ## File/class structure proposal
 
 ```
