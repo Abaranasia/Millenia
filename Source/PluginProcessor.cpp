@@ -19,9 +19,22 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
+#else
+     :
 #endif
+       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
+    // Phase 5: cache raw parameter pointers once, after apvts exists --
+    // never call apvts.getRawParameterValue() (a string lookup) anywhere
+    // inside processBlock(). bypassParam's underlying value is still a
+    // float (0.0/1.0) even though it's an AudioParameterBool.
+    pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
+    feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
+    dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
+    widthParam      = apvts.getRawParameterValue (ParamIDs::width);
+    mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
+    bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -99,6 +112,30 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
+
+    // Phase 5: 50ms ramp -- a standard default for click-free parameter
+    // smoothing, not arbitrarily huge or tiny -- then seed each smoother
+    // with the host's actual current parameter value so playback doesn't
+    // start with an audible ramp-in from some default toward wherever the
+    // host actually has each parameter set.
+    smoothedPitchShift.reset (sampleRate, 0.05);
+    smoothedFeedback.reset (sampleRate, 0.05);
+    smoothedDamping.reset (sampleRate, 0.05);
+    smoothedWidth.reset (sampleRate, 0.05);
+    smoothedMix.reset (sampleRate, 0.05);
+
+    smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
+    smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
+    smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
+    smoothedWidth.setCurrentAndTargetValue (widthParam->load());
+
+    // Bypass folds into the mix smoother's seed value too -- see
+    // processBlock()'s comment for why bypass drives smoothedMix rather than
+    // calling ShimmerReverbEngine::setBypassed().
+    {
+        const bool isBypassed = bypassParam->load() > 0.5f;
+        smoothedMix.setCurrentAndTargetValue (isBypassed ? 0.0f : mixParam->load());
+    }
 }
 
 void MilleniaAudioProcessor::releaseResources()
@@ -150,10 +187,44 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     // Phase 3 committed topology: ShimmerReverbEngine (Dattorro tank +
     // pitch shifter feedback loop) is the sole, permanent reverb path (see
-    // docs/shimmer-reverb-implementation-plan.md, Phase 3). This is still
-    // 100% wet with no dry/wet mix yet — Phase 5 adds real parameters,
-    // including mix. All mono-summing/processing/write-back happens inside
-    // ShimmerReverbEngine::process(); this method just forwards the block.
+    // docs/shimmer-reverb-implementation-plan.md, Phase 3). Phase 5 closes
+    // the "100% wet, no dry/wet mix" gap this comment used to describe:
+    // every DSP-affecting value is now driven by an APVTS parameter, read
+    // here via the cached atomics below (never apvts.getRawParameterValue()
+    // by string -- that's a needless lookup on the audio thread) and pushed
+    // through per-block SmoothedValues for click-free automation. All
+    // mono-summing/processing/write-back still happens inside
+    // ShimmerReverbEngine::process(); this method just drives its
+    // forwarding setters and forwards the block.
+    const auto numSamples = buffer.getNumSamples();
+
+    smoothedPitchShift.setTargetValue (pitchShiftParam->load());
+    smoothedFeedback.setTargetValue (feedbackParam->load());
+    smoothedDamping.setTargetValue (dampingParam->load());
+    smoothedWidth.setTargetValue (widthParam->load());
+
+    // Bypass integration: bypass does NOT call
+    // ShimmerReverbEngine::setBypassed() at all. That method forces its own
+    // effective-mix override instantly with no smoothing (deliberately left
+    // for PluginProcessor to smooth, per ShimmerReverbEngine.h's
+    // setBypassed() comment) -- if this smoothed mix via smoothedMix AND
+    // also called engine.setBypassed(), the instant override would fight the
+    // smoothed value and reintroduce exactly the click this phase exists to
+    // eliminate. Instead, bypass drives the SAME mix smoother toward 0,
+    // giving a properly smoothed transition in both directions (engaging
+    // and disengaging bypass) with no new smoothing mechanism needed.
+    // ShimmerReverbEngine::setBypassed() stays valid public API for other
+    // callers/tests; PluginProcessor deliberately never calls it.
+    const bool isBypassed = bypassParam->load() > 0.5f;
+    const float mixTarget = isBypassed ? 0.0f : mixParam->load();
+    smoothedMix.setTargetValue (mixTarget);
+
+    shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
+    shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
+    shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
+    shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
+    shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
+
     juce::dsp::AudioBlock<float> block (buffer);
     shimmerReverbEngine.process (block);
 }
@@ -172,15 +243,28 @@ juce::AudioProcessorEditor* MilleniaAudioProcessor::createEditor()
 //==============================================================================
 void MilleniaAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+    // Phase 5: persist the APVTS ValueTree (not ad-hoc member variables),
+    // stamped with the current schema version for future preset
+    // compatibility -- see currentSchemaVersion's declaration for what a
+    // future schema bump needs to do here.
+    auto state = apvts.copyState();
+    state.setProperty ("schemaVersion", currentSchemaVersion, nullptr);
+    if (auto xml = state.createXml())
+        copyXmlToBinary (*xml, destData);
 }
 
 void MilleniaAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+    // hasType() is checked against apvts.state.getType(), i.e. the exact
+    // "PARAMETERS" identifier passed to the apvts constructor above -- a
+    // corrupt/foreign state blob (wrong root tag) is rejected rather than
+    // blindly loaded via replaceState().
+    if (auto xmlState = getXmlFromBinary (data, sizeInBytes))
+    {
+        auto state = juce::ValueTree::fromXml (*xmlState);
+        if (state.isValid() && state.hasType (apvts.state.getType()))
+            apvts.replaceState (state);
+    }
 }
 
 //==============================================================================

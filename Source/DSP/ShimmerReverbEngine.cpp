@@ -11,10 +11,24 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
 
-    shifter.setPitchShiftSemitones (shiftSemitones);
+    // Phase 5: seed the live-settable pitch shift with the same value that
+    // used to be a one-time hardcoded constant, so behavior is unchanged
+    // until a caller actually calls setPitchShiftSemitones() with something
+    // different.
+    shifter.setPitchShiftSemitones (defaultPitchShiftSemitones);
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
+    // mix/bypassed/shimmerWidthGain are NOT re-applied here (unlike the
+    // pitch shift line above): they already have correct member-
+    // initializer defaults in the header, and re-assigning them on every
+    // prepare() call would silently wipe out a caller's prior
+    // setMix()/setBypassed()/setWidth() if the host re-triggers prepare()
+    // (e.g. a sample-rate change) after those were already set -- that's a
+    // real regression the pitch-shift line above doesn't have, since
+    // resetting pitch shift on every prepare() call is the pre-existing
+    // behavior this replaces (the old code unconditionally called
+    // shifter.setPitchShiftSemitones() here too), not new behavior.
     reset();
 }
 
@@ -27,9 +41,34 @@ void ShimmerReverbEngine::reset()
     quadratureDcBlocker.reset();
 }
 
-void ShimmerReverbEngine::setShimmerWidthGain (float newGain)
+void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
 {
-    shimmerWidthGain = juce::jlimit (0.0f, 1.0f, newGain);
+    shifter.setPitchShiftSemitones (semitones);
+}
+
+void ShimmerReverbEngine::setFeedback (float newFeedback)
+{
+    tank.setDecay (newFeedback);
+}
+
+void ShimmerReverbEngine::setDamping (float newDamping)
+{
+    tank.setDamping (newDamping);
+}
+
+void ShimmerReverbEngine::setWidth (float newWidth)
+{
+    shimmerWidthGain = juce::jlimit (0.0f, 1.0f, newWidth);
+}
+
+void ShimmerReverbEngine::setMix (float newMix)
+{
+    mix = juce::jlimit (0.0f, 1.0f, newMix);
+}
+
+void ShimmerReverbEngine::setBypassed (bool shouldBypass)
+{
+    bypassed = shouldBypass;
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -115,13 +154,45 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // ratio, so the decorrelation comes purely from the different
         // grain-phase offsets between the pairs, not from any difference in
         // source content or shift amount.
-        float left = tankOut + shimmerWidthGain * safeFeedback;
-        float right = tankOut + shimmerWidthGain * quadratureSafe;
+        float wetLeft = tankOut + shimmerWidthGain * safeFeedback;
+        float wetRight = tankOut + shimmerWidthGain * quadratureSafe;
 
+        // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
+        // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully
+        // dry) while bypassed, regardless of what setMix() was last set
+        // to. This deliberately does NOT skip tank.processSample()/
+        // shifter.processSample() above -- the whole recirculating chain
+        // keeps running every sample even while bypassed, so an existing
+        // tail rings out naturally through the blend below (fades toward
+        // fully dry) instead of being hard-cut. Per-sample-accurate
+        // smoothing of this transition is PluginProcessor's job (a later
+        // Phase 5 step), not duplicated here -- see setBypassed()'s
+        // comment in the header.
+        const float effectiveMix = bypassed ? 0.0f : mix;
+
+        // Dry samples are read directly off `block` here, immediately
+        // before each channel's own sample is overwritten below -- `block`
+        // still holds the untouched original per-channel input at this
+        // point (the mono-sum pass above only READ from block into
+        // monoScratch, it never wrote back into block; monoData[i] is a
+        // mono-summed copy, not the original stereo signal). This preserves
+        // the original stereo image for the dry portion of the blend
+        // without needing a second buffer -- reading `block.getSample`
+        // right before writing that exact (channel, sample) cell is
+        // real-time-safe (no allocation) and correct because each channel's
+        // write only touches that channel's own data.
         if (numChannels > 0)
-            block.setSample (0, (int) i, left);
+        {
+            const float dryLeft = block.getSample (0, (int) i);
+            const float outLeft = dryLeft * (1.0f - effectiveMix) + wetLeft * effectiveMix;
+            block.setSample (0, (int) i, outLeft);
+        }
 
         for (size_t ch = 1; ch < numChannels; ++ch)
-            block.setSample ((int) ch, (int) i, right);
+        {
+            const float dryChannel = block.getSample ((int) ch, (int) i);
+            const float outChannel = dryChannel * (1.0f - effectiveMix) + wetRight * effectiveMix;
+            block.setSample ((int) ch, (int) i, outChannel);
+        }
     }
 }
