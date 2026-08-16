@@ -12,6 +12,14 @@ void PitchShifter::prepare (const juce::dsp::ProcessSpec& spec)
     hopSamples = juce::jmax (1, juce::roundToInt (grainLengthSamples * (1.0f - crossfadeFraction)));
     crossfadeSamplesInt = juce::jmax (1, juce::roundToInt (grainLengthSamples * crossfadeFraction));
 
+    // See alignmentSearchRadiusSamples' header comment for the two-anchor
+    // search rationale; see PitchShifterTests.cpp's DIAGNOSTIC tests and
+    // docs/shimmer-reverb-implementation-plan.md's Phase 7 follow-up for the
+    // measured tuning trail that arrived at this value (22 samples at
+    // 44.1kHz's crossfadeSamplesInt=88).
+    alignmentSearchRadiusSamples = juce::jmax (16, crossfadeSamplesInt / 4);
+    alignmentReferenceBuffer.assign ((size_t) crossfadeSamplesInt, 0.0f);
+
     auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple;
     delayLine.setMaximumDelayInSamples (juce::roundToInt (neededSamples) + 1);
 
@@ -52,6 +60,12 @@ void PitchShifter::reset()
     // output despite reading the same shared delay line (see the
     // class-level comment's "grain-pool layout" section).
     quadratureSamplesUntilLaunch = hopSamples / 2;
+
+    // Running per-pool alignment-offset estimates must rewind to the fixed
+    // nominal origin along with everything else, or a stale offset from
+    // before this reset() would seed the first post-reset search.
+    primaryLastOffset = 0.0f;
+    quadratureLastOffset = 0.0f;
 }
 
 void PitchShifter::setPitchShiftSemitones (float semitones)
@@ -74,6 +88,113 @@ float PitchShifter::grainWindow (int elapsed) const noexcept
         return 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * (float) samplesFromEnd / (float) crossfadeSamplesInt));
 
     return 1.0f;
+}
+
+float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset)
+{
+    const Grain* outgoing = nullptr;
+    for (auto& grain : grains)
+        if (grain.active && (outgoing == nullptr || grain.age > outgoing->age))
+            outgoing = &grain;
+
+    if (outgoing == nullptr)
+        return previousOffset;
+
+    const float outgoingBaseDelay = baseDelaySamples + outgoing->baseDelayOffset;
+    const float outgoingCurrentDelay = outgoingBaseDelay - (float) outgoing->age * (pitchRatio - 1.0f);
+
+    const int windowSamples = (int) alignmentReferenceBuffer.size();
+
+    // NOTE: the rate used here is pitchRatio, not (pitchRatio - 1.0f) as in
+    // grainDelaySamples() above. grainDelaySamples()'s rate describes how a
+    // REAL grain's delay-from-now evolves as REAL TIME also advances one
+    // sample per elapsed step (the write pointer moves too, so the *net*
+    // rate the absolute read position gains on "now" is only
+    // 1 - (-(pitchRatio-1)) = pitchRatio per real sample, but that extra "1"
+    // is free -- it comes from time itself elapsing). Here we are NOT
+    // advancing real time between k steps (no push/pop happens in this
+    // loop) -- we're peeking multiple future instants from a single frozen
+    // buffer snapshot -- so the "time elapses for free" term is unavailable
+    // and the delay-from-this-fixed-instant must close the entire gap
+    // itself, at the full pitchRatio rate. Using (pitchRatio - 1.0f) here
+    // was verified (via the diagnostic FFT test) to degenerate at
+    // pitchRatio == 1.0 -- every k read the identical sample, producing a
+    // meaningless flat "reference window" and making the sideband WORSE
+    // (0.22dB, i.e. louder than the fundamental) instead of better. Fixed by
+    // using the correct pitchRatio rate; see PitchShifterTests.cpp's
+    // DIAGNOSTIC test for the measured before/after numbers.
+    for (int k = 0; k < windowSamples; ++k)
+    {
+        const float delaySamples = juce::jmax (0.0f, outgoingCurrentDelay - (float) k * pitchRatio);
+        alignmentReferenceBuffer[(size_t) k] = delayLine.popSample (0, delaySamples, false);
+    }
+
+    float bestScore = -1.0f;
+    float bestOffset = previousOffset; // fallback: carry the previous offset forward if no lag improves on it
+
+    // Two-anchor search: re-check both a small window around the running
+    // per-pool offset estimate (previousOffset -- cheap continuous drift
+    // tracking, see this function's header-comment history) AND a small
+    // window around the fixed nominal origin (0.0f -- the same anchor the
+    // original, far more expensive fixed-origin design always used). This
+    // was added after measuring that a previousOffset-ONLY incremental
+    // search, however wide its radius, could not get the +24 semitone
+    // spectral-sideband test below roughly -8..-23dB (never reaching the
+    // required -30dB) -- an exhaustive sweep from radius=1 up to radius=800
+    // (matching the old fixed-origin design's full grainLengthSamplesInt)
+    // showed it PLATEAUS on a bad, self-consistent local optimum well away
+    // from the actually-best (zero-anchored) alignment once pitchRatio gets
+    // large (+24st, ratio=4.0): the search only ever looks near wherever it
+    // already is, so once it wanders it has no way back to the known-good
+    // region near zero. Re-checking the zero anchor every single hop, at the
+    // SAME small radius as the incremental search (so it stays cheap -- just
+    // one more small window, not a full grain-length search), guarantees the
+    // search can never permanently drift away from that known-good solution,
+    // while the previousOffset anchor still gives the fast continuous-drift
+    // tracking the incremental design was introduced for at ordinary shift
+    // amounts. See alignmentSearchRadiusSamples' own comment and
+    // PitchShifterTests.cpp's DIAGNOSTIC tests for the measured numbers this
+    // fix produced.
+    const float anchorOffsets[] = { previousOffset, 0.0f };
+
+    for (float anchor : anchorOffsets)
+    {
+        for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
+        {
+            const float candidateOffset = anchor + (float) lag;
+            const float candidateBaseDelay = baseDelaySamples + candidateOffset;
+
+            float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
+
+            for (int k = 0; k < windowSamples; ++k)
+            {
+                // Same fixed-snapshot rate correction as the reference-window
+                // loop above: pitchRatio, not (pitchRatio - 1.0f).
+                const float delaySamples = juce::jmax (0.0f, candidateBaseDelay - (float) k * pitchRatio);
+                const float candidateSample = delayLine.popSample (0, delaySamples, false);
+
+                dot += alignmentReferenceBuffer[(size_t) k] * candidateSample;
+                refEnergy += alignmentReferenceBuffer[(size_t) k] * alignmentReferenceBuffer[(size_t) k];
+                candEnergy += candidateSample * candidateSample;
+            }
+
+            const float denom = std::sqrt (refEnergy * candEnergy);
+            const float score = denom > 1.0e-8f ? dot / denom : -1.0f;
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestOffset = candidateOffset;
+            }
+        }
+    }
+
+    // Safety clamp: keep the cumulative offset within the delay line's
+    // already-verified capacity margin (baseDelayGrainMultiple/
+    // maxDelayExtraGrainMultiple headroom), regardless of how far an
+    // unbounded incremental search could in principle wander over a long
+    // sustained tone.
+    return juce::jlimit (-(float) grainLengthSamplesInt, (float) grainLengthSamplesInt, bestOffset);
 }
 
 float PitchShifter::processSample (float input)
@@ -100,7 +221,8 @@ float PitchShifter::processSample (float input)
     // replaces the old fixed COLA-derived constant).
     if (primarySamplesUntilLaunch <= 0)
     {
-        primaryGrains[(size_t) primaryNextSlot] = { true, 0 };
+        primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset);
+        primaryGrains[(size_t) primaryNextSlot] = { true, 0, primaryLastOffset };
         primaryNextSlot = (primaryNextSlot + 1) % maxConcurrentGrainsPerGroup;
         primarySamplesUntilLaunch = hopSamples;
     }
@@ -113,7 +235,7 @@ float PitchShifter::processSample (float input)
         if (! grain.active)
             continue;
 
-        const float delaySamples = grainDelaySamples (grain.age);
+        const float delaySamples = grainDelaySamples (grain.age) + grain.baseDelayOffset;
         const float sample = delayLine.popSample (0, delaySamples, false);
         const float weight = grainWindow (grain.age);
 
@@ -139,7 +261,8 @@ float PitchShifter::processSample (float input)
     // shared delayLine read at this same instant.
     if (quadratureSamplesUntilLaunch <= 0)
     {
-        quadratureGrains[(size_t) quadratureNextSlot] = { true, 0 };
+        quadratureLastOffset = findAlignmentOffset (quadratureGrains, quadratureLastOffset);
+        quadratureGrains[(size_t) quadratureNextSlot] = { true, 0, quadratureLastOffset };
         quadratureNextSlot = (quadratureNextSlot + 1) % maxConcurrentGrainsPerGroup;
         quadratureSamplesUntilLaunch = hopSamples;
     }
@@ -152,7 +275,7 @@ float PitchShifter::processSample (float input)
         if (! grain.active)
             continue;
 
-        const float delaySamples = grainDelaySamples (grain.age);
+        const float delaySamples = grainDelaySamples (grain.age) + grain.baseDelayOffset;
         const float sample = delayLine.popSample (0, delaySamples, false);
         const float weight = grainWindow (grain.age);
 
