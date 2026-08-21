@@ -84,6 +84,7 @@ private:
     // same way as the others, compared with `> 0.5f`.
     std::atomic<float>* pitchShiftParam = nullptr;
     std::atomic<float>* feedbackParam   = nullptr;
+    std::atomic<float>* shimmerAmountParam = nullptr;
     std::atomic<float>* dampingParam    = nullptr;
     std::atomic<float>* widthParam      = nullptr;
     std::atomic<float>* mixParam        = nullptr;
@@ -95,6 +96,7 @@ private:
     // bypass has no smoother of its own (it drives smoothedMix instead).
     juce::SmoothedValue<float> smoothedPitchShift;
     juce::SmoothedValue<float> smoothedFeedback;
+    juce::SmoothedValue<float> smoothedShimmerAmount;
     juce::SmoothedValue<float> smoothedDamping;
     juce::SmoothedValue<float> smoothedWidth;
     juce::SmoothedValue<float> smoothedMix;

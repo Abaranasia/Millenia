@@ -93,6 +93,18 @@ public:
     void setFeedback (float newFeedback);
     void setDamping (float newDamping);
 
+    // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
+    // comment), clamped to [0, 1] here -- never amplifies above unity, so
+    // Phase 4's runaway-safety margin (decayGain < 0.85) on the tank's OWN
+    // natural recirculation is never affected by this parameter at all (it
+    // only gains the separate, additive shimmer-injection term). Also kept
+    // locally (see shimmerAmount below) so process()'s Width/decorrelation
+    // term can be gated by it too -- that term reads the shifter's output
+    // directly, not through DattorroTank, so DattorroTank owning the value
+    // alone isn't enough to silence it (bug found by ear, 2026-08-21: Width
+    // kept the shimmer character audible even at shimmerAmount=0.0f).
+    void setShimmerAmount (float newShimmerAmount);
+
     // Clamped to [0, 1]. Replaces the old setShimmerWidthGain() name now
     // that this is genuinely public API rather than an internal-only
     // setter -- kept as a single setter rather than two names for the same
@@ -128,16 +140,25 @@ private:
     // it live.
     static constexpr float defaultPitchShiftSemitones = 12.0f; // classic shimmer octave-up default
 
-    // How much of the (safety-netted) shifted signal is mixed directly into
-    // each output channel to create width -- see the process() comment
-    // above for the mix formula. Phase 5 wires this to a real parameter.
-    static constexpr float defaultShimmerWidthGain = 0.3f;
+    // Phase 8 rework: this term used to inject a raw, full-strength copy of
+    // the shifted signal into the wet output (see process()), which at high
+    // settings read as a "parallel pitch shifter" artifact rather than
+    // blended shimmer. It now injects only the L/R *difference* between the
+    // primary/quadrature shifted signals (pure stereo-decorrelation
+    // seasoning), so its default is lowered accordingly. Value is a REASONED
+    // STARTING POINT pending a by-ear pass, not a final tuned constant.
+    static constexpr float defaultShimmerWidthGain = 0.15f;
 
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
     // wet, not bypassed, so existing tests/behavior are unchanged unless a
     // caller explicitly calls setMix()/setBypassed().
     static constexpr float defaultMix = 1.0f;
     static constexpr bool defaultBypassed = false;
+
+    // Matches DattorroTank::defaultShimmerFeedbackGain so "shimmer at full
+    // strength" is the out-of-the-box behavior, same convention as the
+    // other defaults above.
+    static constexpr float defaultShimmerAmount = 1.0f;
 
     DattorroTank tank;
     PitchShifter shifter;
@@ -152,6 +173,11 @@ private:
     DCBlocker quadratureDcBlocker;
 
     float shimmerWidthGain = defaultShimmerWidthGain;
+
+    // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
+    // -- see setShimmerAmount()'s comment for why process()'s Width term
+    // needs its own gating copy rather than trusting the tank alone.
+    float shimmerAmount = defaultShimmerAmount;
 
     // Phase 5: dry/wet mix (see setMix()) and bypass (see setBypassed()).
     // bypassed does not gate/skip any processing -- it only forces the

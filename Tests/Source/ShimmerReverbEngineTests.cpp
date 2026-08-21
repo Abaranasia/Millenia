@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../../Source/DSP/ShimmerReverbEngine.h"
+#include "../../Source/DSP/DattorroTank.h"
 
 // Phase 3/4 test-runner target -- automated regression for the plan's own
 // explicit Definition-of-Done requirement: "No runaway/growing-without-
@@ -89,27 +90,32 @@ public:
             // finding -- not something to silently patch decayGain down
             // for without evidence.
             //
-            // silenceSeconds was widened from 8.0 to 12.0 after the
-            // PitchShifter rewrite (persistent multi-voice crossfade ->
-            // finite-lifetime grain pool, see PitchShifter.h) fixed a real
-            // phase-interference bug that had been accidentally attenuating
-            // the shifter's output (not true unity gain despite what its own
-            // tests claimed at the time). With that leak gone, the tank
-            // retains more of its energy per loop, so the tail now crosses
-            // the 1e-3 threshold around t=9s instead of t=8s -- confirmed by
-            // ear (user: shimmer "finally sounds tuned") and still a clean,
-            // fully-decaying (non-oscillating) tail, just slightly slower.
-            // decayGain=0.7f was tuned by ear against the OLD, lossy shifter;
-            // it may be worth nudging down (~0.65) and re-verifying by ear to
-            // restore the original decay timing, but that's an audible
-            // tuning call for a later session, not something to guess at
-            // here -- this widened window is the honest fix for now.
+            // silenceSeconds was widened from 12.0 to 40.0 after the Phase 8
+            // structural fix (docs/shimmer-reverb-implementation-plan.md,
+            // 2026-08-18) made the tank's own plain (unshifted) decayGain
+            // recirculation ALWAYS active, independent of shimmer -- before
+            // this fix, 100% of the tank's sustain was routed through the
+            // external shift path, so decay timing was governed by that
+            // (lossier, differently-tuned) path. Measured directly (via a
+            // temporary per-second diagnostic, since removed): with this
+            // fix, the tail crosses the 1e-3 threshold around t=35.9s
+            // (peak-per-second trace was strictly monotonically decreasing
+            // the entire way from t=1s to t=60s, e.g. 1.362 -> 0.137 (t=12s)
+            // -> 0.00298 (t=30s) -> 0.00089 (t=35.9s, first sub-threshold
+            // second) -> 0.0000068 (t=60s)) -- a real, continuously-decaying
+            // exponential tail, not self-oscillation, just slower now that
+            // the plain tail persists on its own. 40.0s gives a real ~4s
+            // margin past the measured crossing point. decayGain=0.7f is
+            // unchanged by this fix (see DattorroTank.h); the slower decay
+            // is the correct, expected consequence of the plain recirculation
+            // no longer being replaced by the (previously lossier) shift
+            // path, not a regression to paper over.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;
 
             constexpr double burstSeconds = 2.0;
-            constexpr double silenceSeconds = 12.0;
+            constexpr double silenceSeconds = 40.0;
             constexpr int burstBlocks = (int) (burstSeconds * sampleRate / blockSize);
             constexpr int silenceBlocks = (int) (silenceSeconds * sampleRate / blockSize);
 
@@ -395,6 +401,292 @@ public:
                                                                  "channel " + juce::String (ch) + ", block "
                                                                  + juce::String (b) + ", sample " + juce::String (i));
                     }
+                }
+            }
+        }
+
+        beginTest ("Shimmer Amount defaults to 1.0 and reproduces the pre-existing fully-recirculating behavior bit-for-bit");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 100;
+
+            ShimmerReverbEngine defaultEngine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            defaultEngine.prepare (spec);
+            defaultEngine.reset();
+
+            ShimmerReverbEngine explicitEngine;
+            explicitEngine.prepare (spec);
+            explicitEngine.reset();
+            explicitEngine.setShimmerAmount (1.0f);
+
+            juce::AudioBuffer<float> defaultBuffer (numChannels, blockSize);
+            juce::AudioBuffer<float> explicitBuffer (numChannels, blockSize);
+
+            juce::Random random (334455);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getWritePointer (ch);
+                    auto* explicitData = explicitBuffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        float sample = random.nextFloat() * 0.6f - 0.3f;
+                        defaultData[i] = sample;
+                        explicitData[i] = sample;
+                    }
+                }
+
+                juce::dsp::AudioBlock<float> defaultBlock (defaultBuffer);
+                juce::dsp::AudioBlock<float> explicitBlock (explicitBuffer);
+                defaultEngine.process (defaultBlock);
+                explicitEngine.process (explicitBlock);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getReadPointer (ch);
+                    auto* explicitData = explicitBuffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expectEquals (explicitData[i], defaultData[i], "setShimmerAmount(1.0f) diverged from the "
+                                                                            "untouched default at channel "
+                                                                            + juce::String (ch) + ", block "
+                                                                            + juce::String (b) + ", sample "
+                                                                            + juce::String (i));
+                    }
+                }
+            }
+        }
+
+        beginTest ("Shimmer Amount = 0.0 stays finite and bounded (extreme value, feedback path fully cut before the tank)");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 200;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setShimmerAmount (0.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (556677);
+
+            float maxPeak = 0.0f;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block " + juce::String (b)
+                                                              + ", sample " + juce::String (i));
+                        maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                    }
+                }
+            }
+
+            expect (maxPeak <= 10.0f, "setShimmerAmount(0.0f) exceeded the safety bound of 10.0 (peak: "
+                                           + juce::String (maxPeak) + ")");
+        }
+
+        beginTest ("Shimmer Amount clamps to [0, 1] like the engine's other setters");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 20;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setShimmerAmount (5.0f); // should clamp to 1.0f, not amplify beyond unity
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (778899);
+
+            float maxPeak = 0.0f;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block " + juce::String (b)
+                                                              + ", sample " + juce::String (i));
+                        maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                    }
+                }
+            }
+
+            expect (maxPeak <= 10.0f, "setShimmerAmount(5.0f) exceeded the safety bound of 10.0 (peak: "
+                                           + juce::String (maxPeak) + ") -- value may not be clamped to 1.0f");
+        }
+
+        beginTest ("Shimmer Amount = 0.0 makes the engine's tail behave identically to a bare DattorroTank (no shimmer contribution at all)");
+        {
+            // Structural-fix regression: proves shimmerFeedbackGain = 0.0
+            // genuinely means ZERO shimmer contribution (the tank's own
+            // natural recirculation, completely independent of the shift
+            // path), not just "small" -- by cross-checking
+            // ShimmerReverbEngine against a bare DattorroTank fed the exact
+            // same input. Width is also zeroed so the engine's wet output
+            // is exactly tankOut with nothing else added (see
+            // ShimmerReverbEngine::process()'s wetLeft/wetRight formula).
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 200;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setShimmerAmount (0.0f);
+            engine.setWidth (0.0f);
+
+            DattorroTank plainTank;
+            plainTank.prepare (spec);
+            plainTank.reset();
+            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
+            // matching ShimmerReverbEngine's default so untouched use "just
+            // works") would otherwise make this comparison tank claim half
+            // its recirculation budget for an externalFeedback that's always
+            // 0.0 (see setShimmerFeedbackGain()'s crossfade comment) --
+            // explicitly zero it so this reference truly represents "zero
+            // shimmer, full decayGain", matching engine.setShimmerAmount(0.0f)
+            // above.
+            plainTank.setShimmerFeedbackGain (0.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (135790);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                // Identical L/R (genuinely mono input) so ShimmerReverbEngine's
+                // internal mono-sum exactly matches feeding the same sample
+                // straight into the bare tank, sample for sample.
+                auto* left = buffer.getWritePointer (0);
+                auto* right = buffer.getWritePointer (1);
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    float sample = random.nextFloat() * 0.6f - 0.3f;
+                    left[i] = sample;
+                    right[i] = sample;
+                }
+
+                juce::AudioBuffer<float> plainReference;
+                plainReference.makeCopyOf (buffer);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                auto* plainData = plainReference.getWritePointer (0);
+                for (int i = 0; i < blockSize; ++i)
+                    plainData[i] = plainTank.processSample (plainData[i]);
+
+                auto* engineLeft = buffer.getReadPointer (0);
+                auto* engineRight = buffer.getReadPointer (1);
+                auto* plainOut = plainReference.getReadPointer (0);
+
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    expectEquals (engineLeft[i], plainOut[i], "Engine's left channel diverged from the bare "
+                                                                   "DattorroTank at shimmerAmount=0.0, block "
+                                                                   + juce::String (b) + ", sample " + juce::String (i));
+                    expectEquals (engineRight[i], plainOut[i], "Engine's right channel diverged from the bare "
+                                                                    "DattorroTank at shimmerAmount=0.0, block "
+                                                                    + juce::String (b) + ", sample " + juce::String (i));
+                }
+            }
+        }
+
+        beginTest ("Shimmer Amount = 0.0 also silences the Width decorrelation term (L/R identical even at Width=1.0)");
+        {
+            // Bug found by ear (2026-08-21): turning Shimmer Amount fully
+            // down did not silence the shimmer character. Root cause:
+            // process()'s Width/decorrelation term (sideShift = safeFeedback
+            // - quadratureSafe) is computed from the pitch shifter's output
+            // unconditionally, on every sample, regardless of shimmerAmount
+            // -- shimmerAmount only ever gated DattorroTank's own internal
+            // recirculation crossfade (see setShimmerFeedbackGain()), never
+            // this separate feed-forward term. The prior regression test
+            // above ("...behave identically to a bare DattorroTank...")
+            // masked this exact bug by always zeroing Width alongside
+            // shimmerAmount, so it never exercised this interaction. Width
+            // is deliberately set to its maximum (1.0f) here, not left at
+            // the default, to give the leaking term maximum amplitude to be
+            // caught by if the bug regresses.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 200;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setShimmerAmount (0.0f);
+            engine.setWidth (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (246810);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                auto* left = buffer.getWritePointer (0);
+                auto* right = buffer.getWritePointer (1);
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    float sample = random.nextFloat() * 0.6f - 0.3f;
+                    left[i] = sample;
+                    right[i] = sample;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                auto* engineLeft = buffer.getReadPointer (0);
+                auto* engineRight = buffer.getReadPointer (1);
+
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    expectEquals (engineLeft[i], engineRight[i], "At shimmerAmount=0.0, L/R must be identical "
+                                                                       "regardless of Width -- any difference means "
+                                                                       "the shift path is still leaking into the "
+                                                                       "output at block " + juce::String (b)
+                                                                       + ", sample " + juce::String (i));
                 }
             }
         }

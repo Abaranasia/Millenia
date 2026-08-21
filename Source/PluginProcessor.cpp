@@ -31,6 +31,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     // float (0.0/1.0) even though it's an AudioParameterBool.
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
     feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
+    shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
@@ -120,12 +121,14 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // host actually has each parameter set.
     smoothedPitchShift.reset (sampleRate, 0.05);
     smoothedFeedback.reset (sampleRate, 0.05);
+    smoothedShimmerAmount.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
+    smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
 
@@ -200,6 +203,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
     smoothedFeedback.setTargetValue (feedbackParam->load());
+    smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
 
@@ -221,6 +225,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
     shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));

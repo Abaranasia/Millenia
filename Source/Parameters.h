@@ -14,6 +14,7 @@ namespace ParamIDs
 {
     constexpr auto pitchShift = "pitchShift";
     constexpr auto feedback   = "feedback";
+    constexpr auto shimmerAmount = "shimmerAmount";
     constexpr auto damping    = "damping";
     constexpr auto width      = "width";
     constexpr auto mix        = "mix";

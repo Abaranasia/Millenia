@@ -26,6 +26,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 0.85f),
         0.7f));
 
+    // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
+    // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal
+    // layered additively on top of the tank's own natural (decayGain-scaled)
+    // recirculation -- decoupling "how much shimmer cascade gets added" from
+    // "how long the plain tail sustains" (decayGain). At 0.0f the tank is a
+    // plain (unshifted) reverb only; at 1.0f (default) the shimmer cascade
+    // is added at full strength.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::shimmerAmount, 1 },
+        "Shimmer Amount",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        1.0f));
+
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
     // damping filter. Range/skew are a REASONED STARTING POINT, not an
     // ear-tuned final value -- an actual listening pass to fine-tune this is
@@ -47,12 +60,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         0.0005f));
 
     // Backs ShimmerReverbEngine::setWidth() (shimmerWidthGain). Default
-    // matches ShimmerReverbEngine::defaultShimmerWidthGain (0.3f).
+    // matches ShimmerReverbEngine::defaultShimmerWidthGain (0.15f).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::width, 1 },
         "Width",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.3f));
+        0.15f));
 
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below

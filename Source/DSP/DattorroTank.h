@@ -21,15 +21,21 @@
 // milliseconds (ms = samples / 29761 * 1000); prepare() converts ms to
 // actual samples at the live sample rate, same as ScratchSchroederTank.
 //
-// The tank's own figure-eight recirculating signal (feedbackFromB) is
-// readable externally via peekFeedbackSignal(), and processSample() has a
-// two-argument overload that accepts an externally-supplied recirculating
-// feedback value instead of always using feedbackFromB internally. This is
-// what lets ShimmerReverbEngine pitch-shift the tank's own sustain signal
-// before it re-enters the tank, per shimmer-reverb-architecture.md's
-// documented topology (tank output -> pitch shifter -> back into tank
-// input) — see docs/shimmer-reverb-implementation-plan.md's Phase 3/4
-// correction note for the root cause this fixes.
+// The tank's own figure-eight recirculating signal (feedbackFromB) always
+// contributes to the cross-feed sum (see processSample()), but the
+// two-argument overload lets an externally-supplied signal (by default
+// 0.0f, via the single-arg overload below) claim a capped SHARE of that
+// same fixed recirculation budget instead of adding an independent gain on
+// top (see maxShimmerBlendWeight's comment for why an independent additive
+// gain was a real stability bug -- combined loop gain could exceed the
+// validated-safe decayGain <= 0.85 ceiling). This crossfade is what lets
+// ShimmerReverbEngine blend a pitch-shifted cascade into the tank's own
+// sustain without ever pushing the total feedback gain past what Phase 4
+// already validated as stable -- see
+// docs/shimmer-reverb-implementation-plan.md's Phase 8 structural-fix note
+// (2026-08-18) for the full history (an initial pure-additive attempt caused
+// "oscillating, unnatural, psychedelic" artifacts from the combined loop
+// gain exceeding unity).
 class DattorroTank
 {
 public:
@@ -47,29 +53,45 @@ public:
     // Per-sample form of the same tank math as process(), for callers (e.g.
     // ShimmerReverbEngine) that need to interleave this tank with another
     // per-sample process (a pitch shifter in the feedback loop) rather than
-    // run it as a whole-block operation. Takes one mono input sample and the
-    // recirculating feedback signal to mix into branch A's input this pass,
-    // returns one mono output sample. Passing an externally-processed signal
-    // here (e.g. shifter.processSample(peekFeedbackSignal())) is what lets
-    // ShimmerReverbEngine pitch-shift the tank's own sustaining signal in
-    // place, per shimmer-reverb-architecture.md's documented topology (tank
-    // output -> pitch shifter -> back into tank input) — see
-    // docs/shimmer-reverb-implementation-plan.md's Phase 3/4 correction note.
-    float processSample (float input, float recirculatingFeedback);
+    // run it as a whole-block operation. Takes one mono input sample and an
+    // externally-supplied signal that claims a capped SHARE of the tank's
+    // fixed recirculation budget (see maxShimmerBlendWeight and
+    // setShimmerFeedbackGain()), crossfaded against the tank's own natural
+    // feedbackFromB -- NOT added independently on top of it. Passing the
+    // tank's own shifted feedback here (e.g.
+    // shifter.processSample(peekFeedbackSignal())) is what lets
+    // ShimmerReverbEngine blend a pitch-shifted cascade into the tank's own
+    // sustain while keeping the combined total feedback gain bounded by
+    // decayGain alone -- see
+    // docs/shimmer-reverb-implementation-plan.md's Phase 8 structural-fix
+    // note (2026-08-18).
+    float processSample (float input, float externalFeedback);
 
-    // Convenience overload preserving the tank's own unshifted figure-eight
-    // cross-feed exactly as before: forwards feedbackFromB (branch B's own
-    // last output) as the recirculating feedback, so any caller that
-    // doesn't want external injection (e.g. process() below, or
-    // DattorroTankTests.cpp) gets identical behavior to before this
-    // overload existed.
-    float processSample (float input) { return processSample (input, feedbackFromB); }
+    // Convenience overload for callers that want no external injection at
+    // all (e.g. process() below, or DattorroTankTests.cpp): 0.0f means the
+    // externalFeedback term above contributes nothing, leaving only the
+    // tank's own natural feedbackFromB recirculation -- identical behavior
+    // to the plain (no-shimmer) tank, since shimmerFeedbackGain * 0.0f is
+    // always exactly zero regardless of its value.
+    float processSample (float input) { return processSample (input, 0.0f); }
 
     // Tunable points, exposed as plain setters for empirical tuning by ear.
     // Phase 5 wires these up to real APVTS parameters; this class owns no
     // parameter knowledge itself.
     void setDamping (float newDampingCoefficient);
     void setDecay (float newDecayGain);
+
+    // Crossfade weight (0..1) controlling how much of the tank's fixed
+    // recirculation budget (see maxShimmerBlendWeight and processSample())
+    // goes to the externally-supplied signal vs. the tank's own natural
+    // feedbackFromB -- NOT an independent additive gain (see
+    // maxShimmerBlendWeight's comment for why that was a real bug). The
+    // COMBINED total feedback gain reaching the tank stays bounded by
+    // decayGain alone at every setting. Not clamped here (same convention
+    // as setDecay()/setDamping() -- the APVTS parameter range is the source
+    // of truth); ShimmerReverbEngine::setShimmerAmount() clamps to [0, 1]
+    // before calling this.
+    void setShimmerFeedbackGain (float newShimmerFeedbackGain);
 
     // Read-only, non-destructive peek at the tank's own recirculating
     // signal (branch B's output from the last processSample() call) without
@@ -199,6 +221,44 @@ private:
     // shifter in the loop via ShimmerReverbEngineTests before shipping.
     static constexpr float defaultDecayGain = 0.7f;
 
+    // Default for the new independent shimmer-injection gain (see
+    // setShimmerFeedbackGain()). 1.0f matches
+    // ShimmerReverbEngine::defaultShimmerAmount's own default so "shimmer at
+    // full strength" is the out-of-the-box behavior, same convention as
+    // decayGain/dampingCoefficient's defaults mirroring their APVTS
+    // parameter defaults.
+    static constexpr float defaultShimmerFeedbackGain = 1.0f;
+
+    // Structural-fix correction (docs/shimmer-reverb-implementation-plan.md's
+    // Phase 8 note, 2026-08-18, second pass): caps how much of the tank's
+    // recirculating budget the shimmer path can ever claim, so the COMBINED
+    // total feedback gain reaching the tank (see processSample()) stays
+    // bounded by decayGain alone -- the same ceiling Phase 4 already
+    // validated safe (decayGain <= 0.85) -- regardless of shimmerFeedbackGain's
+    // value. The first attempt at this fix (now corrected) let decayGain and
+    // shimmerFeedbackGain add independently, so the EFFECTIVE combined loop
+    // gain could reach decayGain + shimmerFeedbackGain (e.g. ~1.7 at
+    // defaults) -- well past the validated-safe ceiling, kept only
+    // technically bounded by SafetyLimiter's hard clipping, which is exactly
+    // what produced the reported "oscillating, unnatural, psychedelic"
+    // character (a feedback loop with gain > 1 constantly getting caught and
+    // clipped, not a smooth reverb tail).
+    //
+    // Raised 0.5f -> 0.85f, 2026-08-21, after an ear pass with the 0.5f cap
+    // (plus the by-then-fixed Width leak, see ShimmerReverbEngine.cpp) found
+    // the shimmer character sustained noticeably shorter than commercial
+    // shimmer reverbs even with Feedback/Shimmer Amount/Mix all at their
+    // maximum. The crossfade's gain-safety property (plainWeight +
+    // shimmerWeight == 1.0 exactly, always) holds for ANY value up to 1.0,
+    // not just 0.5 -- the cap's only real job is reserving *some* budget for
+    // the plain path so full geometric pitch-compounding ("chipmunk") can't
+    // completely take over at shimmerAmount's maximum, not gain safety
+    // itself. 0.85f mirrors decayGain's own validated-safe ceiling
+    // (Phase 4's decayGain <= 0.85f) as a reasoned upper bound, still leaving
+    // 15% of the budget on the plain path at shimmerAmount's maximum. Not
+    // exhaustively ear-tuned beyond this one pass; may need revisiting.
+    static constexpr float maxShimmerBlendWeight = 0.85f;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -229,6 +289,7 @@ private:
 
     float dampingCoefficient = defaultDampingCoefficient;
     float decayGain = defaultDecayGain;
+    float shimmerFeedbackGain = defaultShimmerFeedbackGain;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the

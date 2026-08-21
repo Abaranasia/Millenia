@@ -56,6 +56,12 @@ void ShimmerReverbEngine::setDamping (float newDamping)
     tank.setDamping (newDamping);
 }
 
+void ShimmerReverbEngine::setShimmerAmount (float newShimmerAmount)
+{
+    shimmerAmount = juce::jlimit (0.0f, 1.0f, newShimmerAmount);
+    tank.setShimmerFeedbackGain (shimmerAmount);
+}
+
 void ShimmerReverbEngine::setWidth (float newWidth)
 {
     shimmerWidthGain = juce::jlimit (0.0f, 1.0f, newWidth);
@@ -127,6 +133,13 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // passes through untouched.
         float safeFeedback = safetyLimiter.processSample (dcBlockedFeedback);
 
+        // The shimmerAmount gain now lives inside DattorroTank itself (see
+        // setShimmerFeedbackGain()) -- it scales safeFeedback as an
+        // ADDITIVE term layered on top of the tank's own natural
+        // decayGain-scaled recirculation, not a replacement for it. This is
+        // NOT the Width direct-injection term below (safeFeedback/
+        // quadratureSafe there stay full-strength, untouched by
+        // shimmerAmount).
         float tankOut = tank.processSample (monoData[i], safeFeedback);
 
         // Phase 4 stereo decorrelation: everything above this line is
@@ -154,8 +167,27 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // ratio, so the decorrelation comes purely from the different
         // grain-phase offsets between the pairs, not from any difference in
         // source content or shift amount.
-        float wetLeft = tankOut + shimmerWidthGain * safeFeedback;
-        float wetRight = tankOut + shimmerWidthGain * quadratureSafe;
+        // Phase 8 rework: inject only the L/R *difference* between the
+        // primary and quadrature shifted signals (pure side-channel
+        // decorrelation seasoning), not a raw full-strength copy summed into
+        // both channels -- the old formula's common-mode component competed
+        // with/masked the properly-diffused shimmer cascade already baked
+        // into tankOut (see docs/shimmer-reverb-implementation-plan.md's
+        // Phase 8 "Real gap 2" note). At width=0 this collapses to
+        // wetLeft == wetRight == tankOut exactly, same as before.
+        //
+        // Bug fix (found by ear, 2026-08-21): sideShift is derived straight
+        // from the shifter's output, which keeps running every sample
+        // regardless of shimmerAmount -- so this term used to keep injecting
+        // audible shifted content into the wet signal even at
+        // shimmerAmount=0.0f (the tank's own recirculation was correctly
+        // silenced, but this separate feed-forward term wasn't gated by the
+        // same knob). Multiplying by shimmerAmount here makes "no shimmer"
+        // mean no shimmer character anywhere in the output, not just in the
+        // tank's recirculating budget.
+        float sideShift = safeFeedback - quadratureSafe;
+        float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
+        float wetRight = tankOut - shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

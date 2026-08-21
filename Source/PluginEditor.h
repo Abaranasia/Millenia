@@ -36,8 +36,8 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, feedbackSlider, dampingSlider, widthSlider, mixSlider;
-    juce::Label  pitchShiftLabel,  feedbackLabel,  dampingLabel,  widthLabel,  mixLabel;
+    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider;
+    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel;
     juce::ToggleButton bypassButton { "Bypass" };
 
     juce::TextButton preset7Button  { "+7 st" };
@@ -49,6 +49,7 @@ private:
 
     std::unique_ptr<SliderAttachment> pitchShiftAttachment;
     std::unique_ptr<SliderAttachment> feedbackAttachment;
+    std::unique_ptr<SliderAttachment> shimmerAmountAttachment;
     std::unique_ptr<SliderAttachment> dampingAttachment;
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;

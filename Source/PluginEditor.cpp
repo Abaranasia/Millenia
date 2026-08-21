@@ -49,6 +49,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (pitchShiftSlider, pitchShiftLabel, "Pitch Shift");
     pitchShiftSlider.setLookAndFeel (&bipolarLookAndFeel);
     configureRotary (feedbackSlider, feedbackLabel, "Feedback");
+    configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
@@ -69,6 +70,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
 
     pitchShiftAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::pitchShift, pitchShiftSlider);
     feedbackAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::feedback,   feedbackSlider);
+    shimmerAmountAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerAmount, shimmerAmountSlider);
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
@@ -119,7 +121,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &dampingSlider, &widthSlider, &mixSlider })
+    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &dampingSlider, &widthSlider, &mixSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);
