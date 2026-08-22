@@ -151,6 +151,20 @@ public:
     // already computed.
     float getQuadratureOutput() const noexcept { return quadratureOutput; }
 
+    // Freeze-decay mitigation, experiment 2 (2026-08-22, see
+    // docs/fdn-shimmer-reverb-research.md section 9 -- Valhalla Shimmer's
+    // granular pitch shifter is reported to deliberately randomize grain
+    // timing to decorrelate feedback-loop artifacts; this is the analogous,
+    // separately-targeted technique for THIS project's specific measured
+    // bug). Crossfades in a slow, small sinusoidal dither on the shifter's
+    // own mean delay (see freezeDriftDepthSamples/currentDriftSamples below)
+    // as freezeAmount rises. At freezeAmount=0.0f this is bit-identical to
+    // no dither at all (depth scales linearly with freezeAmount, reaching
+    // exactly 0 there) -- same "no behavior change unless Freeze is actually
+    // engaged" convention every other freeze-aware DSP class in this project
+    // already follows.
+    void setFreezeAmount (float newFreezeAmount) noexcept { freezeAmount = juce::jlimit (0.0f, 1.0f, newFreezeAmount); }
+
 private:
     using DelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>;
 
