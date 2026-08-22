@@ -110,8 +110,29 @@ void ShimmerReverbEngine::updateShifterRatio()
     // amount essentially untouched through most of the dial's travel and
     // only pulls it toward unity near full freeze, while still reaching
     // EXACTLY 0 semitones (ratio 1.0) at freezeAmount=1.0, same as before.
-    const float crossfade = std::pow (1.0f - freezeAmount, pitchShiftCrossfadeCurve);
-    shifter.setPitchShiftSemitones (pitchShiftSemitones * crossfade);
+    //
+    // BUG, found and fixed 2026-08-22 (by-ear report: "a pitch variation is
+    // noticeable when moving the freeze dial" -- still present after the
+    // original fix, plus an unrelated-seeming Width loss at high freeze):
+    // this used to be std::pow(1.0f - freezeAmount, pitchShiftCrossfadeCurve)
+    // -- (1-f)^4 -- which is a real arithmetic error, not the curve shape
+    // described above. (1-f)^4 is STEEPEST right at f=0 and FLATTENS out
+    // near f=1: at f=0.5 it evaluates to 0.0625 (94% of the shift already
+    // gone at the HALFWAY point of the dial, not "essentially untouched").
+    // That is the exact opposite of the intended shape, and explains both
+    // symptoms: pitch dropping audibly as soon as the dial leaves 0 (not
+    // concentrated near full freeze), and reduced Width through most of the
+    // range too (Width's sideShift term is the difference between the
+    // primary/quadrature shifted signals -- less actual shift happening
+    // means less spectral difference between them, hence a narrower-sounding
+    // result, independent of anything specific to Width's own code). The
+    // correct shape for "flat near 0, steep drop near 1, exactly 0 at 1" is
+    // 1 - f^4, not (1-f)^4 -- e.g. at f=0.5 this evaluates to 0.9375 (94%
+    // RETAINED, matching what was originally intended/described), still
+    // reaching exactly 0 at f=1.0 (the anti-cascade guarantee is unaffected).
+    const float crossfade = 1.0f - std::pow (freezeAmount, pitchShiftCrossfadeCurve);
+    const float effectiveSemitones = pitchShiftSemitones * crossfade;
+    shifter.setPitchShiftSemitones (effectiveSemitones);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
