@@ -93,6 +93,7 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
     freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
     tank.setFreezeAmount (freezeAmount);
     freezeLeveler.setFreezeAmount (freezeAmount);
+    shifter.setFreezeAmount (freezeAmount);
 
     // Re-derive the shifter's ratio against the just-updated freezeAmount --
     // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()

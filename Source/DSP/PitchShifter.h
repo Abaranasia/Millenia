@@ -247,6 +247,59 @@ private:
     // baseDelayGrainMultiple above applies here: unaffected by grain count.
     static constexpr float maxDelayExtraGrainMultiple = 2.0f;
 
+    // Freeze-decay mitigation, experiment 2 (see setFreezeAmount()'s comment
+    // above for the full rationale). ShimmerReverbEngine's Freeze bug
+    // (DattorroTank.h's frozenMaxShimmerBlendWeight comment) is destructive
+    // comb-filtering interference at a STATIC ~80ms offset between the
+    // tank's own direct feedback and this shifter's baseDelaySamples-delayed
+    // copy. Dithering that mean delay slowly and slightly -- the same
+    // principle chorus/flanger effects use to hide comb coloration under
+    // slow delay modulation -- turns that one fixed, fully-destructive notch
+    // into a slowly wandering one, which is far less audible than a static
+    // one even though it isn't literally removed. Depth (+-2ms) and rate
+    // (0.15Hz) are REASONED starting points (small enough to be inaudible as
+    // its own pitch wobble -- roughly +-4 cents at these values -- slow
+    // enough not to read as vibrato), not exhaustively ear-tuned.
+    //
+    // IMPORTANT, verified 2026-08-22: this mechanism was confirmed WORKING
+    // (a standalone sanity check drove the live dither value to exactly its
+    // configured depth every time) but produces NO measurable change on
+    // ShimmerReverbEngineTests.cpp's existing Freeze-decay/oscillation
+    // diagnostic (RMS-based), even at 7.5x this depth (15ms, tested then
+    // reverted) as a sanity-check upper bound. This is expected, not a
+    // failure of the mechanism: total broadband energy lost to destructive
+    // comb interference is theoretically conserved whether the null sits at
+    // one static frequency or wanders across several over time -- a moving
+    // null still removes just as much energy at any given instant, only at
+    // a different, changing location. The claimed benefit here is
+    // PERCEPTUAL (a wandering, chorus-like coloration reads as far less
+    // objectionable than a static, "dead" one -- see
+    // docs/fdn-shimmer-reverb-research.md section 9), not a reduction in
+    // measured decay-dB or RMS-oscillation. This project's existing
+    // automated diagnostics cannot confirm or deny that perceptual claim --
+    // only a listening pass can. Treat this constant's value as unvalidated
+    // by ear as of this note.
+    //
+    // Lowered 2.0f -> 0.4f, 2026-08-22 (by-ear report: "chipmunk effect
+    // again... works nice for low notes, but sounds a bit ridiculous on
+    // higher notes"). Root cause: this dither's induced pitch deviation
+    // (1 - d(delay)/dt, the same mechanism that gives chorus/vibrato its
+    // pitch wobble) is a fixed RELATIVE (cents) shift -- roughly constant
+    // regardless of what note is playing -- but a fixed relative shift is a
+    // proportionally LARGER absolute Hz deviation on a higher note (e.g. ~3
+    // cents at the old 2.0f depth is ~0.2Hz at 110Hz but ~1.7Hz at 880Hz).
+    // Applied across a harmonically rich higher note, every harmonic drifts
+    // by a proportionally larger absolute amount, which reads as
+    // inter-harmonic detuning/chipmunk character rather than a subtle
+    // wobble. 0.4f keeps the depth-rate product (and hence the induced
+    // cents deviation) roughly 5x smaller than before, aiming to keep the
+    // wobble subtle even on higher notes -- still a REASONED value, not
+    // exhaustively ear-tuned; may need further reduction (or a rate change
+    // instead/also, since induced deviation scales with depth*rate) after
+    // another listening pass.
+    static constexpr float freezeDriftDepthMs = 0.4f;
+    static constexpr float freezeDriftRateHz = 0.15f;
+
     // grainDelaySamples(elapsed) = baseDelaySamples - elapsed * (pitchRatio - 1.0f)
     // This makes the delay change by exactly (1 - pitchRatio) per sample as a
     // grain ages by 1 sample per sample -- precisely the rate needed for the
@@ -357,6 +410,23 @@ private:
     // Cached so processSample() never calls std::pow (updated only when
     // setPitchShiftSemitones() is called).
     float pitchRatio = 1.0f;
+
+    // Freeze-decay mitigation state (see freezeDriftDepthMs's comment
+    // above). freezeAmount is set by setFreezeAmount(); freezeDriftDepthSamples
+    // and driftPhaseIncrement are computed once in prepare() from the live
+    // sample rate; driftPhase accumulates every sample in processSample()
+    // (wrapped, never allowed to grow unbounded); currentDriftSamples is the
+    // actual per-sample dither value (0 at freezeAmount=0.0f) added to
+    // baseDelaySamples everywhere it's used for an actual delay-line read
+    // (grainDelaySamples() and findAlignmentOffset()) -- NOT added to the
+    // capacity-sizing/initial-setDelay() uses in prepare(), which stay based
+    // on the fixed nominal baseDelaySamples plus this drift's own max
+    // excursion as extra headroom.
+    float freezeAmount = 0.0f;
+    float freezeDriftDepthSamples = 0.0f;
+    float driftPhaseIncrement = 0.0f;
+    float driftPhase = 0.0f;
+    float currentDriftSamples = 0.0f;
 
     // Primary pool: same role as the old primaryVoices group, feeds the
     // recirculating tank path via processSample()'s return value. See the

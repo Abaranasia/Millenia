@@ -20,7 +20,18 @@ void PitchShifter::prepare (const juce::dsp::ProcessSpec& spec)
     alignmentSearchRadiusSamples = juce::jmax (16, crossfadeSamplesInt / 4);
     alignmentReferenceBuffer.assign ((size_t) crossfadeSamplesInt, 0.0f);
 
-    auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple;
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // computed once here from the live sample rate, same convention as
+    // every other ms-based constant in this class.
+    freezeDriftDepthSamples = freezeDriftDepthMs * 0.001f * (float) spec.sampleRate;
+    driftPhaseIncrement = juce::MathConstants<float>::twoPi * freezeDriftRateHz / (float) spec.sampleRate;
+
+    // +freezeDriftDepthSamples: the dither above can push the effective
+    // delay up to that far beyond the nominal baseDelaySamples/+grain-length
+    // margin already computed below -- the delay line's capacity must cover
+    // that excursion too, or a read would clamp/misbehave right when Freeze
+    // is engaged.
+    auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple + freezeDriftDepthSamples;
     delayLine.setMaximumDelayInSamples (juce::roundToInt (neededSamples) + 1);
 
     juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
@@ -66,6 +77,12 @@ void PitchShifter::reset()
     // before this reset() would seed the first post-reset search.
     primaryLastOffset = 0.0f;
     quadratureLastOffset = 0.0f;
+
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // rewind the drift LFO's phase too, so a reset() produces the same
+    // starting dither state every time rather than resuming mid-cycle.
+    driftPhase = 0.0f;
+    currentDriftSamples = 0.0f;
 }
 
 void PitchShifter::setPitchShiftSemitones (float semitones)
@@ -75,7 +92,10 @@ void PitchShifter::setPitchShiftSemitones (float semitones)
 
 float PitchShifter::grainDelaySamples (int elapsed) const noexcept
 {
-    return baseDelaySamples - (float) elapsed * (pitchRatio - 1.0f);
+    // currentDriftSamples is 0.0f unless Freeze is engaged (see
+    // freezeDriftDepthMs's header comment) -- at freezeAmount=0.0f this is
+    // bit-identical to the pre-existing formula.
+    return baseDelaySamples + currentDriftSamples - (float) elapsed * (pitchRatio - 1.0f);
 }
 
 float PitchShifter::grainWindow (int elapsed) const noexcept
@@ -100,7 +120,13 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
     if (outgoing == nullptr)
         return previousOffset;
 
-    const float outgoingBaseDelay = baseDelaySamples + outgoing->baseDelayOffset;
+    // baseDelaySamples + currentDriftSamples (not bare baseDelaySamples): the
+    // search must operate against the SAME currently-drifted reference the
+    // active grains themselves are reading via grainDelaySamples(), or it
+    // would hunt for alignment against a stale/wrong delay and find a
+    // spuriously bad offset. currentDriftSamples is 0.0f unless Freeze is
+    // engaged (see freezeDriftDepthMs's header comment).
+    const float outgoingBaseDelay = baseDelaySamples + currentDriftSamples + outgoing->baseDelayOffset;
     const float outgoingCurrentDelay = outgoingBaseDelay - (float) outgoing->age * (pitchRatio - 1.0f);
 
     const int windowSamples = (int) alignmentReferenceBuffer.size();
@@ -162,7 +188,7 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
         {
             const float candidateOffset = anchor + (float) lag;
-            const float candidateBaseDelay = baseDelaySamples + candidateOffset;
+            const float candidateBaseDelay = baseDelaySamples + currentDriftSamples + candidateOffset;
 
             float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
 
@@ -208,6 +234,18 @@ float PitchShifter::processSample (float input)
     // mechanism DattorroTank::peekTap() already relies on.
     delayLine.pushSample (0, input);
     delayLine.popSample (0);
+
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // advance the drift LFO's phase once per sample and recompute the
+    // current dither value used by grainDelaySamples()/findAlignmentOffset()
+    // below. Scaled by freezeAmount so this is exactly 0.0f (no phase
+    // advance needed even, since the sine is multiplied by zero) unless
+    // Freeze is actually engaged -- bit-identical to before this feature at
+    // freezeAmount=0.0f.
+    driftPhase += driftPhaseIncrement;
+    if (driftPhase >= juce::MathConstants<float>::twoPi)
+        driftPhase -= juce::MathConstants<float>::twoPi;
+    currentDriftSamples = freezeAmount * freezeDriftDepthSamples * std::sin (driftPhase);
 
     // No interpolator-reset step is needed here at any grain's launch:
     // DelayLine<Lagrange3rd>'s interpolation carries no history/state
