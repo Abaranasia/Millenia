@@ -10,12 +10,18 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     feedbackDcBlocker.prepare (spec);
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
+    freezeLeveler.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
     // until a caller actually calls setPitchShiftSemitones() with something
-    // different.
-    shifter.setPitchShiftSemitones (defaultPitchShiftSemitones);
+    // different. Goes through the member (not shifter directly) so a
+    // re-prepare() while already frozen (e.g. a host sample-rate change)
+    // re-derives the correct freeze-crossfaded ratio instead of silently
+    // snapping back to the un-crossfaded default -- see
+    // pitchShiftSemitones' header comment.
+    pitchShiftSemitones = defaultPitchShiftSemitones;
+    updateShifterRatio();
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
@@ -39,11 +45,16 @@ void ShimmerReverbEngine::reset()
     feedbackDcBlocker.reset();
     safetyLimiter.reset();
     quadratureDcBlocker.reset();
+    freezeLeveler.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
 {
-    shifter.setPitchShiftSemitones (semitones);
+    // Stored so setFreezeAmount() can recompute the shifter's actual ratio
+    // against the current freeze crossfade without needing this value passed
+    // back in -- see pitchShiftSemitones' header comment.
+    pitchShiftSemitones = semitones;
+    updateShifterRatio();
 }
 
 void ShimmerReverbEngine::setFeedback (float newFeedback)
@@ -54,6 +65,12 @@ void ShimmerReverbEngine::setFeedback (float newFeedback)
 void ShimmerReverbEngine::setDamping (float newDamping)
 {
     tank.setDamping (newDamping);
+}
+
+void ShimmerReverbEngine::setShimmerAmount (float newShimmerAmount)
+{
+    shimmerAmount = juce::jlimit (0.0f, 1.0f, newShimmerAmount);
+    tank.setShimmerFeedbackGain (shimmerAmount);
 }
 
 void ShimmerReverbEngine::setWidth (float newWidth)
@@ -69,6 +86,31 @@ void ShimmerReverbEngine::setMix (float newMix)
 void ShimmerReverbEngine::setBypassed (bool shouldBypass)
 {
     bypassed = shouldBypass;
+}
+
+void ShimmerReverbEngine::setFreezeAmount (float amount)
+{
+    freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
+    tank.setFreezeAmount (freezeAmount);
+    freezeLeveler.setFreezeAmount (freezeAmount);
+
+    // Re-derive the shifter's ratio against the just-updated freezeAmount --
+    // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()
+    // every block (see pitchShiftSemitones' header comment for why this
+    // crossfade exists at all), so this call is what actually applies each
+    // block's freeze amount rather than lagging one block behind it.
+    updateShifterRatio();
+}
+
+void ShimmerReverbEngine::updateShifterRatio()
+{
+    // See pitchShiftCrossfadeCurve's header comment for why this is raised
+    // to a power instead of a plain linear crossfade -- keeps the shift
+    // amount essentially untouched through most of the dial's travel and
+    // only pulls it toward unity near full freeze, while still reaching
+    // EXACTLY 0 semitones (ratio 1.0) at freezeAmount=1.0, same as before.
+    const float crossfade = std::pow (1.0f - freezeAmount, pitchShiftCrossfadeCurve);
+    shifter.setPitchShiftSemitones (pitchShiftSemitones * crossfade);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -127,7 +169,24 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // passes through untouched.
         float safeFeedback = safetyLimiter.processSample (dcBlockedFeedback);
 
-        float tankOut = tank.processSample (monoData[i], safeFeedback);
+        // The shimmerAmount gain now lives inside DattorroTank itself (see
+        // setShimmerFeedbackGain()) -- it scales safeFeedback as an
+        // ADDITIVE term layered on top of the tank's own natural
+        // decayGain-scaled recirculation, not a replacement for it. This is
+        // NOT the Width direct-injection term below (safeFeedback/
+        // quadratureSafe there stay full-strength, untouched by
+        // shimmerAmount).
+        // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md):
+        // scale the fresh dry input by (1.0f - freezeAmount) so freezing
+        // stops injecting NEW dry signal into the loop while decayGain is
+        // separately pinned near-unity inside DattorroTank (see
+        // setFreezeAmount()) -- muting only one of those two things isn't
+        // enough: pinning decayGain alone while still feeding fresh input
+        // would keep adding fresh energy into an already near-losslessly
+        // sustaining loop (a slow but real runaway), and muting input alone
+        // without pinning decayGain would just silence the plugin as the
+        // existing tail decays at its normal, un-frozen rate.
+        float tankOut = tank.processSample (monoData[i] * (1.0f - freezeAmount), safeFeedback);
 
         // Phase 4 stereo decorrelation: everything above this line is
         // unchanged from Phase 3/4's tuned recirculating loop (tank input,
@@ -154,8 +213,39 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // ratio, so the decorrelation comes purely from the different
         // grain-phase offsets between the pairs, not from any difference in
         // source content or shift amount.
-        float wetLeft = tankOut + shimmerWidthGain * safeFeedback;
-        float wetRight = tankOut + shimmerWidthGain * quadratureSafe;
+        // Phase 8 rework: inject only the L/R *difference* between the
+        // primary and quadrature shifted signals (pure side-channel
+        // decorrelation seasoning), not a raw full-strength copy summed into
+        // both channels -- the old formula's common-mode component competed
+        // with/masked the properly-diffused shimmer cascade already baked
+        // into tankOut (see docs/shimmer-reverb-implementation-plan.md's
+        // Phase 8 "Real gap 2" note). At width=0 this collapses to
+        // wetLeft == wetRight == tankOut exactly, same as before.
+        //
+        // Bug fix (found by ear, 2026-08-21): sideShift is derived straight
+        // from the shifter's output, which keeps running every sample
+        // regardless of shimmerAmount -- so this term used to keep injecting
+        // audible shifted content into the wet signal even at
+        // shimmerAmount=0.0f (the tank's own recirculation was correctly
+        // silenced, but this separate feed-forward term wasn't gated by the
+        // same knob). Multiplying by shimmerAmount here makes "no shimmer"
+        // mean no shimmer character anywhere in the output, not just in the
+        // tank's recirculating budget.
+        float sideShift = safeFeedback - quadratureSafe;
+        float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
+        float wetRight = tankOut - shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
+
+        // Phase 9 Freeze follow-up (see FreezeLeveler.h): compensate the
+        // wet signal's measured decay under sustained freeze, applied to
+        // BOTH channels identically from a mono-summed measurement -- using
+        // each channel's own independent envelope would let the Width
+        // decorrelation term drift the stereo image as the two channels'
+        // gains diverged, which isn't this stage's job. At freezeAmount=0.0f
+        // this multiplies by exactly 1.0f (see FreezeLeveler's class
+        // comment), so it's a no-op unless Freeze is actually engaged.
+        const float freezeLevelerGain = freezeLeveler.computeGain (0.5f * (wetLeft + wetRight));
+        wetLeft *= freezeLevelerGain;
+        wetRight *= freezeLevelerGain;
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

@@ -26,33 +26,56 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 0.85f),
         0.7f));
 
+    // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
+    // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal
+    // layered additively on top of the tank's own natural (decayGain-scaled)
+    // recirculation -- decoupling "how much shimmer cascade gets added" from
+    // "how long the plain tail sustains" (decayGain). At 0.0f the tank is a
+    // plain (unshifted) reverb only; at 1.0f (default) the shimmer cascade
+    // is added at full strength.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::shimmerAmount, 1 },
+        "Shimmer Amount",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        1.0f));
+
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
-    // damping filter. Range/skew are a REASONED STARTING POINT, not an
-    // ear-tuned final value -- an actual listening pass to fine-tune this is
-    // still open (see docs/shimmer-reverb-implementation-plan.md, Phase 5).
-    // The two empirically-known points from real project history are
-    // 0.0005 (Phase 2's tested-good default -- "bright continuous wash") and
-    // ~0.32 (Phase 2's proven-bad value -- "discrete dull thuds," see
-    // DattorroTank.h's defaultDampingCoefficient comment, which found an
-    // 8000Hz IIR cutoff maps to ~0.32 here, over 600x too aggressive). This
-    // 0.0..0.05 range sits well below that proven-bad value, leaving the
-    // whole slider inside the useful creative range; the 0.3 skew factor
-    // biases slider resolution toward the low end so the tested-good
-    // 0.0005 default has reasonable resolution around it rather than being
-    // crammed into an unusable sliver near zero on a linear slider.
+    // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
+    // (by-ear report: "the damping dial provides no noticeable difference") --
+    // the previous 0.0..0.05 range was a real bug, not just an over-cautious
+    // choice: the coefficient-to-cutoff relationship this filter actually
+    // implements is fc = -(sampleRate / 2*pi) * ln(a) (the same relationship
+    // DattorroTank.h's defaultDampingCoefficient comment already uses to
+    // derive "an 8000Hz cutoff maps to a~=0.32"). At the OLD range's own
+    // maximum (0.05), fc ~= 21kHz; at the default (0.0005), fc is already
+    // above Nyquist (~53kHz) -- so the entire old slider only ever swept
+    // cutoff from "no filtering" to "still only rolling off content above
+    // 21kHz," nowhere near the ~8kHz reference point where damping actually
+    // becomes audible. Measured directly (not just derived): a diagnostic
+    // spectral-tilt test (DattorroTankTests.cpp, "Damping's APVTS range
+    // produces almost no audible spectral difference") found the old range
+    // covered only ~20% of the brightness swing between the default and that
+    // ~0.32 reference. New range extends the maximum to 0.3f -- just under
+    // the documented "sounds like a delay, not a reverb" 0.32 extreme, so the
+    // full knob throw actually reaches a genuinely dark/damped tail at full
+    // clockwise, not just a barely-perceptible one. Default (0.0005f,
+    // "bright continuous wash") and skew (0.3, biasing resolution toward the
+    // low end where the tested-good default lives) are UNCHANGED -- only the
+    // upper bound was wrong. Still a REASONED value, not an ear-tuned final
+    // one -- an actual listening pass across the new range is still open.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::damping, 1 },
         "Damping",
-        juce::NormalisableRange<float> (0.0f, 0.05f, 0.0f, 0.3f),
+        juce::NormalisableRange<float> (0.0f, 0.3f, 0.0f, 0.3f),
         0.0005f));
 
     // Backs ShimmerReverbEngine::setWidth() (shimmerWidthGain). Default
-    // matches ShimmerReverbEngine::defaultShimmerWidthGain (0.3f).
+    // matches ShimmerReverbEngine::defaultShimmerWidthGain (0.15f).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::width, 1 },
         "Width",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.3f));
+        0.15f));
 
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below
@@ -73,6 +96,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::ParameterID { ParamIDs::bypass, 1 },
         "Bypass",
         false));
+
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md). Was
+    // originally an AudioParameterBool driving smoothedFreeze's 0/1 target,
+    // same convention as bypass above -- switched to a continuous float
+    // (2026-08-22, replacing the on/off toggle with a dial in the editor) so
+    // the user can dial in a partial freeze amount live over a sounding
+    // signal, not just snap between the two extremes. PluginProcessor's
+    // wiring (freezeParam/smoothedFreeze/setFreezeAmount()) is completely
+    // unchanged by this -- it already treated freezeParam as a float and
+    // freezeAmount throughout the DSP chain was always continuous [0, 1];
+    // only the APVTS parameter TYPE and the editor control change here.
+    // Default 0.0f, same as before. Display name is "Freeze Amount" (renamed
+    // from plain "Freeze", 2026-08-22) so it reads distinctly from the
+    // editor's separate freezeQuickToggle checkbox, which is also just
+    // labelled "Freeze" -- see PluginEditor.cpp.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::freeze, 1 },
+        "Freeze Amount",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.0f));
 
     return layout;
 }

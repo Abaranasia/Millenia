@@ -5,6 +5,7 @@
 #include "PitchShifter.h"
 #include "DCBlocker.h"
 #include "SafetyLimiter.h"
+#include "FreezeLeveler.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -93,6 +94,18 @@ public:
     void setFeedback (float newFeedback);
     void setDamping (float newDamping);
 
+    // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
+    // comment), clamped to [0, 1] here -- never amplifies above unity, so
+    // Phase 4's runaway-safety margin (decayGain < 0.85) on the tank's OWN
+    // natural recirculation is never affected by this parameter at all (it
+    // only gains the separate, additive shimmer-injection term). Also kept
+    // locally (see shimmerAmount below) so process()'s Width/decorrelation
+    // term can be gated by it too -- that term reads the shifter's output
+    // directly, not through DattorroTank, so DattorroTank owning the value
+    // alone isn't enough to silence it (bug found by ear, 2026-08-21: Width
+    // kept the shimmer character audible even at shimmerAmount=0.0f).
+    void setShimmerAmount (float newShimmerAmount);
+
     // Clamped to [0, 1]. Replaces the old setShimmerWidthGain() name now
     // that this is genuinely public API rather than an internal-only
     // setter -- kept as a single setter rather than two names for the same
@@ -121,23 +134,69 @@ public:
     // framing ("Add parameter smoothing ... in MilleniaAudioProcessor").
     void setBypassed (bool shouldBypass);
 
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md):
+    // forwards to DattorroTank::setFreezeAmount(), clamped to [0, 1] here
+    // (same convention as setShimmerAmount()/setWidth()/setMix()). Also
+    // stored locally so process() can mute the fresh dry input reaching the
+    // tank's diffuser -- Freeze's mechanism is now three coordinated things
+    // (mute new input + pin decayGain near unity + crossfade the shifter's
+    // own ratio toward unity, see pitchShiftSemitones' comment below), and
+    // the tank only ever owns the second of those.
+    void setFreezeAmount (float amount);
+
 private:
+    // Recomputes and applies the shifter's actual pitch ratio from the
+    // current pitchShiftSemitones/freezeAmount -- shared by prepare(),
+    // setPitchShiftSemitones(), and setFreezeAmount() so the crossfade curve
+    // (see pitchShiftCrossfadeCurve below) only lives in one place.
+    void updateShifterRatio();
+
+    // Phase 9 Freeze pitch-ratio crossfade, curve fix (2026-08-22, by-ear
+    // report: "increasing freeze seems to produce a pitch down change that
+    // wasn't noticeable previously"). The original fix (linear
+    // `pitchShiftSemitones * (1.0f - freezeAmount)`, see
+    // pitchShiftSemitones' comment below) is CORRECT at freezeAmount=1.0
+    // (ratio must reach exactly unity there, or the endless upward-cascading
+    // drone this was built to fix comes back) but was audibly reducing the
+    // shimmer's pitch shift far too early in the dial's travel -- at
+    // freezeAmount=0.5 it had ALREADY cut a +12st shift in half (+6st),
+    // which is exactly the "pitch down" the user heard well before Freeze
+    // was anywhere near fully engaged. Raising (1.0f - freezeAmount) to this
+    // power instead keeps the reduction negligible through most of the
+    // dial's travel and concentrates it near the top: at freezeAmount=0.5 a
+    // +12st shift is only reduced to ~+11.25st (a 6% cut, well under a
+    // semitone -- essentially inaudible) instead of half; the curve still
+    // reaches exactly 0 at freezeAmount=1.0, so the anti-cascade guarantee
+    // is unchanged. A REASONED value, not exhaustively ear-tuned -- picked
+    // for a "barely noticeable until well past halfway" shape, open to
+    // revisiting after a listening pass.
+    static constexpr float pitchShiftCrossfadeCurve = 4.0f;
+
     // Phase 5 default -- was Phase 3's hardcoded shiftSemitones constant,
     // now just the value setPitchShiftSemitones() is seeded with once in
     // prepare() so behavior is unchanged until a caller actually changes
     // it live.
     static constexpr float defaultPitchShiftSemitones = 12.0f; // classic shimmer octave-up default
 
-    // How much of the (safety-netted) shifted signal is mixed directly into
-    // each output channel to create width -- see the process() comment
-    // above for the mix formula. Phase 5 wires this to a real parameter.
-    static constexpr float defaultShimmerWidthGain = 0.3f;
+    // Phase 8 rework: this term used to inject a raw, full-strength copy of
+    // the shifted signal into the wet output (see process()), which at high
+    // settings read as a "parallel pitch shifter" artifact rather than
+    // blended shimmer. It now injects only the L/R *difference* between the
+    // primary/quadrature shifted signals (pure stereo-decorrelation
+    // seasoning), so its default is lowered accordingly. Value is a REASONED
+    // STARTING POINT pending a by-ear pass, not a final tuned constant.
+    static constexpr float defaultShimmerWidthGain = 0.15f;
 
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
     // wet, not bypassed, so existing tests/behavior are unchanged unless a
     // caller explicitly calls setMix()/setBypassed().
     static constexpr float defaultMix = 1.0f;
     static constexpr bool defaultBypassed = false;
+
+    // Matches DattorroTank::defaultShimmerFeedbackGain so "shimmer at full
+    // strength" is the out-of-the-box behavior, same convention as the
+    // other defaults above.
+    static constexpr float defaultShimmerAmount = 1.0f;
 
     DattorroTank tank;
     PitchShifter shifter;
@@ -151,7 +210,18 @@ private:
     // threshold) and is reused for both signals.
     DCBlocker quadratureDcBlocker;
 
+    // Phase 9 Freeze follow-up (2026-08-22, see FreezeLeveler.h): feed-forward
+    // output-stage compensation for Freeze's measured amplitude decay --
+    // scales the already-computed wetLeft/wetRight, never anything inside
+    // the recirculating loop.
+    FreezeLeveler freezeLeveler;
+
     float shimmerWidthGain = defaultShimmerWidthGain;
+
+    // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
+    // -- see setShimmerAmount()'s comment for why process()'s Width term
+    // needs its own gating copy rather than trusting the tank alone.
+    float shimmerAmount = defaultShimmerAmount;
 
     // Phase 5: dry/wet mix (see setMix()) and bypass (see setBypassed()).
     // bypassed does not gate/skip any processing -- it only forces the
@@ -160,6 +230,37 @@ private:
     // being hard-cut.
     float mix = defaultMix;
     bool bypassed = defaultBypassed;
+
+    // Phase 9 Freeze (see setFreezeAmount()): default 0.0f so an untouched
+    // engine is bit-identical to pre-Phase-9 behavior. process() scales the
+    // fresh dry input by (1.0f - freezeAmount) before it reaches the tank
+    // -- at 1.0f no NEW dry energy enters the diffuser at all, leaving only
+    // whatever's already recirculating (now sustained near-losslessly via
+    // DattorroTank::setFreezeAmount()'s effectiveDecayGain).
+    float freezeAmount = 0.0f;
+
+    // Phase 9 Freeze follow-up (see setFreezeAmount()'s comment): the
+    // user/APVTS-driven pitch shift target, stored separately from whatever
+    // is actually loaded into `shifter` right now. Tried gating
+    // DattorroTank's shimmerWeight/plainWeight crossfade by freezeAmount
+    // first (stop feeding shifted content into the loop at all once frozen)
+    // -- that broke DattorroTankTests' 3-minute frozen-boundedness test
+    // (peak grew past the 10.0 safety bound within ~1 minute): Phase 8's
+    // 0.85/0.15 shimmerWeight/plainWeight split isn't just an arbitrary
+    // blend, it's load-bearing for stability at frozenDecayGain's near-unity
+    // 0.999 -- forcing plainWeight to 1.0 (100% of the loop riding on the
+    // tank's own unshifted feedbackFromB alone) let the tank's two-branch
+    // cross-feed network's own resonant gain exceed unity at that decay,
+    // something the pre-existing 0.15 floor was accidentally masking. This
+    // member drives a DIFFERENT mechanism instead, left at the
+    // already-validated shimmerWeight math: the shifter's own ratio
+    // crossfades toward 1.0 (0 semitones, i.e. a plain delay tap) as
+    // freezeAmount goes 0 -> 1, so the loop keeps its proven-stable
+    // 0.85/0.15 blend but the shimmer-injected side of that blend stops
+    // cascading the pitch further with every recirculation -- this is what
+    // actually stops the frozen drone from endlessly climbing/falling in
+    // pitch, without touching Phase 8's stability-critical weight split.
+    float pitchShiftSemitones = defaultPitchShiftSemitones;
 
     // Mono scratch buffer, pre-sized in prepare() so process() never
     // allocates.

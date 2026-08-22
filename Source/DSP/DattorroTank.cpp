@@ -85,6 +85,16 @@ void DattorroTank::setDecay (float newDecayGain)
     decayGain = newDecayGain;
 }
 
+void DattorroTank::setShimmerFeedbackGain (float newShimmerFeedbackGain)
+{
+    shimmerFeedbackGain = newShimmerFeedbackGain;
+}
+
+void DattorroTank::setFreezeAmount (float newFreezeAmount)
+{
+    freezeAmount = newFreezeAmount;
+}
+
 float DattorroTank::processAllpass (float input, AllpassStage& stage)
 {
     // Correct one-multiply Schroeder allpass (Julius O. Smith's "Schroeder
@@ -145,22 +155,61 @@ float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples)
     return tapped;
 }
 
-float DattorroTank::processSample (float input, float recirculatingFeedback)
+float DattorroTank::processSample (float input, float externalFeedback)
 {
     float diffused = input;
 
     for (auto& stage : diffuserStages)
         diffused = processAllpass (diffused, stage);
 
-    // Figure-eight cross-feed: the caller-supplied recirculating feedback
-    // (by default branch B's previous output, via the single-arg overload;
-    // or an externally pitch-shifted version of it, from
-    // ShimmerReverbEngine) feeds branch A, branch A's fresh output feeds
-    // branch B.
-    float inputToA = diffused + decayGain * recirculatingFeedback;
+    // Structural fix, second pass (docs/shimmer-reverb-implementation-plan.md's
+    // Phase 8 note, 2026-08-18): externalFeedback claims a capped SHARE of
+    // the tank's fixed recirculation budget, crossfaded against the tank's
+    // own natural feedbackFromB, rather than being added as an independent
+    // extra gain on top. Since shimmerWeight + plainWeight is always exactly
+    // 1.0, the combined magnitude of (plainWeight*feedbackFromB +
+    // shimmerWeight*externalFeedback) can never exceed
+    // max(|feedbackFromB|, |externalFeedback|) -- so the TOTAL feedback gain
+    // reaching the tank stays bounded by decayGain alone (the same ceiling
+    // Phase 4 already validated safe, decayGain <= 0.85), for ANY
+    // shimmerFeedbackGain setting. The first attempt at this fix (a plain
+    // additive sum, decayGain*feedbackFromB + shimmerFeedbackGain*
+    // externalFeedback) let the two gains add independently, so combined
+    // loop gain could reach decayGain + shimmerFeedbackGain (~1.7 at
+    // defaults) -- past unity, kept only technically bounded by
+    // SafetyLimiter's hard clipping, which produced the reported
+    // "oscillating, unnatural, psychedelic" character. capping
+    // shimmerWeight at maxShimmerBlendWeight (0.5) also guarantees at least
+    // half the recirculating budget always stays on the plain/unshifted
+    // path even at shimmerAmount's maximum, which is what prevents full
+    // geometric pitch-compounding (the original "chipmunk" bug) from
+    // reappearing.
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md and
+    // frozenDecayGain's comment in the header): blends the live decayGain
+    // toward frozenDecayGain as freezeAmount goes 0 -> 1, so at
+    // freezeAmount=0.0f effectiveDecayGain is bit-identical to decayGain
+    // (no behavior change) and at 1.0f both cross-feed sums below
+    // recirculate at the near-unity frozen gain instead. Computed once and
+    // reused for both the A and B cross-feed sums -- Phase 4's validated
+    // decayGain<=0.85 stability work assumed strictly <1.0 and never
+    // exercised this near-unity case, hence the dedicated freeze stability
+    // test in DattorroTankTests.cpp.
+    const float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
+
+    // Freeze, second mechanism (see frozenMaxShimmerBlendWeight's header
+    // comment for the full measured history): crossfades the shimmerWeight
+    // CAP toward a smaller value as freezeAmount goes 0->1, reducing (not
+    // eliminating) how much of the loop's energy takes the comb-filtering-
+    // prone detour through the shimmer path once frozen, without forcing
+    // plainWeight all the way to the proven-unstable 1.0.
+    const float effectiveMaxShimmerBlendWeight = maxShimmerBlendWeight
+                                                      + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
+    const float shimmerWeight = shimmerFeedbackGain * effectiveMaxShimmerBlendWeight;
+    const float plainWeight = 1.0f - shimmerWeight;
+    float inputToA = diffused + effectiveDecayGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);
 
-    float inputToB = diffused + decayGain * tankA_out;
+    float inputToB = diffused + effectiveDecayGain * tankA_out;
     float tankB_out = processBranch (inputToB, branchB);
 
     feedbackFromB = tankB_out;

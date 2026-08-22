@@ -21,15 +21,21 @@
 // milliseconds (ms = samples / 29761 * 1000); prepare() converts ms to
 // actual samples at the live sample rate, same as ScratchSchroederTank.
 //
-// The tank's own figure-eight recirculating signal (feedbackFromB) is
-// readable externally via peekFeedbackSignal(), and processSample() has a
-// two-argument overload that accepts an externally-supplied recirculating
-// feedback value instead of always using feedbackFromB internally. This is
-// what lets ShimmerReverbEngine pitch-shift the tank's own sustain signal
-// before it re-enters the tank, per shimmer-reverb-architecture.md's
-// documented topology (tank output -> pitch shifter -> back into tank
-// input) — see docs/shimmer-reverb-implementation-plan.md's Phase 3/4
-// correction note for the root cause this fixes.
+// The tank's own figure-eight recirculating signal (feedbackFromB) always
+// contributes to the cross-feed sum (see processSample()), but the
+// two-argument overload lets an externally-supplied signal (by default
+// 0.0f, via the single-arg overload below) claim a capped SHARE of that
+// same fixed recirculation budget instead of adding an independent gain on
+// top (see maxShimmerBlendWeight's comment for why an independent additive
+// gain was a real stability bug -- combined loop gain could exceed the
+// validated-safe decayGain <= 0.85 ceiling). This crossfade is what lets
+// ShimmerReverbEngine blend a pitch-shifted cascade into the tank's own
+// sustain without ever pushing the total feedback gain past what Phase 4
+// already validated as stable -- see
+// docs/shimmer-reverb-implementation-plan.md's Phase 8 structural-fix note
+// (2026-08-18) for the full history (an initial pure-additive attempt caused
+// "oscillating, unnatural, psychedelic" artifacts from the combined loop
+// gain exceeding unity).
 class DattorroTank
 {
 public:
@@ -47,29 +53,57 @@ public:
     // Per-sample form of the same tank math as process(), for callers (e.g.
     // ShimmerReverbEngine) that need to interleave this tank with another
     // per-sample process (a pitch shifter in the feedback loop) rather than
-    // run it as a whole-block operation. Takes one mono input sample and the
-    // recirculating feedback signal to mix into branch A's input this pass,
-    // returns one mono output sample. Passing an externally-processed signal
-    // here (e.g. shifter.processSample(peekFeedbackSignal())) is what lets
-    // ShimmerReverbEngine pitch-shift the tank's own sustaining signal in
-    // place, per shimmer-reverb-architecture.md's documented topology (tank
-    // output -> pitch shifter -> back into tank input) — see
-    // docs/shimmer-reverb-implementation-plan.md's Phase 3/4 correction note.
-    float processSample (float input, float recirculatingFeedback);
+    // run it as a whole-block operation. Takes one mono input sample and an
+    // externally-supplied signal that claims a capped SHARE of the tank's
+    // fixed recirculation budget (see maxShimmerBlendWeight and
+    // setShimmerFeedbackGain()), crossfaded against the tank's own natural
+    // feedbackFromB -- NOT added independently on top of it. Passing the
+    // tank's own shifted feedback here (e.g.
+    // shifter.processSample(peekFeedbackSignal())) is what lets
+    // ShimmerReverbEngine blend a pitch-shifted cascade into the tank's own
+    // sustain while keeping the combined total feedback gain bounded by
+    // decayGain alone -- see
+    // docs/shimmer-reverb-implementation-plan.md's Phase 8 structural-fix
+    // note (2026-08-18).
+    float processSample (float input, float externalFeedback);
 
-    // Convenience overload preserving the tank's own unshifted figure-eight
-    // cross-feed exactly as before: forwards feedbackFromB (branch B's own
-    // last output) as the recirculating feedback, so any caller that
-    // doesn't want external injection (e.g. process() below, or
-    // DattorroTankTests.cpp) gets identical behavior to before this
-    // overload existed.
-    float processSample (float input) { return processSample (input, feedbackFromB); }
+    // Convenience overload for callers that want no external injection at
+    // all (e.g. process() below, or DattorroTankTests.cpp): 0.0f means the
+    // externalFeedback term above contributes nothing, leaving only the
+    // tank's own natural feedbackFromB recirculation -- identical behavior
+    // to the plain (no-shimmer) tank, since shimmerFeedbackGain * 0.0f is
+    // always exactly zero regardless of its value.
+    float processSample (float input) { return processSample (input, 0.0f); }
 
     // Tunable points, exposed as plain setters for empirical tuning by ear.
     // Phase 5 wires these up to real APVTS parameters; this class owns no
     // parameter knowledge itself.
     void setDamping (float newDampingCoefficient);
     void setDecay (float newDecayGain);
+
+    // Crossfade weight (0..1) controlling how much of the tank's fixed
+    // recirculation budget (see maxShimmerBlendWeight and processSample())
+    // goes to the externally-supplied signal vs. the tank's own natural
+    // feedbackFromB -- NOT an independent additive gain (see
+    // maxShimmerBlendWeight's comment for why that was a real bug). The
+    // COMBINED total feedback gain reaching the tank stays bounded by
+    // decayGain alone at every setting. Not clamped here (same convention
+    // as setDecay()/setDamping() -- the APVTS parameter range is the source
+    // of truth); ShimmerReverbEngine::setShimmerAmount() clamps to [0, 1]
+    // before calling this.
+    void setShimmerFeedbackGain (float newShimmerFeedbackGain);
+
+    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): 0..1 crossfade
+    // between the live, APVTS-driven decayGain (0.0f) and frozenDecayGain
+    // (1.0f, near-unity), computed per-sample as effectiveDecayGain inside
+    // processSample() -- see that method and frozenDecayGain's comment
+    // below. Arrives pre-smoothed from the caller (PluginProcessor's
+    // smoothedFreeze), same contract as every other tunable here, so no
+    // additional smoothing is needed inside this class. Muting the fresh
+    // dry input while frozen is ShimmerReverbEngine's job (it scales the
+    // input sample before this class ever sees it); this setter only owns
+    // the decay-pinning half of the freeze mechanism.
+    void setFreezeAmount (float newFreezeAmount);
 
     // Read-only, non-destructive peek at the tank's own recirculating
     // signal (branch B's output from the last processSample() call) without
@@ -199,6 +233,131 @@ private:
     // shifter in the loop via ShimmerReverbEngineTests before shipping.
     static constexpr float defaultDecayGain = 0.7f;
 
+    // Default for the new independent shimmer-injection gain (see
+    // setShimmerFeedbackGain()). 1.0f matches
+    // ShimmerReverbEngine::defaultShimmerAmount's own default so "shimmer at
+    // full strength" is the out-of-the-box behavior, same convention as
+    // decayGain/dampingCoefficient's defaults mirroring their APVTS
+    // parameter defaults.
+    static constexpr float defaultShimmerFeedbackGain = 1.0f;
+
+    // Structural-fix correction (docs/shimmer-reverb-implementation-plan.md's
+    // Phase 8 note, 2026-08-18, second pass): caps how much of the tank's
+    // recirculating budget the shimmer path can ever claim, so the COMBINED
+    // total feedback gain reaching the tank (see processSample()) stays
+    // bounded by decayGain alone -- the same ceiling Phase 4 already
+    // validated safe (decayGain <= 0.85) -- regardless of shimmerFeedbackGain's
+    // value. The first attempt at this fix (now corrected) let decayGain and
+    // shimmerFeedbackGain add independently, so the EFFECTIVE combined loop
+    // gain could reach decayGain + shimmerFeedbackGain (e.g. ~1.7 at
+    // defaults) -- well past the validated-safe ceiling, kept only
+    // technically bounded by SafetyLimiter's hard clipping, which is exactly
+    // what produced the reported "oscillating, unnatural, psychedelic"
+    // character (a feedback loop with gain > 1 constantly getting caught and
+    // clipped, not a smooth reverb tail).
+    //
+    // Raised 0.5f -> 0.85f, 2026-08-21, after an ear pass with the 0.5f cap
+    // (plus the by-then-fixed Width leak, see ShimmerReverbEngine.cpp) found
+    // the shimmer character sustained noticeably shorter than commercial
+    // shimmer reverbs even with Feedback/Shimmer Amount/Mix all at their
+    // maximum. The crossfade's gain-safety property (plainWeight +
+    // shimmerWeight == 1.0 exactly, always) holds for ANY value up to 1.0,
+    // not just 0.5 -- the cap's only real job is reserving *some* budget for
+    // the plain path so full geometric pitch-compounding ("chipmunk") can't
+    // completely take over at shimmerAmount's maximum, not gain safety
+    // itself. 0.85f mirrors decayGain's own validated-safe ceiling
+    // (Phase 4's decayGain <= 0.85f) as a reasoned upper bound, still leaving
+    // 15% of the budget on the plain path at shimmerAmount's maximum. Not
+    // exhaustively ear-tuned beyond this one pass; may need revisiting.
+    static constexpr float maxShimmerBlendWeight = 0.85f;
+
+    // Freeze-time shimmerWeight cap (2026-08-22): crossfades
+    // maxShimmerBlendWeight's effective value from 0.85f (freezeAmount=0.0f,
+    // bit-identical to the pre-existing formula) toward this smaller target
+    // as freezeAmount goes 0->1 -- see processSample()'s
+    // effectiveMaxShimmerBlendWeight. NOT the same fix as the first attempt
+    // at this (reverted -- see git history / Engram topic
+    // architecture/millenia-freeze), which crossfaded the cap all the way to
+    // 0.0f (plainWeight->1.0 at full freeze) and broke this file's own
+    // 3-minute freeze-boundedness test: that plainWeight=1.0 configuration
+    // is provably unstable at frozenDecayGain's near-unity decay (peak
+    // exceeded the 10.0 safety bound within ~1 minute), because the
+    // shimmerWeight/plainWeight blend turns out to double as what keeps the
+    // tank's own two-branch cross-feed resonance detuned/bounded at that
+    // decay, not just as the shimmer-character knob. A separate diagnostic
+    // (ShimmerReverbEngineTests.cpp's "Freeze = 1.0's actual sustained tail")
+    // found the ORIGINAL 0.85f cap causes a different, also-real problem at
+    // full freeze: comb filtering between the tank's direct feedbackFromB and
+    // the separately-delayed (via PitchShifter's own ~80ms internal delay
+    // line) shimmer-path copy measurably bleeds energy every pass, which is
+    // invisible at ordinary (<=0.85) decayGain (masked by its own much
+    // larger attenuation) but becomes the dominant, audible ("still finishes
+    // soon, oscillates, sometimes sounds like a motor") decay mechanism at
+    // Freeze's near-unity decay.
+    //
+    // Swept against both this file's 3-minute freeze-boundedness test AND
+    // ShimmerReverbEngineTests.cpp's 15s decay diagnostic (2026-08-22), one
+    // value at a time, decay measured in dB over that diagnostic's 15s
+    // window (baseline at the unmodified 0.85f cap: -6.7dB):
+    //   0.6f  -> -7.69dB (WORSE than baseline -- stable)
+    //   0.4f  -> -7.74dB (WORSE than baseline -- stable)
+    //   0.2f  -> -7.45dB (worse than baseline -- stable)
+    //   0.05f -> -5.19dB (better than baseline -- stable)
+    //   0.02f -> -3.11dB (much better -- stable)
+    //   0.01f  -> -1.94dB (much better -- stable over the committed 3-minute
+    //           test AND a 10-MINUTE extended run)
+    //   0.007f -> -1.53dB (marginally better than 0.01f on the SHORT 3-minute
+    //           test -- but FAILS the 10-minute extended run: 40055 assertion
+    //           failures. This is the important finding: the instability
+    //           cliff is not a single sharp point catchable by any fixed-
+    //           duration test -- there is a real band (roughly 0.007f-0.01f)
+    //           where a SHORT test gives false confidence and only a longer
+    //           run reveals the slow-building runaway. Do not trust a
+    //           candidate here without re-running at least a 10-minute
+    //           boundedness check, not just the committed 3-minute one.
+    //   0.005f -> UNSTABLE even on the short test: 8045 assertion failures,
+    //           peak blew past the 10.0 safety bound almost immediately.
+    // Also tried and found NOT to help (2026-08-22, second investigation):
+    // replacing the shifter's grain machinery with a plain fixed-delay tap at
+    // ratio==1.0 (sidesteps grain-hop/alignment-search artifacts entirely) --
+    // tested at short (0.2-5ms), matched (80ms, i.e. baseDelaySamples), and
+    // long (110ms) tap lengths, both alone (shimmerWeight restored to 0.85f)
+    // and combined with the 0.01f weight fix above. Short taps made decay
+    // WORSE (-9.9dB, worse than doing nothing); matched/long taps reproduced
+    // the same numbers as the normal grain machinery (~-6.7dB alone, ~-1.94dB
+    // combined with 0.01f) -- i.e. no measurable effect either way. The
+    // decay/oscillation is NOT caused by the grain mechanism specifically,
+    // only by shimmerWeight itself (see the sweep above) -- this rules out
+    // "just bypass the grains" as a free additional win.
+    // The weight/decay relationship is NOT monotonic -- decay gets WORSE than
+    // the 0.85f baseline through the 0.2f-0.6f range before improving sharply
+    // below ~0.05f, consistent with genuine comb-filtering interference
+    // (whose depth depends on the specific phase relationship between the two
+    // summed paths at a given weight, not simply "more weight = more loss")
+    // rather than a simple monotonic gain trade-off. 0.01f is chosen as the
+    // most aggressive value verified safe over a 10-minute run, not just a
+    // convenient round number -- see the 0.007f row above for why shorter
+    // verification would have been misleading here.
+    static constexpr float frozenMaxShimmerBlendWeight = 0.01f; // see comment above for the swept numbers behind this value
+
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): the
+    // near-unity decayGain target while Freeze is engaged, per the plan's
+    // committed mechanism (a) -- "pin decayGain to unity (or just under,
+    // e.g. 0.999f, to sidestep an exact-1.0 edge case)". Deliberately NOT
+    // 1.0f: at exactly 1.0 the tank's cross-feed sum (see processSample())
+    // would recirculate its own past output with zero loss on every single
+    // pass, which is an idealized-only case that real floating-point
+    // accumulation (denormal-adjacent tiny errors, the diffuser's own
+    // allpass gain, damping's leaky-integrator rounding) can push either
+    // side of -- 0.999f keeps the loop provably strictly-decaying-toward-
+    // its-own-past-energy in the mathematical sense (a genuine, if
+    // extremely slow, contraction) while still reading as "indefinitely
+    // sustained" on any human timescale (each recirculation loses only
+    // 0.1% of its prior amplitude, i.e. a -60dB decay would take thousands
+    // of tank round-trips -- see DattorroTankTests.cpp's freeze-specific
+    // stability test for the actual measured numbers).
+    static constexpr float frozenDecayGain = 0.999f;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -229,6 +388,13 @@ private:
 
     float dampingCoefficient = defaultDampingCoefficient;
     float decayGain = defaultDecayGain;
+    float shimmerFeedbackGain = defaultShimmerFeedbackGain;
+
+    // Phase 9 Freeze crossfade weight (see setFreezeAmount() and
+    // frozenDecayGain above); 0.0f default means processSample()'s
+    // effectiveDecayGain equals the live decayGain exactly, i.e. no
+    // behavior change until a caller actually engages Freeze.
+    float freezeAmount = 0.0f;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the
