@@ -90,6 +90,11 @@ void DattorroTank::setShimmerFeedbackGain (float newShimmerFeedbackGain)
     shimmerFeedbackGain = newShimmerFeedbackGain;
 }
 
+void DattorroTank::setFreezeAmount (float newFreezeAmount)
+{
+    freezeAmount = newFreezeAmount;
+}
+
 float DattorroTank::processAllpass (float input, AllpassStage& stage)
 {
     // Correct one-multiply Schroeder allpass (Julius O. Smith's "Schroeder
@@ -179,12 +184,24 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // path even at shimmerAmount's maximum, which is what prevents full
     // geometric pitch-compounding (the original "chipmunk" bug) from
     // reappearing.
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md and
+    // frozenDecayGain's comment in the header): blends the live decayGain
+    // toward frozenDecayGain as freezeAmount goes 0 -> 1, so at
+    // freezeAmount=0.0f effectiveDecayGain is bit-identical to decayGain
+    // (no behavior change) and at 1.0f both cross-feed sums below
+    // recirculate at the near-unity frozen gain instead. Computed once and
+    // reused for both the A and B cross-feed sums -- Phase 4's validated
+    // decayGain<=0.85 stability work assumed strictly <1.0 and never
+    // exercised this near-unity case, hence the dedicated freeze stability
+    // test in DattorroTankTests.cpp.
+    const float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
+
     const float shimmerWeight = shimmerFeedbackGain * maxShimmerBlendWeight;
     const float plainWeight = 1.0f - shimmerWeight;
-    float inputToA = diffused + decayGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
+    float inputToA = diffused + effectiveDecayGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);
 
-    float inputToB = diffused + decayGain * tankA_out;
+    float inputToB = diffused + effectiveDecayGain * tankA_out;
     float tankB_out = processBranch (inputToB, branchB);
 
     feedbackFromB = tankB_out;

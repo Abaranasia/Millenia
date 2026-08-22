@@ -14,8 +14,13 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
     // until a caller actually calls setPitchShiftSemitones() with something
-    // different.
-    shifter.setPitchShiftSemitones (defaultPitchShiftSemitones);
+    // different. Goes through the member (not shifter directly) so a
+    // re-prepare() while already frozen (e.g. a host sample-rate change)
+    // re-derives the correct freeze-crossfaded ratio instead of silently
+    // snapping back to the un-crossfaded default -- see
+    // pitchShiftSemitones' header comment.
+    pitchShiftSemitones = defaultPitchShiftSemitones;
+    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
@@ -43,7 +48,11 @@ void ShimmerReverbEngine::reset()
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
 {
-    shifter.setPitchShiftSemitones (semitones);
+    // Stored so setFreezeAmount() can recompute the shifter's actual ratio
+    // against the current freeze crossfade without needing this value passed
+    // back in -- see pitchShiftSemitones' header comment.
+    pitchShiftSemitones = semitones;
+    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
 }
 
 void ShimmerReverbEngine::setFeedback (float newFeedback)
@@ -75,6 +84,19 @@ void ShimmerReverbEngine::setMix (float newMix)
 void ShimmerReverbEngine::setBypassed (bool shouldBypass)
 {
     bypassed = shouldBypass;
+}
+
+void ShimmerReverbEngine::setFreezeAmount (float amount)
+{
+    freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
+    tank.setFreezeAmount (freezeAmount);
+
+    // Re-derive the shifter's ratio against the just-updated freezeAmount --
+    // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()
+    // every block (see pitchShiftSemitones' header comment for why this
+    // crossfade exists at all), so this call is what actually applies each
+    // block's freeze amount rather than lagging one block behind it.
+    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -140,7 +162,17 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // NOT the Width direct-injection term below (safeFeedback/
         // quadratureSafe there stay full-strength, untouched by
         // shimmerAmount).
-        float tankOut = tank.processSample (monoData[i], safeFeedback);
+        // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md):
+        // scale the fresh dry input by (1.0f - freezeAmount) so freezing
+        // stops injecting NEW dry signal into the loop while decayGain is
+        // separately pinned near-unity inside DattorroTank (see
+        // setFreezeAmount()) -- muting only one of those two things isn't
+        // enough: pinning decayGain alone while still feeding fresh input
+        // would keep adding fresh energy into an already near-losslessly
+        // sustaining loop (a slow but real runaway), and muting input alone
+        // without pinning decayGain would just silence the plugin as the
+        // existing tail decays at its normal, un-frozen rate.
+        float tankOut = tank.processSample (monoData[i] * (1.0f - freezeAmount), safeFeedback);
 
         // Phase 4 stereo decorrelation: everything above this line is
         // unchanged from Phase 3/4's tuned recirculating loop (tank input,

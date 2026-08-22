@@ -93,6 +93,18 @@ public:
     // before calling this.
     void setShimmerFeedbackGain (float newShimmerFeedbackGain);
 
+    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): 0..1 crossfade
+    // between the live, APVTS-driven decayGain (0.0f) and frozenDecayGain
+    // (1.0f, near-unity), computed per-sample as effectiveDecayGain inside
+    // processSample() -- see that method and frozenDecayGain's comment
+    // below. Arrives pre-smoothed from the caller (PluginProcessor's
+    // smoothedFreeze), same contract as every other tunable here, so no
+    // additional smoothing is needed inside this class. Muting the fresh
+    // dry input while frozen is ShimmerReverbEngine's job (it scales the
+    // input sample before this class ever sees it); this setter only owns
+    // the decay-pinning half of the freeze mechanism.
+    void setFreezeAmount (float newFreezeAmount);
+
     // Read-only, non-destructive peek at the tank's own recirculating
     // signal (branch B's output from the last processSample() call) without
     // consuming or mutating anything. Callable any time after
@@ -259,6 +271,24 @@ private:
     // exhaustively ear-tuned beyond this one pass; may need revisiting.
     static constexpr float maxShimmerBlendWeight = 0.85f;
 
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): the
+    // near-unity decayGain target while Freeze is engaged, per the plan's
+    // committed mechanism (a) -- "pin decayGain to unity (or just under,
+    // e.g. 0.999f, to sidestep an exact-1.0 edge case)". Deliberately NOT
+    // 1.0f: at exactly 1.0 the tank's cross-feed sum (see processSample())
+    // would recirculate its own past output with zero loss on every single
+    // pass, which is an idealized-only case that real floating-point
+    // accumulation (denormal-adjacent tiny errors, the diffuser's own
+    // allpass gain, damping's leaky-integrator rounding) can push either
+    // side of -- 0.999f keeps the loop provably strictly-decaying-toward-
+    // its-own-past-energy in the mathematical sense (a genuine, if
+    // extremely slow, contraction) while still reading as "indefinitely
+    // sustained" on any human timescale (each recirculation loses only
+    // 0.1% of its prior amplitude, i.e. a -60dB decay would take thousands
+    // of tank round-trips -- see DattorroTankTests.cpp's freeze-specific
+    // stability test for the actual measured numbers).
+    static constexpr float frozenDecayGain = 0.999f;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -290,6 +320,12 @@ private:
     float dampingCoefficient = defaultDampingCoefficient;
     float decayGain = defaultDecayGain;
     float shimmerFeedbackGain = defaultShimmerFeedbackGain;
+
+    // Phase 9 Freeze crossfade weight (see setFreezeAmount() and
+    // frozenDecayGain above); 0.0f default means processSample()'s
+    // effectiveDecayGain equals the live decayGain exactly, i.e. no
+    // behavior change until a caller actually engages Freeze.
+    float freezeAmount = 0.0f;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the

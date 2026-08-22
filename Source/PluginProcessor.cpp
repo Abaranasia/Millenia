@@ -36,6 +36,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
+    freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -125,12 +126,14 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
+    smoothedFreeze.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
+    smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
 
     // Bypass folds into the mix smoother's seed value too -- see
     // processBlock()'s comment for why bypass drives smoothedMix rather than
@@ -206,6 +209,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
+    smoothedFreeze.setTargetValue (freezeParam->load());
 
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
@@ -229,6 +233,13 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
+
+    // Phase 9: Freeze gets the exact same block-granularity smoothing
+    // treatment as every other continuous parameter above -- it's a bool at
+    // the APVTS level, but an instant 0->1 jump on decayGain/dry-mute
+    // inside the tank would click, same reasoning as bypass driving
+    // smoothedMix instead of a hard switch (see the comment above).
+    shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
 
     juce::dsp::AudioBlock<float> block (buffer);
     shimmerReverbEngine.process (block);

@@ -1,4 +1,5 @@
 #include <JuceHeader.h>
+#include <vector>
 #include "../../Source/DSP/ShimmerReverbEngine.h"
 #include "../../Source/DSP/DattorroTank.h"
 
@@ -688,6 +689,272 @@ public:
                                                                        "output at block " + juce::String (b)
                                                                        + ", sample " + juce::String (i));
                 }
+            }
+        }
+
+        beginTest ("DIAGNOSTIC: downward pitch-shift cascades die into DCBlocker's subsonic cutoff far sooner than upward cascades of equal magnitude");
+        {
+            // Investigating docs/shimmer-reverb-implementation-plan.md's Phase 9
+            // carried-over item: "negative/downward pitch shift's shimmer being
+            // barely noticeable (not yet investigated)". Hypothesis: the shifter
+            // sits INSIDE the tank's own recirculation loop
+            // (ShimmerReverbEngine::process(): shiftedFeedback =
+            // shifter.processSample(tank.peekFeedbackSignal()), fed back in via
+            // DattorroTank::processSample(input, externalFeedback)), so every
+            // recirculation re-applies the same pitchRatio. An upward shift
+            // (ratio > 1) marches toward higher frequencies with several octaves
+            // of headroom before Nyquist; a downward shift (ratio < 1) marches
+            // toward DC with only 1-2 octaves of headroom before running into
+            // feedbackDcBlocker's fixed 20Hz one-pole highpass (DCBlocker.h,
+            // cutoffHz), which sits in that SAME loop (right after the shift, per
+            // ShimmerReverbEngine.cpp) -- so a downward cascade should get
+            // progressively eaten by that highpass far sooner than an upward
+            // cascade runs out of audible range on the top end. This is measured
+            // directly here (bucketed per-second RMS over a long silent tail),
+            // not asserted by ear, so it can be checked without an audio device.
+            //
+            // Same burst-then-silence shape as the "decays to near-silence" test
+            // above, but tracking RMS per second (not just the final second's
+            // peak) so the tail's actual survival time above a fixed noise floor
+            // can be compared directly between a positive/negative pair of equal
+            // magnitude.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+
+            constexpr double burstSeconds = 2.0;
+            constexpr double silenceSeconds = 40.0;
+            constexpr int burstBlocks = (int) (burstSeconds * sampleRate / blockSize);
+            constexpr int silenceBlocks = (int) (silenceSeconds * sampleRate / blockSize);
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+            constexpr int numSecondBuckets = (int) (silenceSeconds);
+
+            // Measures the tail: same fixed-seed burst (so +N/-N are driven by
+            // bit-identical input, an apples-to-apples comparison), full default
+            // shimmer strength (shimmerAmount=1.0, the class default -- the
+            // setting where the shimmer cascade should be most audible), then
+            // silence while per-second RMS is tracked across both channels.
+            // Returns one RMS value per elapsed second of silence.
+            auto measureTailRmsPerSecond = [&] (float semitones) -> std::vector<float>
+            {
+                ShimmerReverbEngine engine;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+                engine.prepare (spec);
+                engine.reset();
+                engine.setPitchShiftSemitones (semitones);
+
+                juce::AudioBuffer<float> buffer (numChannels, blockSize);
+                juce::Random random (975319); // same seed for every direction/magnitude -- fair comparison
+
+                for (int b = 0; b < burstBlocks; ++b)
+                {
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getWritePointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            data[i] = random.nextFloat() * 0.6f - 0.3f;
+                    }
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+                }
+
+                std::vector<float> rmsPerSecond ((size_t) numSecondBuckets, 0.0f);
+
+                for (int b = 0; b < silenceBlocks; ++b)
+                {
+                    buffer.clear();
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+
+                    const int bucket = juce::jmin (numSecondBuckets - 1, b / blocksPerSecond);
+                    double sumSquares = 0.0;
+
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getReadPointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            sumSquares += (double) data[i] * (double) data[i];
+                    }
+
+                    // Accumulate into a running mean-square per bucket by
+                    // reusing rmsPerSecond as a mean-square accumulator until
+                    // the final sqrt pass below -- avoids a second buffer.
+                    rmsPerSecond[(size_t) bucket] += (float) (sumSquares / (double) (blockSize * numChannels));
+                }
+
+                const int blocksInLastBucket = silenceBlocks - (numSecondBuckets - 1) * blocksPerSecond;
+                for (int s = 0; s < numSecondBuckets; ++s)
+                {
+                    const int blocksInThisBucket = (s == numSecondBuckets - 1) ? blocksInLastBucket : blocksPerSecond;
+                    rmsPerSecond[(size_t) s] = std::sqrt (rmsPerSecond[(size_t) s] / (float) juce::jmax (1, blocksInThisBucket));
+                }
+
+                return rmsPerSecond;
+            };
+
+            // Counts how many of the FIRST-second-onward buckets stay above
+            // -60dB relative to that same trace's own peak (i.e. the loudest
+            // second anywhere in its tail) -- a self-relative measure, so it's
+            // comparing "how long does this direction's own cascade stay audible
+            // above its own noise floor", not comparing absolute levels between
+            // directions (which setShimmerAmount/decayGain don't claim to
+            // equalize).
+            auto countAudibleSeconds = [] (const std::vector<float>& rmsPerSecond) -> int
+            {
+                float peak = 0.0f;
+                for (float v : rmsPerSecond)
+                    peak = juce::jmax (peak, v);
+
+                if (peak <= 0.0f)
+                    return 0;
+
+                const float threshold = peak * 0.001f; // -60dB
+                int audibleSeconds = 0;
+                for (float v : rmsPerSecond)
+                    if (v > threshold)
+                        ++audibleSeconds;
+
+                return audibleSeconds;
+            };
+
+            for (float magnitude : { 12.0f, 24.0f })
+            {
+                auto upRms = measureTailRmsPerSecond (magnitude);
+                auto downRms = measureTailRmsPerSecond (-magnitude);
+
+                for (float v : upRms)
+                    expect (std::isfinite (v), "Non-finite RMS bucket at +" + juce::String (magnitude) + "st");
+                for (float v : downRms)
+                    expect (std::isfinite (v), "Non-finite RMS bucket at -" + juce::String (magnitude) + "st");
+
+                const int upAudibleSeconds = countAudibleSeconds (upRms);
+                const int downAudibleSeconds = countAudibleSeconds (downRms);
+
+                logMessage ("Pitch-direction asymmetry at +-" + juce::String (magnitude) + "st: "
+                                + "+" + juce::String (magnitude) + "st stays above -60dB (of its own peak) for "
+                                + juce::String (upAudibleSeconds) + "/" + juce::String (numSecondBuckets) + "s; "
+                                + juce::String (magnitude) + "st stays above -60dB for "
+                                + juce::String (downAudibleSeconds) + "/" + juce::String (numSecondBuckets) + "s"
+                                + " (down: " + juce::String (downRms.empty() ? 0.0f : downRms.front(), 6)
+                                + " -> ...; up: " + juce::String (upRms.empty() ? 0.0f : upRms.front(), 6) + " -> ...)");
+            }
+        }
+
+        beginTest ("Freeze defaults to 0.0 and reproduces the pre-existing behavior bit-for-bit");
+        {
+            // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): same
+            // default-equivalence convention as the "Shimmer Amount defaults
+            // to 1.0..." test above -- an untouched engine and one with
+            // setFreezeAmount(0.0f) explicitly called must be bit-identical,
+            // proving Freeze is a genuine opt-in with zero behavior change
+            // at its default.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 100;
+
+            ShimmerReverbEngine defaultEngine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            defaultEngine.prepare (spec);
+            defaultEngine.reset();
+
+            ShimmerReverbEngine explicitEngine;
+            explicitEngine.prepare (spec);
+            explicitEngine.reset();
+            explicitEngine.setFreezeAmount (0.0f);
+
+            juce::AudioBuffer<float> defaultBuffer (numChannels, blockSize);
+            juce::AudioBuffer<float> explicitBuffer (numChannels, blockSize);
+
+            juce::Random random (192837);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getWritePointer (ch);
+                    auto* explicitData = explicitBuffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        float sample = random.nextFloat() * 0.6f - 0.3f;
+                        defaultData[i] = sample;
+                        explicitData[i] = sample;
+                    }
+                }
+
+                juce::dsp::AudioBlock<float> defaultBlock (defaultBuffer);
+                juce::dsp::AudioBlock<float> explicitBlock (explicitBuffer);
+                defaultEngine.process (defaultBlock);
+                explicitEngine.process (explicitBlock);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getReadPointer (ch);
+                    auto* explicitData = explicitBuffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expectEquals (explicitData[i], defaultData[i], "setFreezeAmount(0.0f) diverged from the "
+                                                                            "untouched default at channel "
+                                                                            + juce::String (ch) + ", block "
+                                                                            + juce::String (b) + ", sample "
+                                                                            + juce::String (i));
+                    }
+                }
+            }
+        }
+
+        beginTest ("Freeze = 1.0 stays finite and bounded (near-unity decayGain, dry input fully muted)");
+        {
+            // Phase 9: the DattorroTank-level stability case (effectiveDecayGain
+            // near 0.999f) is already covered at length by
+            // DattorroTankTests.cpp's own freeze tests -- this test's job is
+            // narrower, confirming the SAME safety property holds once
+            // ShimmerReverbEngine's full chain (shifter, DC blockers, safety
+            // limiter, dry-input muting) is wired around it, not re-proving
+            // DattorroTank's own math from scratch.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 2600; // ~30s, same order as the file's main boundedness test
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setFreezeAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (918273);
+
+            float maxPeak = 0.0f;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block " + juce::String (b)
+                                                              + ", sample " + juce::String (i) + " (Freeze engaged)");
+                        maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                    }
+                }
+
+                expect (maxPeak <= 10.0f, "setFreezeAmount(1.0f) exceeded the safety bound of 10.0 at block "
+                                               + juce::String (b) + " (peak so far: " + juce::String (maxPeak) + ")");
             }
         }
     }

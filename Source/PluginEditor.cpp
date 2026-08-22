@@ -55,8 +55,9 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (mixSlider,      mixLabel,      "Mix");
 
     addAndMakeVisible (bypassButton);
+    addAndMakeVisible (freezeButton);
 
-    for (auto* button : { &preset7Button, &preset12Button, &preset19Button })
+    for (auto* button : { &presetNeg12Button, &preset0Button, &preset7Button, &preset12Button, &preset19Button })
         addAndMakeVisible (button);
 
     // Quick-select presets set the SAME pitchShift parameter value the knob
@@ -64,6 +65,11 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // rules that out). Routed through the already-attached slider, never
     // through audioProcessor/apvts directly, so this stays inside the
     // "GUI never touches processor state directly" rule.
+    // Phase 9 adds the two missing presets (0st, -12st) from the original
+    // UI mock, alongside the existing +7/+12/+19 (see
+    // docs/shimmer-reverb-implementation-plan.md, Phase 9).
+    presetNeg12Button.onClick = [this] { pitchShiftSlider.setValue (-12.0, juce::sendNotificationSync); };
+    preset0Button.onClick  = [this] { pitchShiftSlider.setValue (0.0,   juce::sendNotificationSync); };
     preset7Button.onClick  = [this] { pitchShiftSlider.setValue (7.0,  juce::sendNotificationSync); };
     preset12Button.onClick = [this] { pitchShiftSlider.setValue (12.0, juce::sendNotificationSync); };
     preset19Button.onClick = [this] { pitchShiftSlider.setValue (19.0, juce::sendNotificationSync); };
@@ -75,6 +81,10 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
     bypassAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::bypass,     bypassButton);
+
+    // Phase 9: same ButtonAttachment pattern as bypassAttachment above --
+    // no direct processor/DSP calls from the editor.
+    freezeAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeButton);
 
     // Phase 6's own goal is a functional editor, not final-polish (see plan
     // doc) -- fixed-size, non-resizable is a deliberate choice for this
@@ -112,6 +122,8 @@ void MilleniaAudioProcessorEditor::resized()
 
     auto topArea = bounds.removeFromTop (24);
     bypassButton.setBounds (topArea.removeFromRight (80));
+    topArea.removeFromRight (8); // gap between the two toggles
+    freezeButton.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 
@@ -129,10 +141,14 @@ void MilleniaAudioProcessorEditor::resized()
     // Quick-select pitch presets sit under the Pitch Shift knob's own
     // column, not spread across the whole width -- they only ever affect
     // that one parameter.
+    // Phase 9 widens this row from 3 to 5 buttons (-12/0/+7/+12/+19 st) --
+    // still just the one pitchShift column, not spread wider.
     auto pitchColumnWidth  = bounds.getWidth() / 5;
     auto presetRow         = presetArea.removeFromLeft (pitchColumnWidth);
-    auto presetButtonWidth = presetRow.getWidth() / 3;
-    preset7Button.setBounds  (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
-    preset12Button.setBounds (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
-    preset19Button.setBounds (presetRow.reduced (2));
+    auto presetButtonWidth = presetRow.getWidth() / 5;
+    presetNeg12Button.setBounds (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
+    preset0Button.setBounds     (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
+    preset7Button.setBounds     (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
+    preset12Button.setBounds    (presetRow.removeFromLeft (presetButtonWidth).reduced (2));
+    preset19Button.setBounds    (presetRow.reduced (2));
 }

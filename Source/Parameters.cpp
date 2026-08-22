@@ -87,5 +87,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         "Bypass",
         false));
 
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): does
+    // NOT call ShimmerReverbEngine::setBypassed()-style overrides -- like
+    // bypass above, PluginProcessor drives this through its own smoother
+    // (smoothedFreeze) so the dry-mute/decayGain-pin transition gets the
+    // same click-free treatment as every other continuous parameter, even
+    // though this is a bool at the APVTS level. Default false so an
+    // untouched plugin behaves exactly as before this parameter existed.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::freeze, 1 },
+        "Freeze",
+        false));
+
     return layout;
 }

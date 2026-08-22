@@ -19,6 +19,16 @@ namespace ParamIDs
     constexpr auto width      = "width";
     constexpr auto mix        = "mix";
     constexpr auto bypass     = "bypass";
+
+    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): classic
+    // infinite-sustain trick -- mutes fresh dry input into the diffuser and
+    // pins DattorroTank's decayGain near unity while engaged, so whatever
+    // was already recirculating just sustains forever instead of decaying.
+    // A juce::AudioParameterBool, not a processor-only flag, per the
+    // juce-plugin-dev skill's bypass hard rule (same reasoning applies to
+    // any control that changes audible behavior and must be host-
+    // automatable/state-saveable).
+    constexpr auto freeze     = "freeze";
 }
 
 // Builds the full parameter layout backing MilleniaAudioProcessor::apvts.

@@ -40,6 +40,12 @@ private:
     juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel;
     juce::ToggleButton bypassButton { "Bypass" };
 
+    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): same
+    // ToggleButton + ButtonAttachment pattern as bypassButton above.
+    juce::ToggleButton freezeButton { "Freeze" };
+
+    juce::TextButton presetNeg12Button { "-12 st" };
+    juce::TextButton preset0Button  { "0 st" };
     juce::TextButton preset7Button  { "+7 st" };
     juce::TextButton preset12Button { "+12 st" };
     juce::TextButton preset19Button { "+19 st" };
@@ -54,6 +60,7 @@ private:
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
+    std::unique_ptr<ButtonAttachment> freezeAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessorEditor)
 };
