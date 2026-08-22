@@ -87,17 +87,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         "Bypass",
         false));
 
-    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): does
-    // NOT call ShimmerReverbEngine::setBypassed()-style overrides -- like
-    // bypass above, PluginProcessor drives this through its own smoother
-    // (smoothedFreeze) so the dry-mute/decayGain-pin transition gets the
-    // same click-free treatment as every other continuous parameter, even
-    // though this is a bool at the APVTS level. Default false so an
-    // untouched plugin behaves exactly as before this parameter existed.
-    layout.add (std::make_unique<juce::AudioParameterBool> (
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md). Was
+    // originally an AudioParameterBool driving smoothedFreeze's 0/1 target,
+    // same convention as bypass above -- switched to a continuous float
+    // (2026-08-22, replacing the on/off toggle with a dial in the editor) so
+    // the user can dial in a partial freeze amount live over a sounding
+    // signal, not just snap between the two extremes. PluginProcessor's
+    // wiring (freezeParam/smoothedFreeze/setFreezeAmount()) is completely
+    // unchanged by this -- it already treated freezeParam as a float and
+    // freezeAmount throughout the DSP chain was always continuous [0, 1];
+    // only the APVTS parameter TYPE and the editor control change here.
+    // Default 0.0f, same as before.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::freeze, 1 },
         "Freeze",
-        false));
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.0f));
 
     return layout;
 }

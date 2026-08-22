@@ -271,6 +271,55 @@ private:
     // exhaustively ear-tuned beyond this one pass; may need revisiting.
     static constexpr float maxShimmerBlendWeight = 0.85f;
 
+    // Freeze-time shimmerWeight cap (2026-08-22): crossfades
+    // maxShimmerBlendWeight's effective value from 0.85f (freezeAmount=0.0f,
+    // bit-identical to the pre-existing formula) toward this smaller target
+    // as freezeAmount goes 0->1 -- see processSample()'s
+    // effectiveMaxShimmerBlendWeight. NOT the same fix as the first attempt
+    // at this (reverted -- see git history / Engram topic
+    // architecture/millenia-freeze), which crossfaded the cap all the way to
+    // 0.0f (plainWeight->1.0 at full freeze) and broke this file's own
+    // 3-minute freeze-boundedness test: that plainWeight=1.0 configuration
+    // is provably unstable at frozenDecayGain's near-unity decay (peak
+    // exceeded the 10.0 safety bound within ~1 minute), because the
+    // shimmerWeight/plainWeight blend turns out to double as what keeps the
+    // tank's own two-branch cross-feed resonance detuned/bounded at that
+    // decay, not just as the shimmer-character knob. A separate diagnostic
+    // (ShimmerReverbEngineTests.cpp's "Freeze = 1.0's actual sustained tail")
+    // found the ORIGINAL 0.85f cap causes a different, also-real problem at
+    // full freeze: comb filtering between the tank's direct feedbackFromB and
+    // the separately-delayed (via PitchShifter's own ~80ms internal delay
+    // line) shimmer-path copy measurably bleeds energy every pass, which is
+    // invisible at ordinary (<=0.85) decayGain (masked by its own much
+    // larger attenuation) but becomes the dominant, audible ("still finishes
+    // soon, oscillates, sometimes sounds like a motor") decay mechanism at
+    // Freeze's near-unity decay.
+    //
+    // Swept against both this file's 3-minute freeze-boundedness test AND
+    // ShimmerReverbEngineTests.cpp's 15s decay diagnostic (2026-08-22), one
+    // value at a time, decay measured in dB over that diagnostic's 15s
+    // window (baseline at the unmodified 0.85f cap: -6.7dB):
+    //   0.6f  -> -7.69dB (WORSE than baseline -- stable)
+    //   0.4f  -> -7.74dB (WORSE than baseline -- stable)
+    //   0.2f  -> -7.45dB (worse than baseline -- stable)
+    //   0.05f -> -5.19dB (better than baseline -- stable)
+    //   0.02f -> -3.11dB (much better -- stable)
+    //   0.01f -> -1.94dB (much better -- stable, verified over a 10-MINUTE
+    //           extended run of the boundedness test too, not just the
+    //           committed 3-minute one, given how sharply the next value
+    //           below fails)
+    //   0.005f -> UNSTABLE: 8045 assertion failures, peak blew past the
+    //           10.0 safety bound almost immediately.
+    // The relationship is NOT monotonic -- decay gets WORSE than the 0.85f
+    // baseline through the 0.2f-0.6f range before improving sharply below
+    // ~0.05f, consistent with this being genuine comb-filtering interference
+    // (whose depth depends on the specific phase relationship between the
+    // two summed paths at a given weight, not simply "more weight = more
+    // loss") rather than a simple monotonic gain trade-off. 0.01f was chosen
+    // over 0.02f for its ~2x safety margin above the observed instability
+    // cliff at 0.005f, at the cost of a somewhat smaller decay improvement.
+    static constexpr float frozenMaxShimmerBlendWeight = 0.01f; // see comment above for the swept numbers behind this value
+
     // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): the
     // near-unity decayGain target while Freeze is engaged, per the plan's
     // committed mechanism (a) -- "pin decayGain to unity (or just under,

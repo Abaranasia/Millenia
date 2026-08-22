@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include <vector>
+#include <limits>
 #include "../../Source/DSP/ShimmerReverbEngine.h"
 #include "../../Source/DSP/DattorroTank.h"
 
@@ -956,6 +957,159 @@ public:
                 expect (maxPeak <= 10.0f, "setFreezeAmount(1.0f) exceeded the safety bound of 10.0 at block "
                                                + juce::String (b) + " (peak so far: " + juce::String (maxPeak) + ")");
             }
+        }
+
+        beginTest ("DIAGNOSTIC: Freeze = 1.0's actual sustained tail through the full engine chain -- decay rate and short-window oscillation");
+        {
+            // Investigating a by-ear complaint (2026-08-22, after the pitch-ratio
+            // crossfade fix above shipped): at freezeAmount=1.0 the held tail
+            // "still finishes soon, oscillates too much, and sometimes sounds
+            // like a motor" -- not ethereal/static as intended. The existing
+            // DattorroTankTests.cpp freeze-sustain test only proves the BARE
+            // tank sustains (with setShimmerFeedbackGain(0.0f), i.e. the shifter/
+            // DCBlocker/SafetyLimiter chain excluded entirely) -- it never
+            // measured whether the REAL product signal path (through
+            // ShimmerReverbEngine, default shimmerAmount=1.0, so 85% of the
+            // loop's energy runs through that chain every single pass even
+            // after the pitch-ratio crossfade neutralizes the shift itself)
+            // actually sustains at the same rate. Measured here instead of
+            // guessed at, same discipline as the pitch-accuracy and
+            // pitch-direction-asymmetry investigations above.
+            //
+            // Findings (2026-08-22, isolated one variable at a time): NOT
+            // caused by frozenDecayGain being insufficiently close to unity
+            // (0.999 -> 0.9999, a 10x reduction in per-pass loss, barely
+            // moved this test's numbers at all). NOT SafetyLimiter alone
+            // (temporarily raising its threshold to 100.0f, effectively
+            // disabling it, changed nothing). NOT DCBlocker alone
+            // (temporarily lowering its cutoff to 0.01Hz, effectively
+            // disabling it, also changed nothing). Setting shimmerAmount to
+            // 0.0f for this same measurement (removing the ENTIRE shifter/
+            // DCBlocker/SafetyLimiter path from the recirculation blend,
+            // i.e. plainWeight=1.0) dropped the 15s decay from ~-6.7dB to
+            // ~-0.15dB -- proving the loss is structural, not a single lossy
+            // component: DattorroTank::processSample() sums the tank's OWN
+            // direct feedbackFromB with a SEPARATELY-delayed copy that took a
+            // detour through PitchShifter's own internal delay line
+            // (baseDelaySamples, ~80ms, entirely independent of the tank's
+            // own branch delay lengths). Summing two correlated copies of the
+            // same recirculating content at DIFFERENT delays is comb
+            // filtering -- destructive interference at whichever frequencies
+            // the two paths' delays put out of phase, which measurably
+            // reduces total recirculating energy even though neither path
+            // alone is lossy. This is normally masked by decayGain's own
+            // (much larger) attenuation at ordinary settings; Freeze's
+            // near-unity effectiveDecayGain is what makes it the dominant,
+            // now-audible decay mechanism. IMPORTANT: plainWeight=1.0 (the
+            // config that eliminates this decay) is the EXACT configuration
+            // DattorroTankTests.cpp's freeze-boundedness test proved
+            // UNSTABLE (peak exceeded the safety bound within ~1 minute) --
+            // the shimmerWeight/plainWeight blend appears to be doing double
+            // duty, both injecting shimmer character AND incidentally
+            // detuning the raw tank network's own resonant modes enough to
+            // keep it bounded at near-unity decay. Not resolved in this
+            // investigation -- left as a real architectural tension for a
+            // future session (see docs/shimmer-reverb-implementation-plan.md
+            // Phase 9/10 notes).
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            // Defaults: pitchShift=12st, shimmerAmount=1.0, feedback=0.7 -- the
+            // out-of-the-box settings the user was actually listening to.
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (55667788);
+
+            // Burst 2s of noise (freeze off) to fill the tank with real
+            // recirculating content, same shape as the pitch-direction-
+            // asymmetry test above.
+            constexpr int burstBlocks = 2 * blocksPerSecond;
+            for (int b = 0; b < burstBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+            }
+
+            // Engage Freeze, then silence -- this is the actual "freeze a live
+            // sound and let it hold" scenario, unlike the boundedness test
+            // above (which keeps feeding noise throughout).
+            engine.setFreezeAmount (1.0f);
+
+            constexpr double tailSeconds = 15.0;
+            constexpr int tailBlocks = (int) (tailSeconds * sampleRate / blockSize);
+            std::vector<float> perBlockRms ((size_t) tailBlocks, 0.0f);
+
+            for (int b = 0; b < tailBlocks; ++b)
+            {
+                buffer.clear();
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                double sumSquares = 0.0;
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        sumSquares += (double) data[i] * (double) data[i];
+                }
+
+                perBlockRms[(size_t) b] = (float) std::sqrt (sumSquares / (double) (blockSize * numChannels));
+            }
+
+            for (float v : perBlockRms)
+                expect (std::isfinite (v), "Non-finite RMS block in Freeze=1.0 tail measurement");
+
+            // Decay rate: compare the first second's mean RMS (right after
+            // freeze engages) against the last second's, in dB -- quantifies
+            // "still finishes soon" instead of just asserting it.
+            auto meanRmsOverBlocks = [&perBlockRms] (int startBlock, int count) -> float
+            {
+                double sum = 0.0;
+                for (int i = 0; i < count; ++i)
+                    sum += perBlockRms[(size_t) (startBlock + i)];
+                return (float) (sum / (double) count);
+            };
+
+            const float firstSecondMean = meanRmsOverBlocks (0, blocksPerSecond);
+            const float lastSecondMean  = meanRmsOverBlocks (tailBlocks - blocksPerSecond, blocksPerSecond);
+            const float decayDb = 20.0f * std::log10 (juce::jmax (1.0e-9f, lastSecondMean)
+                                                       / juce::jmax (1.0e-9f, firstSecondMean));
+
+            // Short-window oscillation: within the second second of the frozen
+            // tail (skipping the first second's post-engagement transient),
+            // how much does block-to-block RMS swing? Expressed as the
+            // max/min ratio in dB across that one-second window -- a genuinely
+            // steady/ethereal hold should show only a small swing; audible
+            // "motor"/warble would show a large one.
+            const int oscWindowStart = blocksPerSecond; // second 1..2
+            float oscMin = std::numeric_limits<float>::max();
+            float oscMax = 0.0f;
+            for (int i = 0; i < blocksPerSecond; ++i)
+            {
+                const float v = perBlockRms[(size_t) (oscWindowStart + i)];
+                oscMin = juce::jmin (oscMin, v);
+                oscMax = juce::jmax (oscMax, v);
+            }
+            const float oscillationDb = 20.0f * std::log10 (juce::jmax (1.0e-9f, oscMax) / juce::jmax (1.0e-9f, oscMin));
+
+            logMessage ("Freeze=1.0 full-chain tail: first-second RMS=" + juce::String (firstSecondMean, 6)
+                            + ", last-second (t=" + juce::String ((int) tailSeconds) + "s) RMS="
+                            + juce::String (lastSecondMean, 6) + " (" + juce::String (decayDb, 2) + " dB), "
+                            + "block-to-block oscillation in second 1-2: " + juce::String (oscillationDb, 2)
+                            + " dB (min=" + juce::String (oscMin, 6) + ", max=" + juce::String (oscMax, 6) + ")");
         }
     }
 };

@@ -36,13 +36,9 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider;
-    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel;
+    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider, freezeSlider;
+    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel;
     juce::ToggleButton bypassButton { "Bypass" };
-
-    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): same
-    // ToggleButton + ButtonAttachment pattern as bypassButton above.
-    juce::ToggleButton freezeButton { "Freeze" };
 
     juce::TextButton presetNeg12Button { "-12 st" };
     juce::TextButton preset0Button  { "0 st" };
@@ -59,8 +55,8 @@ private:
     std::unique_ptr<SliderAttachment> dampingAttachment;
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;
+    std::unique_ptr<SliderAttachment> freezeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
-    std::unique_ptr<ButtonAttachment> freezeAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessorEditor)
 };

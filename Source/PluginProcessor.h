@@ -90,9 +90,10 @@ private:
     std::atomic<float>* mixParam        = nullptr;
     std::atomic<float>* bypassParam     = nullptr;
 
-    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): freezeParam's
-    // raw APVTS-backed value is a float (0.0/1.0) even though it's an
-    // AudioParameterBool, same convention as bypassParam above.
+    // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): AudioParameterFloat
+    // since 2026-08-22 (was originally AudioParameterBool, same convention as
+    // bypassParam above) -- switched so the editor's Freeze dial can set any
+    // value in [0, 1], not just snap between the two extremes.
     std::atomic<float>* freezeParam     = nullptr;
 
     // Phase 5: one smoother per continuous parameter, driven from the cached
@@ -106,11 +107,11 @@ private:
     juce::SmoothedValue<float> smoothedWidth;
     juce::SmoothedValue<float> smoothedMix;
 
-    // Phase 9: Freeze is an AudioParameterBool but gets the exact same
-    // click-free smoothing treatment as every other continuous parameter
-    // here -- an instant 0->1 jump on decayGain/dry-mute inside the tank
-    // would click, same reasoning as bypass driving smoothedMix instead of
-    // a hard switch (see processBlock()'s comment).
+    // Phase 9: Freeze gets the exact same click-free smoothing treatment as
+    // every other continuous parameter here -- even a hard 0->1 jump on
+    // decayGain/dry-mute inside the tank would click, same reasoning as
+    // bypass driving smoothedMix instead of a hard switch (see
+    // processBlock()'s comment).
     juce::SmoothedValue<float> smoothedFreeze;
 
     // Schema v1 -- the first version ever; no migration logic exists yet.

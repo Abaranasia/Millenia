@@ -53,9 +53,15 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
+    // 2026-08-22: replaces the old freezeButton ToggleButton -- Freeze's
+    // underlying parameter became a continuous float (see Parameters.cpp's
+    // comment) specifically so it can be dialed in live over a sounding
+    // signal instead of only snapping between 0 and 1, so it now belongs in
+    // the same rotary-knob row/pattern as every other continuous parameter,
+    // not the top toggle row.
+    configureRotary (freezeSlider,   freezeLabel,   "Freeze");
 
     addAndMakeVisible (bypassButton);
-    addAndMakeVisible (freezeButton);
 
     for (auto* button : { &presetNeg12Button, &preset0Button, &preset7Button, &preset12Button, &preset19Button })
         addAndMakeVisible (button);
@@ -80,18 +86,17 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
+    freezeAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeSlider);
     bypassAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::bypass,     bypassButton);
-
-    // Phase 9: same ButtonAttachment pattern as bypassAttachment above --
-    // no direct processor/DSP calls from the editor.
-    freezeAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeButton);
 
     // Phase 6's own goal is a functional editor, not final-polish (see plan
     // doc) -- fixed-size, non-resizable is a deliberate choice for this
     // milestone, not an unexamined default; a scalable/resizable layout is
     // left for a later polish pass.
     setResizable (false, false);
-    setSize (620, 320);
+    // Widened from 620 (6 knobs) to fit the new Freeze knob at the same
+    // per-knob width the other 6 already use.
+    setSize (720, 320);
 }
 
 MilleniaAudioProcessorEditor::~MilleniaAudioProcessorEditor()
@@ -122,8 +127,6 @@ void MilleniaAudioProcessorEditor::resized()
 
     auto topArea = bounds.removeFromTop (24);
     bypassButton.setBounds (topArea.removeFromRight (80));
-    topArea.removeFromRight (8); // gap between the two toggles
-    freezeButton.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 
@@ -133,7 +136,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &dampingSlider, &widthSlider, &mixSlider })
+    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

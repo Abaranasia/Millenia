@@ -196,7 +196,15 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // test in DattorroTankTests.cpp.
     const float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
 
-    const float shimmerWeight = shimmerFeedbackGain * maxShimmerBlendWeight;
+    // Freeze, second mechanism (see frozenMaxShimmerBlendWeight's header
+    // comment for the full measured history): crossfades the shimmerWeight
+    // CAP toward a smaller value as freezeAmount goes 0->1, reducing (not
+    // eliminating) how much of the loop's energy takes the comb-filtering-
+    // prone detour through the shimmer path once frozen, without forcing
+    // plainWeight all the way to the proven-unstable 1.0.
+    const float effectiveMaxShimmerBlendWeight = maxShimmerBlendWeight
+                                                      + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
+    const float shimmerWeight = shimmerFeedbackGain * effectiveMaxShimmerBlendWeight;
     const float plainWeight = 1.0f - shimmerWeight;
     float inputToA = diffused + effectiveDecayGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);

@@ -235,8 +235,9 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
 
     // Phase 9: Freeze gets the exact same block-granularity smoothing
-    // treatment as every other continuous parameter above -- it's a bool at
-    // the APVTS level, but an instant 0->1 jump on decayGain/dry-mute
+    // treatment as every other continuous parameter above -- originally a
+    // bool at the APVTS level (now a continuous float dial, 2026-08-22, see
+    // Parameters.cpp), but even a hard 0->1 jump on decayGain/dry-mute
     // inside the tank would click, same reasoning as bypass driving
     // smoothedMix instead of a hard switch (see the comment above).
     shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
