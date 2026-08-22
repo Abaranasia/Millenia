@@ -11,6 +11,8 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
     freezeLeveler.prepare (spec);
+    primaryTiltCompensator.prepare (spec);
+    quadratureTiltCompensator.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
@@ -46,6 +48,8 @@ void ShimmerReverbEngine::reset()
     safetyLimiter.reset();
     quadratureDcBlocker.reset();
     freezeLeveler.reset();
+    primaryTiltCompensator.reset();
+    quadratureTiltCompensator.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -133,6 +137,13 @@ void ShimmerReverbEngine::updateShifterRatio()
     const float crossfade = 1.0f - std::pow (freezeAmount, pitchShiftCrossfadeCurve);
     const float effectiveSemitones = pitchShiftSemitones * crossfade;
     shifter.setPitchShiftSemitones (effectiveSemitones);
+
+    // Chipmunk-mitigation, cheap fallback (see SpectralTiltCompensator.h):
+    // keyed to the same EFFECTIVE shift actually reaching the shifter right
+    // now (post freeze crossfade), not the raw user-facing knob value, so
+    // the darkening tracks whatever shift is really happening.
+    primaryTiltCompensator.setPitchShiftSemitones (effectiveSemitones);
+    quadratureTiltCompensator.setPitchShiftSemitones (effectiveSemitones);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -169,6 +180,15 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // weak side-loop competing with the tank's own unshifted decayGain
         // recirculation.
         float shiftedFeedback = shifter.processSample (tank.peekFeedbackSignal());
+
+        // Chipmunk-mitigation, cheap fallback (see SpectralTiltCompensator.h):
+        // darkens the shifted signal to partially compensate for the
+        // spectral envelope being dragged up with the pitch on upward
+        // shifts -- a zero-added-latency approximation, not true formant
+        // preservation. Applied here, immediately after the shift and
+        // before DC blocking/limiting, so it shapes exactly the signal
+        // that's about to re-enter the tank.
+        shiftedFeedback = primaryTiltCompensator.processSample (shiftedFeedback);
 
         // Phase 4: remove DC/subsonic bias from the recirculating signal
         // before it hits the tanh soft-clip below -- DC removal has to
@@ -219,6 +239,12 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // second, quadrature-offset voice pair internally; read its
         // crossfaded output here.
         float quadratureRaw = shifter.getQuadratureOutput();
+
+        // Own SpectralTiltCompensator instance -- same reasoning as
+        // quadratureDcBlocker below (its own one-pole filter state can't be
+        // shared with primaryTiltCompensator without corrupting both
+        // signals).
+        quadratureRaw = quadratureTiltCompensator.processSample (quadratureRaw);
 
         // Own DCBlocker instance -- this class holds per-sample state
         // (previousInput/previousOutput) that would corrupt both signals if

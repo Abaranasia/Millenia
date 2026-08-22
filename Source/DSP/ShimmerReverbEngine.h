@@ -6,6 +6,7 @@
 #include "DCBlocker.h"
 #include "SafetyLimiter.h"
 #include "FreezeLeveler.h"
+#include "SpectralTiltCompensator.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -209,6 +210,13 @@ private:
     // signals. safetyLimiter above is genuinely stateless (only a fixed
     // threshold) and is reused for both signals.
     DCBlocker quadratureDcBlocker;
+
+    // Chipmunk-mitigation, cheap fallback (see SpectralTiltCompensator.h):
+    // own instances for primary/quadrature, same reasoning as
+    // feedbackDcBlocker/quadratureDcBlocker above -- each holds its own
+    // one-pole filter state that would corrupt both signals if shared.
+    SpectralTiltCompensator primaryTiltCompensator;
+    SpectralTiltCompensator quadratureTiltCompensator;
 
     // Phase 9 Freeze follow-up (2026-08-22, see FreezeLeveler.h): feed-forward
     // output-stage compensation for Freeze's measured amplitude decay --
