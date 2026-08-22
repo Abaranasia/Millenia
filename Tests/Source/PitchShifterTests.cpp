@@ -365,6 +365,88 @@ public:
             }
         }
 
+        beginTest ("DIAGNOSTIC: output frequency error across a range of INPUT frequencies at the default +12st shift");
+        {
+            // Investigating a by-ear complaint (2026-08-22): "chipmunk effect
+            // again... works nice for low notes, but sounds a bit ridiculous
+            // on higher notes." Confirmed (via a temporary depth=0.0f test
+            // build) that this is NOT caused by the Freeze delay-dither
+            // (PitchShifter.h's freezeDriftDepthMs) -- it persists with that
+            // mechanism fully disabled. Every existing pitch-accuracy test
+            // above this one fixes inputFreq=220.0f and only varies the
+            // SHIFT amount -- none of them test whether accuracy holds at
+            // higher INPUT frequencies at a fixed shift, which is exactly
+            // what the user's complaint describes. This sweeps input
+            // frequency instead, at the shimmer's classic default shift
+            // (+12st, ratio=2.0), to see whether error actually grows with
+            // input pitch (which would point to a WSOLA/alignment-search
+            // failure mode: a higher input frequency means more full cycles
+            // fit inside the fixed crossfadeSamplesInt (~88 sample)
+            // correlation window and the fixed alignmentSearchRadiusSamples
+            // (22 sample) search window, increasing the chance the search
+            // locks onto a candidate offset that's off by a whole period or
+            // more -- a real, different failure mode from anything the
+            // existing semitone-sweep tests at 220Hz could have caught).
+            constexpr double sampleRate = 44100.0;
+            constexpr float semitones = 12.0f;
+
+            for (float inputFreq : { 110.0f, 220.0f, 440.0f, 880.0f, 1760.0f, 3520.0f })
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (semitones);
+                const float expectedFreq = inputFreq * shifter.getPitchRatio();
+
+                constexpr int warmupSamples = (int) (sampleRate * 0.5);
+                constexpr int measureSamples = (int) (sampleRate * 1.0);
+
+                double phase = 0.0;
+                const double phaseInc = juce::MathConstants<double>::twoPi * inputFreq / sampleRate;
+
+                for (int i = 0; i < warmupSamples; ++i)
+                {
+                    shifter.processSample ((float) std::sin (phase) * 0.5f);
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                }
+
+                std::vector<float> measured ((size_t) measureSamples);
+                for (int i = 0; i < measureSamples; ++i)
+                {
+                    measured[(size_t) i] = shifter.processSample ((float) std::sin (phase) * 0.5f);
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                }
+
+                std::vector<double> crossings;
+                for (int i = 1; i < measureSamples; ++i)
+                {
+                    float prev = measured[(size_t) (i - 1)];
+                    float curr = measured[(size_t) i];
+                    if (prev <= 0.0f && curr > 0.0f)
+                    {
+                        double frac = (curr != prev) ? ((double) (0.0f - prev) / (double) (curr - prev)) : 0.0;
+                        crossings.push_back ((double) (i - 1) + frac);
+                    }
+                }
+
+                double measuredFreqZc = 0.0;
+                if (crossings.size() >= 2)
+                {
+                    double totalSamples = crossings.back() - crossings.front();
+                    double numCycles = (double) crossings.size() - 1.0;
+                    measuredFreqZc = numCycles * sampleRate / totalSamples;
+                }
+
+                const double errPct = 100.0 * (measuredFreqZc - expectedFreq) / expectedFreq;
+                logMessage ("Input freq sweep at +12st: inputFreq=" + juce::String (inputFreq, 1)
+                            + "Hz, expected=" + juce::String (expectedFreq, 1) + "Hz, measured(ZC)="
+                            + juce::String (measuredFreqZc, 1) + "Hz, error=" + juce::String (errPct, 3) + "%");
+            }
+        }
+
         beginTest ("Output frequency for a pure sine tone matches pitchRatio * inputFreq (within short-crossfade tolerance)");
         {
             // All prior tests check boundedness/gain/crossfade-shape -- none
