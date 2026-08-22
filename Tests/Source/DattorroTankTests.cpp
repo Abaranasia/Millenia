@@ -378,6 +378,120 @@ public:
                                                        + ") -- Freeze should sustain the tail, not let it fade like "
                                                          "normal processing");
         }
+
+        beginTest ("DIAGNOSTIC: Damping's APVTS range (0..0.05) produces almost no audible spectral difference");
+        {
+            // Investigating a by-ear complaint (2026-08-22): "the damping dial
+            // seems to not provide any noticeable difference in sound." Checked
+            // the math before touching anything (per this project's "verify
+            // audible-quality claims against actual runtime values" discipline):
+            // the one-pole leaky integrator's actual cutoff frequency from a
+            // coefficient a is fc = -(sampleRate / 2*pi) * ln(a) (this is the
+            // exact relationship defaultDampingCoefficient's own header comment
+            // uses to derive "an 8000Hz cutoff corresponds to a~=0.32"). At
+            // a=0.05 (Parameters.cpp's current MAXIMUM), fc ~= 21kHz; at
+            // a=0.0005 (the default, and this range's practical minimum), fc is
+            // WAY above Nyquist (~53kHz) -- meaning the entire 0..0.05 slider
+            // only ever sweeps cutoff from "no filtering at all" to "still only
+            // rolling off content above 21kHz," nowhere near the documented
+            // ~8kHz ("a~=0.32") reference point where damping actually becomes
+            // audible as a "duller wash." Measured directly here instead of
+            // trusting the hand math alone: drives the same DattorroTank with
+            // identical noise input at several coefficients and compares a
+            // simple high-frequency-energy proxy (RMS of the consecutive-sample
+            // difference, which emphasizes high-frequency content the way a
+            // differentiator/crude highpass would) relative to the raw tail's
+            // own RMS -- a real spectral-tilt measurement, not just a level
+            // check.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int burstBlocks = (int) (2.0 * sampleRate / blockSize);
+            constexpr int tailBlocks = (int) (1.0 * sampleRate / blockSize);
+
+            // Returns the ratio of high-frequency-proxy RMS to total RMS over
+            // one second of tail, right after a 2-second noise burst -- higher
+            // means brighter/less damped.
+            auto measureBrightness = [&] (float damping) -> float
+            {
+                DattorroTank tank;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+                tank.prepare (spec);
+                tank.reset();
+                tank.setDamping (damping);
+
+                juce::AudioBuffer<float> buffer (numChannels, blockSize);
+                juce::Random random (13571113); // same seed for every damping value -- fair comparison
+
+                for (int b = 0; b < burstBlocks; ++b)
+                {
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getWritePointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            data[i] = random.nextFloat() * 0.6f - 0.3f;
+                    }
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    tank.process (block);
+                }
+
+                double totalSumSquares = 0.0;
+                double diffSumSquares = 0.0;
+                float previousSample = 0.0f;
+
+                for (int b = 0; b < tailBlocks; ++b)
+                {
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getWritePointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            data[i] = random.nextFloat() * 0.6f - 0.3f;
+                    }
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    tank.process (block);
+
+                    auto* data = buffer.getReadPointer (0);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        totalSumSquares += (double) data[i] * (double) data[i];
+                        float diff = data[i] - previousSample;
+                        diffSumSquares += (double) diff * (double) diff;
+                        previousSample = data[i];
+                    }
+                }
+
+                const float totalRms = (float) std::sqrt (totalSumSquares / (double) (tailBlocks * blockSize));
+                const float diffRms  = (float) std::sqrt (diffSumSquares / (double) (tailBlocks * blockSize));
+
+                return totalRms > 1.0e-9f ? diffRms / totalRms : 0.0f;
+            };
+
+            const float brightnessAtDefault  = measureBrightness (0.0005f); // current default
+            const float brightnessAtRangeMax = measureBrightness (0.05f);   // current APVTS maximum
+            const float brightnessAtDocumentedDull = measureBrightness (0.32f); // documented "sounds dull" reference
+
+            expect (std::isfinite (brightnessAtDefault) && std::isfinite (brightnessAtRangeMax)
+                        && std::isfinite (brightnessAtDocumentedDull), "Non-finite brightness measurement");
+
+            logMessage ("Damping brightness proxy (higher = brighter/less damped): default(0.0005)="
+                            + juce::String (brightnessAtDefault, 6) + ", current APVTS max(0.05)="
+                            + juce::String (brightnessAtRangeMax, 6) + ", documented-dull reference(0.32)="
+                            + juce::String (brightnessAtDocumentedDull, 6));
+
+            // The whole point of this diagnostic: confirm the current range's
+            // min-to-max swing is a small fraction of the swing between the
+            // default and the documented-dull reference -- i.e. the dial's
+            // usable range barely moves the needle compared to what "damping
+            // audibly working" actually looks like.
+            const float currentRangeSwing = std::abs (brightnessAtDefault - brightnessAtRangeMax);
+            const float fullUsefulSwing   = std::abs (brightnessAtDefault - brightnessAtDocumentedDull);
+
+            logMessage ("Current APVTS range covers " + juce::String (fullUsefulSwing > 1.0e-9f
+                            ? (currentRangeSwing / fullUsefulSwing) * 100.0f : 0.0f, 1)
+                            + "% of the brightness swing between the default and the documented-dull reference");
+        }
     }
 };
 

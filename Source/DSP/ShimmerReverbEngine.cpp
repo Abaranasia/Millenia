@@ -10,6 +10,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     feedbackDcBlocker.prepare (spec);
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
+    freezeLeveler.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
@@ -20,7 +21,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // snapping back to the un-crossfaded default -- see
     // pitchShiftSemitones' header comment.
     pitchShiftSemitones = defaultPitchShiftSemitones;
-    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
+    updateShifterRatio();
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
@@ -44,6 +45,7 @@ void ShimmerReverbEngine::reset()
     feedbackDcBlocker.reset();
     safetyLimiter.reset();
     quadratureDcBlocker.reset();
+    freezeLeveler.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -52,7 +54,7 @@ void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
     // against the current freeze crossfade without needing this value passed
     // back in -- see pitchShiftSemitones' header comment.
     pitchShiftSemitones = semitones;
-    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
+    updateShifterRatio();
 }
 
 void ShimmerReverbEngine::setFeedback (float newFeedback)
@@ -90,13 +92,25 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
 {
     freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
     tank.setFreezeAmount (freezeAmount);
+    freezeLeveler.setFreezeAmount (freezeAmount);
 
     // Re-derive the shifter's ratio against the just-updated freezeAmount --
     // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()
     // every block (see pitchShiftSemitones' header comment for why this
     // crossfade exists at all), so this call is what actually applies each
     // block's freeze amount rather than lagging one block behind it.
-    shifter.setPitchShiftSemitones (pitchShiftSemitones * (1.0f - freezeAmount));
+    updateShifterRatio();
+}
+
+void ShimmerReverbEngine::updateShifterRatio()
+{
+    // See pitchShiftCrossfadeCurve's header comment for why this is raised
+    // to a power instead of a plain linear crossfade -- keeps the shift
+    // amount essentially untouched through most of the dial's travel and
+    // only pulls it toward unity near full freeze, while still reaching
+    // EXACTLY 0 semitones (ratio 1.0) at freezeAmount=1.0, same as before.
+    const float crossfade = std::pow (1.0f - freezeAmount, pitchShiftCrossfadeCurve);
+    shifter.setPitchShiftSemitones (pitchShiftSemitones * crossfade);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -220,6 +234,18 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         float sideShift = safeFeedback - quadratureSafe;
         float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
         float wetRight = tankOut - shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
+
+        // Phase 9 Freeze follow-up (see FreezeLeveler.h): compensate the
+        // wet signal's measured decay under sustained freeze, applied to
+        // BOTH channels identically from a mono-summed measurement -- using
+        // each channel's own independent envelope would let the Width
+        // decorrelation term drift the stereo image as the two channels'
+        // gains diverged, which isn't this stage's job. At freezeAmount=0.0f
+        // this multiplies by exactly 1.0f (see FreezeLeveler's class
+        // comment), so it's a no-op unless Freeze is actually engaged.
+        const float freezeLevelerGain = freezeLeveler.computeGain (0.5f * (wetLeft + wetRight));
+        wetLeft *= freezeLevelerGain;
+        wetRight *= freezeLevelerGain;
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

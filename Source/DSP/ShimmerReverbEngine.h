@@ -5,6 +5,7 @@
 #include "PitchShifter.h"
 #include "DCBlocker.h"
 #include "SafetyLimiter.h"
+#include "FreezeLeveler.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -144,6 +145,33 @@ public:
     void setFreezeAmount (float amount);
 
 private:
+    // Recomputes and applies the shifter's actual pitch ratio from the
+    // current pitchShiftSemitones/freezeAmount -- shared by prepare(),
+    // setPitchShiftSemitones(), and setFreezeAmount() so the crossfade curve
+    // (see pitchShiftCrossfadeCurve below) only lives in one place.
+    void updateShifterRatio();
+
+    // Phase 9 Freeze pitch-ratio crossfade, curve fix (2026-08-22, by-ear
+    // report: "increasing freeze seems to produce a pitch down change that
+    // wasn't noticeable previously"). The original fix (linear
+    // `pitchShiftSemitones * (1.0f - freezeAmount)`, see
+    // pitchShiftSemitones' comment below) is CORRECT at freezeAmount=1.0
+    // (ratio must reach exactly unity there, or the endless upward-cascading
+    // drone this was built to fix comes back) but was audibly reducing the
+    // shimmer's pitch shift far too early in the dial's travel -- at
+    // freezeAmount=0.5 it had ALREADY cut a +12st shift in half (+6st),
+    // which is exactly the "pitch down" the user heard well before Freeze
+    // was anywhere near fully engaged. Raising (1.0f - freezeAmount) to this
+    // power instead keeps the reduction negligible through most of the
+    // dial's travel and concentrates it near the top: at freezeAmount=0.5 a
+    // +12st shift is only reduced to ~+11.25st (a 6% cut, well under a
+    // semitone -- essentially inaudible) instead of half; the curve still
+    // reaches exactly 0 at freezeAmount=1.0, so the anti-cascade guarantee
+    // is unchanged. A REASONED value, not exhaustively ear-tuned -- picked
+    // for a "barely noticeable until well past halfway" shape, open to
+    // revisiting after a listening pass.
+    static constexpr float pitchShiftCrossfadeCurve = 4.0f;
+
     // Phase 5 default -- was Phase 3's hardcoded shiftSemitones constant,
     // now just the value setPitchShiftSemitones() is seeded with once in
     // prepare() so behavior is unchanged until a caller actually changes
@@ -181,6 +209,12 @@ private:
     // signals. safetyLimiter above is genuinely stateless (only a fixed
     // threshold) and is reused for both signals.
     DCBlocker quadratureDcBlocker;
+
+    // Phase 9 Freeze follow-up (2026-08-22, see FreezeLeveler.h): feed-forward
+    // output-stage compensation for Freeze's measured amplitude decay --
+    // scales the already-computed wetLeft/wetRight, never anything inside
+    // the recirculating loop.
+    FreezeLeveler freezeLeveler;
 
     float shimmerWidthGain = defaultShimmerWidthGain;
 

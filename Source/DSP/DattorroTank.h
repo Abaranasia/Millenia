@@ -304,20 +304,40 @@ private:
     //   0.2f  -> -7.45dB (worse than baseline -- stable)
     //   0.05f -> -5.19dB (better than baseline -- stable)
     //   0.02f -> -3.11dB (much better -- stable)
-    //   0.01f -> -1.94dB (much better -- stable, verified over a 10-MINUTE
-    //           extended run of the boundedness test too, not just the
-    //           committed 3-minute one, given how sharply the next value
-    //           below fails)
-    //   0.005f -> UNSTABLE: 8045 assertion failures, peak blew past the
-    //           10.0 safety bound almost immediately.
-    // The relationship is NOT monotonic -- decay gets WORSE than the 0.85f
-    // baseline through the 0.2f-0.6f range before improving sharply below
-    // ~0.05f, consistent with this being genuine comb-filtering interference
-    // (whose depth depends on the specific phase relationship between the
-    // two summed paths at a given weight, not simply "more weight = more
-    // loss") rather than a simple monotonic gain trade-off. 0.01f was chosen
-    // over 0.02f for its ~2x safety margin above the observed instability
-    // cliff at 0.005f, at the cost of a somewhat smaller decay improvement.
+    //   0.01f  -> -1.94dB (much better -- stable over the committed 3-minute
+    //           test AND a 10-MINUTE extended run)
+    //   0.007f -> -1.53dB (marginally better than 0.01f on the SHORT 3-minute
+    //           test -- but FAILS the 10-minute extended run: 40055 assertion
+    //           failures. This is the important finding: the instability
+    //           cliff is not a single sharp point catchable by any fixed-
+    //           duration test -- there is a real band (roughly 0.007f-0.01f)
+    //           where a SHORT test gives false confidence and only a longer
+    //           run reveals the slow-building runaway. Do not trust a
+    //           candidate here without re-running at least a 10-minute
+    //           boundedness check, not just the committed 3-minute one.
+    //   0.005f -> UNSTABLE even on the short test: 8045 assertion failures,
+    //           peak blew past the 10.0 safety bound almost immediately.
+    // Also tried and found NOT to help (2026-08-22, second investigation):
+    // replacing the shifter's grain machinery with a plain fixed-delay tap at
+    // ratio==1.0 (sidesteps grain-hop/alignment-search artifacts entirely) --
+    // tested at short (0.2-5ms), matched (80ms, i.e. baseDelaySamples), and
+    // long (110ms) tap lengths, both alone (shimmerWeight restored to 0.85f)
+    // and combined with the 0.01f weight fix above. Short taps made decay
+    // WORSE (-9.9dB, worse than doing nothing); matched/long taps reproduced
+    // the same numbers as the normal grain machinery (~-6.7dB alone, ~-1.94dB
+    // combined with 0.01f) -- i.e. no measurable effect either way. The
+    // decay/oscillation is NOT caused by the grain mechanism specifically,
+    // only by shimmerWeight itself (see the sweep above) -- this rules out
+    // "just bypass the grains" as a free additional win.
+    // The weight/decay relationship is NOT monotonic -- decay gets WORSE than
+    // the 0.85f baseline through the 0.2f-0.6f range before improving sharply
+    // below ~0.05f, consistent with genuine comb-filtering interference
+    // (whose depth depends on the specific phase relationship between the two
+    // summed paths at a given weight, not simply "more weight = more loss")
+    // rather than a simple monotonic gain trade-off. 0.01f is chosen as the
+    // most aggressive value verified safe over a 10-minute run, not just a
+    // convenient round number -- see the 0.007f row above for why shorter
+    // verification would have been misleading here.
     static constexpr float frozenMaxShimmerBlendWeight = 0.01f; // see comment above for the swept numbers behind this value
 
     // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md): the

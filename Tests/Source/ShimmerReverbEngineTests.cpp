@@ -1007,10 +1007,23 @@ public:
             // the shimmerWeight/plainWeight blend appears to be doing double
             // duty, both injecting shimmer character AND incidentally
             // detuning the raw tank network's own resonant modes enough to
-            // keep it bounded at near-unity decay. Not resolved in this
-            // investigation -- left as a real architectural tension for a
-            // future session (see docs/shimmer-reverb-implementation-plan.md
-            // Phase 9/10 notes).
+            // keep it bounded at near-unity decay. Landed on
+            // frozenMaxShimmerBlendWeight=0.01f (see DattorroTank.h) as the
+            // most aggressive value verified safe over a 10-minute run --
+            // brings this test's 15s decay down to -1.94dB. Further digging
+            // (tap-delay length, grain-vs-fixed-tap, a finer weight sweep)
+            // found no further improvement without reintroducing instability
+            // -- see DattorroTank.h's comment for that full trail.
+            //
+            // 2026-08-22, same day, third pass: added FreezeLeveler (see
+            // that class) as an output-stage, feed-forward-only auto-leveler
+            // compensating the REMAINING decay, at the user's suggestion --
+            // brings this test's 15s decay down further, to ~-0.5dB.
+            // Deliberately NOT unlimited: FreezeLeveler clamps its boost to
+            // +12dB, so compensation degrades on longer holds (measured
+            // ~-3.7dB at 60s in a one-off extended run of this same test,
+            // not committed) rather than amplifying noise floor indefinitely
+            // -- a real, accepted limitation, not a bug.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;

@@ -59,9 +59,30 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // signal instead of only snapping between 0 and 1, so it now belongs in
     // the same rotary-knob row/pattern as every other continuous parameter,
     // not the top toggle row.
-    configureRotary (freezeSlider,   freezeLabel,   "Freeze");
+    // Labelled "Freeze Amount" (not plain "Freeze") to read distinctly from
+    // freezeQuickToggle below, which is intentionally still just "Freeze".
+    configureRotary (freezeSlider,   freezeLabel,   "Freeze Amount");
 
     addAndMakeVisible (bypassButton);
+    addAndMakeVisible (freezeQuickToggle);
+
+    // Recovered by user request (2026-08-22): a quick full-freeze toggle
+    // above the Freeze knob. Checking remembers the dial's current value
+    // then jumps it to 1.0; unchecking restores the remembered value. Goes
+    // through freezeSlider.setValue(), never audioProcessor/apvts directly,
+    // same convention as the pitch presets below.
+    freezeQuickToggle.onClick = [this]
+    {
+        if (freezeQuickToggle.getToggleState())
+        {
+            freezeValueBeforeQuickToggle = (float) freezeSlider.getValue();
+            freezeSlider.setValue (1.0, juce::sendNotificationSync);
+        }
+        else
+        {
+            freezeSlider.setValue ((double) freezeValueBeforeQuickToggle, juce::sendNotificationSync);
+        }
+    };
 
     for (auto* button : { &presetNeg12Button, &preset0Button, &preset7Button, &preset12Button, &preset19Button })
         addAndMakeVisible (button);
@@ -127,6 +148,8 @@ void MilleniaAudioProcessorEditor::resized()
 
     auto topArea = bounds.removeFromTop (24);
     bypassButton.setBounds (topArea.removeFromRight (80));
+    topArea.removeFromRight (8); // gap between the two toggles
+    freezeQuickToggle.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 
