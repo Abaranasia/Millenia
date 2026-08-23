@@ -2,6 +2,16 @@
 
 #include <JuceHeader.h>
 
+// SUPERSEDED, 2026-08-23: no longer wired into ShimmerReverbEngine, replaced
+// by FormantEnvelopeCorrector (see docs/formant-preserving-pitch-shifter-
+// research.md sections 8-9). This class's own investigation (see that
+// document's "Ear-tested, 2026-08-23" note) found it structurally unable to
+// fix the high-note chipmunk complaint -- the frequency band carrying the
+// artifact and the wanted shimmer effect are the same band on high notes,
+// so no static filter can separate them. Left in the codebase, unused, in
+// case of a future regression needing comparison -- do not wire this back
+// in without re-reading that finding first.
+//
 // Chipmunk-mitigation, cheap fallback (2026-08-23, see
 // docs/formant-preserving-pitch-shifter-research.md section 6, item 4 --
 // "Option B" in the coordinator's own framing of that document's ranked

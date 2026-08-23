@@ -35,6 +35,10 @@
               file="Source/DSP/SafetyLimiter.h"/>
         <FILE id="dspLIM2" name="SafetyLimiter.cpp" compile="1" resource="0"
               file="Source/DSP/SafetyLimiter.cpp"/>
+        <FILE id="dspFEC1" name="FormantEnvelopeCorrector.cpp" compile="1" resource="0"
+              file="Source/DSP/FormantEnvelopeCorrector.cpp"/>
+        <FILE id="dspFEC2" name="FormantEnvelopeCorrector.h" compile="0" resource="0"
+              file="Source/DSP/FormantEnvelopeCorrector.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
