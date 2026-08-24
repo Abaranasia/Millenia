@@ -110,7 +110,7 @@ float PitchShifter::grainWindow (int elapsed) const noexcept
     return 1.0f;
 }
 
-float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset)
+float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores)
 {
     const Grain* outgoing = nullptr;
     for (auto& grain : grains)
@@ -155,9 +155,6 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         alignmentReferenceBuffer[(size_t) k] = delayLine.popSample (0, delaySamples, false);
     }
 
-    float bestScore = -1.0f;
-    float bestOffset = previousOffset; // fallback: carry the previous offset forward if no lag improves on it
-
     // Two-anchor search: re-check both a small window around the running
     // per-pool offset estimate (previousOffset -- cheap continuous drift
     // tracking, see this function's header-comment history) AND a small
@@ -183,8 +180,16 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
     // fix produced.
     const float anchorOffsets[] = { previousOffset, 0.0f };
 
-    for (float anchor : anchorOffsets)
+    // Per-anchor best score AND best offset, tracked independently -- see the
+    // anchor-switch-margin comment below for why the final decision is no
+    // longer a single global max across every candidate from both anchors.
+    float bestScorePerAnchor[2] = { -1.0f, -1.0f };
+    float bestOffsetPerAnchor[2] = { previousOffset, 0.0f };
+
+    for (int anchorIndex = 0; anchorIndex < 2; ++anchorIndex)
     {
+        const float anchor = anchorOffsets[(size_t) anchorIndex];
+
         for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
         {
             const float candidateOffset = anchor + (float) lag;
@@ -207,13 +212,44 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
             const float denom = std::sqrt (refEnergy * candEnergy);
             const float score = denom > 1.0e-8f ? dot / denom : -1.0f;
 
-            if (score > bestScore)
+            if (score > bestScorePerAnchor[anchorIndex])
             {
-                bestScore = score;
-                bestOffset = candidateOffset;
+                bestScorePerAnchor[anchorIndex] = score;
+                bestOffsetPerAnchor[anchorIndex] = candidateOffset;
             }
         }
     }
+
+    if (outAnchorScores != nullptr)
+    {
+        outAnchorScores[0] = bestScorePerAnchor[0];
+        outAnchorScores[1] = bestScorePerAnchor[1];
+    }
+
+    // REVERTED 2026-08-24: an anchor-switch-margin gate was tried here
+    // (investigating the "pitch oscillation" report -- see
+    // docs/formant-preserving-pitch-shifter-research.md section 10/11) to
+    // stop the zero anchor from winning on noise-level score ties. It DID
+    // eliminate the sawtooth reset pattern (confirmed via
+    // PitchShifterTests.cpp's DIAGNOSTIC "primary alignment-offset
+    // stability" test -- zero big jumps at all four ratios afterward), but
+    // broke the existing +24st spectral-sideband regression test
+    // (-8.23dB, needed <=-30dB): with the zero anchor gated to only
+    // override on a clear win, the previousOffset anchor's search settled
+    // into and STAYED in a self-consistent bad local optimum -- exactly the
+    // "plateau" failure this two-anchor design was originally built to
+    // rescue (see this function's class-level comment above). The
+    // underlying reason a score-margin can't safely distinguish "noise-level
+    // tie" from "same score, different (bad) plateau": on a periodic input,
+    // normalized cross-correlation stays close to 1.0 for almost ANY
+    // phase-shifted copy of the signal against itself, so a structurally
+    // wrong alignment can score just as well as the correct one -- the score
+    // gap is not a reliable proxy for alignment quality here. Restored the
+    // original global-best-across-both-anchors decision (mathematically
+    // equivalent to comparing the two per-anchor bests found above) so the
+    // zero-anchor rescue still fires exactly as often as before; only the
+    // score-tracking instrumentation (outAnchorScores) was kept.
+    float bestOffset = bestScorePerAnchor[1] > bestScorePerAnchor[0] ? bestOffsetPerAnchor[1] : bestOffsetPerAnchor[0];
 
     // Safety clamp: keep the cumulative offset within the delay line's
     // already-verified capacity margin (baseDelayGrainMultiple/
@@ -259,7 +295,7 @@ float PitchShifter::processSample (float input)
     // replaces the old fixed COLA-derived constant).
     if (primarySamplesUntilLaunch <= 0)
     {
-        primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset);
+        primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset, primaryAnchorScores.data());
         primaryGrains[(size_t) primaryNextSlot] = { true, 0, primaryLastOffset };
         primaryNextSlot = (primaryNextSlot + 1) % maxConcurrentGrainsPerGroup;
         primarySamplesUntilLaunch = hopSamples;

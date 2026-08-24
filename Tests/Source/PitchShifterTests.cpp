@@ -779,6 +779,165 @@ public:
                         "likely means the alignment search got more expensive (radius, anchor count, or window "
                         "size), not just machine noise");
         }
+
+        beginTest ("DIAGNOSTIC: primary alignment-offset stability at +-12st vs +-24st (investigating a by-ear "
+                   "'pitch oscillation' report, worse at +-12st than +-24st)");
+        {
+            // Investigating a 2026-08-23 by-ear report (docs/formant-preserving-
+            // pitch-shifter-research.md section 10): "pitch oscillation" heard
+            // at +-12st, MORE noticeable than at +-24st -- the opposite of what
+            // you'd naively expect if artifacts simply worsened with shift
+            // amount.
+            //
+            // Hypothesis: findAlignmentOffset() (PitchShifter.cpp) picks each
+            // grain's launch offset via normalized cross-correlation, checked
+            // around TWO competing anchors every single hop -- the running
+            // previousOffset (continuous-drift tracking) and the fixed nominal
+            // zero (see that function's own comment). For a sustained, purely
+            // periodic tone (a held note), the correlation window can score
+            // near-identically at both anchors whenever the underlying dry
+            // buffer's own period lines them up -- and at exactly an octave
+            // (+-12st, pitchRatio=2.0 or 0.5), that per-hop tie is the most
+            // likely to recur, hop after hop, because an octave is the
+            // simplest possible pitch relationship. If true, the chosen offset
+            // should visibly FLIP-FLOP between the two anchors' neighborhoods
+            // at +-12st, while drifting more smoothly (or settling) at +-24st.
+            //
+            // This test does NOT assert a pass/fail bound yet -- it exists to
+            // confirm or refute the mechanism with real measurement before any
+            // fix is attempted, per this project's own "measure, don't
+            // guess-and-patch" convention (see section 10's decision note).
+            constexpr double sampleRate = 44100.0;
+            constexpr float inputFreq = 220.0f;
+
+            for (float semitones : { 12.0f, -12.0f, 24.0f, -24.0f })
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (semitones);
+
+                constexpr int warmupSamples = (int) (sampleRate * 0.5);
+                // 10s (not the usual 1-3s) -- the first pass at 3s only caught
+                // 1-2 big-jump events at -12st/-24st, not enough to tell a
+                // genuinely periodic reset apart from a one-off settling
+                // transient. This gives room for several cycles even at a
+                // slow reset rate.
+                constexpr int measureSamples = (int) (sampleRate * 10.0);
+
+                double phase = 0.0;
+                const double phaseInc = juce::MathConstants<double>::twoPi * inputFreq / sampleRate;
+
+                for (int i = 0; i < warmupSamples; ++i)
+                {
+                    shifter.processSample ((float) std::sin (phase) * 0.5f);
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                }
+
+                // primaryLastOffset only changes at each grain launch (once
+                // per hopSamples); sampling every processSample() call and
+                // recording only the VALUE CHANGES reconstructs the actual
+                // per-launch offset sequence without needing to know the
+                // exact hop timing here.
+                std::vector<float> launchOffsets;
+                std::vector<std::array<float, 2>> launchAnchorScores;
+                float lastSeen = shifter.getPrimaryLastOffset();
+                launchOffsets.push_back (lastSeen);
+                launchAnchorScores.push_back (shifter.getPrimaryAnchorScores());
+
+                for (int i = 0; i < measureSamples; ++i)
+                {
+                    shifter.processSample ((float) std::sin (phase) * 0.5f);
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+
+                    const float current = shifter.getPrimaryLastOffset();
+                    if (current != lastSeen)
+                    {
+                        launchOffsets.push_back (current);
+                        launchAnchorScores.push_back (shifter.getPrimaryAnchorScores());
+                        lastSeen = current;
+                    }
+                }
+
+                // Flip-flop indicator: a smoothly-drifting (or settled)
+                // offset keeps the SAME sign of successive deltas for many
+                // launches in a row; a search alternating between two
+                // competing anchors reverses sign almost every launch. Count
+                // sign reversals as a fraction of all delta pairs.
+                int signReversals = 0;
+                int deltaPairs = 0;
+                float maxAbsDelta = 0.0f;
+
+                for (size_t i = 2; i < launchOffsets.size(); ++i)
+                {
+                    const float deltaPrev = launchOffsets[i - 1] - launchOffsets[i - 2];
+                    const float deltaCurr = launchOffsets[i] - launchOffsets[i - 1];
+                    maxAbsDelta = juce::jmax (maxAbsDelta, std::abs (deltaCurr));
+
+                    if (std::abs (deltaPrev) > 1.0e-3f && std::abs (deltaCurr) > 1.0e-3f)
+                    {
+                        ++deltaPairs;
+                        if ((deltaPrev > 0.0f) != (deltaCurr > 0.0f))
+                            ++signReversals;
+                    }
+                }
+
+                const double reversalFraction = deltaPairs > 0 ? (double) signReversals / (double) deltaPairs : 0.0;
+
+                // Large-jump recurrence: distinguishes a one-off settling
+                // transient (e.g. right after warmup, before the running
+                // offset has converged) from a swing that keeps recurring
+                // throughout the measurement window -- only the latter could
+                // explain a perceived, ongoing "oscillation" on a sustained
+                // held note. Threshold of 100 samples is well above
+                // alignmentSearchRadiusSamples (22) -- a jump this size means
+                // the search actually switched which anchor's neighborhood it
+                // landed in, not just noise within one anchor's own window.
+                std::vector<int> bigJumpLaunchIndices;
+                for (size_t i = 1; i < launchOffsets.size(); ++i)
+                    if (std::abs (launchOffsets[i] - launchOffsets[i - 1]) > 100.0f)
+                        bigJumpLaunchIndices.push_back ((int) i);
+
+                juce::String bigJumpList;
+                for (int idx : bigJumpLaunchIndices)
+                    bigJumpList += juce::String (idx) + " ";
+
+                logMessage ("Offset stability at " + juce::String (semitones) + "st: " + juce::String ((int) launchOffsets.size())
+                            + " launches, " + juce::String (signReversals) + "/" + juce::String (deltaPairs)
+                            + " sign reversals (" + juce::String (reversalFraction * 100.0, 1)
+                            + "%), max per-launch delta=" + juce::String (maxAbsDelta, 2)
+                            + " samples, big jumps (>100 samples) at launch indices: [" + bigJumpList.trim() + "]");
+
+                // Anchor-crossover confirmation: for the first big jump found,
+                // print BOTH anchors' scores for a small window of launches
+                // straddling it. If the hypothesis is right, the zero anchor
+                // ([1]) should be losing (lower score) right before the jump
+                // and become the actual winner (its score >= the previousOffset
+                // anchor's, [0]) right at/after it -- a genuine crossover, not
+                // some other cause (e.g. a discontinuity in the reference
+                // window itself).
+                if (! bigJumpLaunchIndices.empty())
+                {
+                    const int jumpIdx = bigJumpLaunchIndices.front();
+                    const int windowStart = juce::jmax (0, jumpIdx - 3);
+                    const int windowEnd = juce::jmin ((int) launchOffsets.size() - 1, jumpIdx + 2);
+
+                    logMessage ("  Anchor scores around first jump (launch " + juce::String (jumpIdx)
+                                + ") at " + juce::String (semitones) + "st:");
+                    for (int i = windowStart; i <= windowEnd; ++i)
+                    {
+                        const auto& scores = launchAnchorScores[(size_t) i];
+                        logMessage ("    launch " + juce::String (i) + ": offset=" + juce::String (launchOffsets[(size_t) i], 2)
+                                    + ", previousOffset-anchor score=" + juce::String (scores[0], 5)
+                                    + ", zero-anchor score=" + juce::String (scores[1], 5)
+                                    + (i == jumpIdx ? "  <-- jump lands here" : ""));
+                    }
+                }
+            }
+        }
     }
 };
 

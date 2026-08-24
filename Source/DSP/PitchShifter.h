@@ -140,6 +140,24 @@ public:
     // other externally-visible DSP state.
     float getPitchRatio() const noexcept { return pitchRatio; }
 
+    // For inspection/testing of the primary pool's running WSOLA alignment
+    // offset (see findAlignmentOffset()'s comment) -- lets a test observe
+    // whether this value drifts smoothly between grain launches or jumps
+    // erratically between the two competing anchors (previousOffset vs the
+    // fixed zero origin), without needing to duplicate the search logic
+    // itself.
+    float getPrimaryLastOffset() const noexcept { return primaryLastOffset; }
+
+    // For inspection/testing only: the primary pool's most recent
+    // findAlignmentOffset() call's best correlation score found around EACH
+    // anchor in isolation -- [0] is the previousOffset (continuous-drift)
+    // anchor, [1] is the fixed-zero anchor. Lets a test confirm whether a
+    // given offset "reset" (see getPrimaryLastOffset()'s big-jump behavior)
+    // actually corresponds to the zero anchor's score overtaking the
+    // previousOffset anchor's, rather than assuming it from the offset jump
+    // alone.
+    std::array<float, 2> getPrimaryAnchorScores() const noexcept { return primaryAnchorScores; }
+
     float processSample (float input);
 
     // Read-only peek at the quadrature voice group's crossfaded output from
@@ -356,7 +374,12 @@ private:
     // fixes this while staying just as cheap (one more small window, not a
     // full grain-length one) -- see PitchShifterTests.cpp's DIAGNOSTIC tests
     // for the measured before/after numbers.
-    float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset);
+    // outAnchorScores (optional, nullptr by default): if non-null, writes the
+    // best score found around EACH anchor in isolation to outAnchorScores[0]
+    // (previousOffset anchor) and outAnchorScores[1] (fixed-zero anchor) --
+    // pure introspection, does not affect which candidate wins overall (see
+    // getPrimaryAnchorScores()'s comment for why this exists).
+    float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores = nullptr);
 
     DelayLineType delayLine;
 
@@ -459,6 +482,13 @@ private:
     // that searched +-grainLengthSamplesInt from a fixed origin at every launch.
     float primaryLastOffset = 0.0f;
     float quadratureLastOffset = 0.0f;
+
+    // Primary pool's most recent per-anchor best scores, for test
+    // introspection only -- see getPrimaryAnchorScores()'s comment. Not
+    // populated for the quadrature pool (its findAlignmentOffset() call
+    // passes no out-param); this is investigation-only state, not something
+    // any real-time behavior reads back.
+    std::array<float, 2> primaryAnchorScores { -1.0f, -1.0f };
 
     // Cached crossfaded (and normalized) output of the quadrature pool from
     // the most recent processSample() call, exposed via
