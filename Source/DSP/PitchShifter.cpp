@@ -110,7 +110,7 @@ float PitchShifter::grainWindow (int elapsed) const noexcept
     return 1.0f;
 }
 
-float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores)
+bool PitchShifter::buildAlignmentReferenceBuffer (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains) noexcept
 {
     const Grain* outgoing = nullptr;
     for (auto& grain : grains)
@@ -118,7 +118,7 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
             outgoing = &grain;
 
     if (outgoing == nullptr)
-        return previousOffset;
+        return false;
 
     // baseDelaySamples + currentDriftSamples (not bare baseDelaySamples): the
     // search must operate against the SAME currently-drifted reference the
@@ -154,6 +154,45 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         const float delaySamples = juce::jmax (0.0f, outgoingCurrentDelay - (float) k * pitchRatio);
         alignmentReferenceBuffer[(size_t) k] = delayLine.popSample (0, delaySamples, false);
     }
+
+    return true;
+}
+
+float PitchShifter::scoreCandidateOffset (float candidateOffset) noexcept
+{
+    const int windowSamples = (int) alignmentReferenceBuffer.size();
+    const float candidateBaseDelay = baseDelaySamples + currentDriftSamples + candidateOffset;
+
+    float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
+
+    for (int k = 0; k < windowSamples; ++k)
+    {
+        // Same fixed-snapshot rate correction as buildAlignmentReferenceBuffer()'s
+        // own loop above: pitchRatio, not (pitchRatio - 1.0f).
+        const float delaySamples = juce::jmax (0.0f, candidateBaseDelay - (float) k * pitchRatio);
+        const float candidateSample = delayLine.popSample (0, delaySamples, false);
+
+        dot += alignmentReferenceBuffer[(size_t) k] * candidateSample;
+        refEnergy += alignmentReferenceBuffer[(size_t) k] * alignmentReferenceBuffer[(size_t) k];
+        candEnergy += candidateSample * candidateSample;
+    }
+
+    const float denom = std::sqrt (refEnergy * candEnergy);
+    return denom > 1.0e-8f ? dot / denom : -1.0f;
+}
+
+float PitchShifter::debugScorePrimaryCandidateOffset (float candidateOffset) noexcept
+{
+    if (! buildAlignmentReferenceBuffer (primaryGrains))
+        return -1.0f;
+
+    return scoreCandidateOffset (candidateOffset);
+}
+
+float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores)
+{
+    if (! buildAlignmentReferenceBuffer (grains))
+        return previousOffset;
 
     // Two-anchor search: re-check both a small window around the running
     // per-pool offset estimate (previousOffset -- cheap continuous drift
@@ -193,24 +232,7 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
         {
             const float candidateOffset = anchor + (float) lag;
-            const float candidateBaseDelay = baseDelaySamples + currentDriftSamples + candidateOffset;
-
-            float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
-
-            for (int k = 0; k < windowSamples; ++k)
-            {
-                // Same fixed-snapshot rate correction as the reference-window
-                // loop above: pitchRatio, not (pitchRatio - 1.0f).
-                const float delaySamples = juce::jmax (0.0f, candidateBaseDelay - (float) k * pitchRatio);
-                const float candidateSample = delayLine.popSample (0, delaySamples, false);
-
-                dot += alignmentReferenceBuffer[(size_t) k] * candidateSample;
-                refEnergy += alignmentReferenceBuffer[(size_t) k] * alignmentReferenceBuffer[(size_t) k];
-                candEnergy += candidateSample * candidateSample;
-            }
-
-            const float denom = std::sqrt (refEnergy * candEnergy);
-            const float score = denom > 1.0e-8f ? dot / denom : -1.0f;
+            const float score = scoreCandidateOffset (candidateOffset);
 
             if (score > bestScorePerAnchor[anchorIndex])
             {

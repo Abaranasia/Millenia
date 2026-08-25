@@ -938,6 +938,95 @@ public:
                 }
             }
         }
+
+        beginTest ("DIAGNOSTIC: correlation score-curve shape around the primary pool's live decision, at +-12st vs "
+                   "+-24st (testing the octave-tie hypothesis for the 'pitch oscillation' report)");
+        {
+            // Directly measures the SHAPE of findAlignmentOffset()'s
+            // underlying normalized cross-correlation score as a function of
+            // candidate offset -- not just the two anchors' own small
+            // +-alignmentSearchRadiusSamples windows -- via
+            // debugScorePrimaryCandidateOffset() (TEST-ONLY, see
+            // PitchShifter.h). Tests the DIAGNOSTIC offset-stability test's
+            // own hypothesis above: that +-12st's flip-flopping is caused by
+            // the score curve having multiple near-tied local maxima, one
+            // per near-integer multiple of the 220Hz input's own period
+            // (~200.45 samples) -- and that +-24st either doesn't have this
+            // problem, or has it much less.
+            constexpr double sampleRate = 44100.0;
+            constexpr float inputFreq = 220.0f;
+            const double periodSamples = sampleRate / (double) inputFreq;
+
+            for (float semitones : { 12.0f, -12.0f, 24.0f, -24.0f })
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (semitones);
+
+                constexpr int warmupSamples = (int) (sampleRate * 0.5);
+                double phase = 0.0;
+                const double phaseInc = juce::MathConstants<double>::twoPi * inputFreq / sampleRate;
+
+                for (int i = 0; i < warmupSamples; ++i)
+                {
+                    shifter.processSample ((float) std::sin (phase) * 0.5f);
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                }
+
+                logMessage ("Score-curve sweep at " + juce::String (semitones) + "st (input period="
+                            + juce::String ((float) periodSamples, 2) + " samples):");
+
+                constexpr int hopsToSample = 6;
+                constexpr int sweepRangeSamples = 900; // a bit over one grainLengthSamplesInt at 44.1kHz
+                constexpr int sweepStepSamples = 4;
+
+                for (int hopIndex = 0; hopIndex < hopsToSample; ++hopIndex)
+                {
+                    // Advance to the next launch boundary (getPrimaryLastOffset()
+                    // changes at every launch, same detection idiom as the
+                    // offset-stability test above) so each sweep happens right
+                    // when a real decision is about to be made.
+                    const float before = shifter.getPrimaryLastOffset();
+                    int guard = 0;
+                    while (shifter.getPrimaryLastOffset() == before && guard < 5000)
+                    {
+                        shifter.processSample ((float) std::sin (phase) * 0.5f);
+                        phase += phaseInc;
+                        if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                        ++guard;
+                    }
+
+                    const float currentOffset = shifter.getPrimaryLastOffset();
+
+                    std::vector<std::pair<float, float>> curve;
+                    for (int s = -sweepRangeSamples; s <= sweepRangeSamples; s += sweepStepSamples)
+                        curve.push_back ({ (float) s, shifter.debugScorePrimaryCandidateOffset ((float) s) });
+
+                    float globalMax = -1.0f;
+                    for (auto& p : curve)
+                        globalMax = juce::jmax (globalMax, p.second);
+
+                    juce::String peakList;
+                    int peakCount = 0;
+                    for (size_t i = 1; i + 1 < curve.size(); ++i)
+                    {
+                        if (curve[i].second >= curve[i - 1].second && curve[i].second >= curve[i + 1].second
+                            && curve[i].second >= globalMax - 0.01f)
+                        {
+                            ++peakCount;
+                            peakList += juce::String (curve[i].first, 0) + "(" + juce::String (curve[i].second, 4) + ") ";
+                        }
+                    }
+
+                    logMessage ("  hop " + juce::String (hopIndex) + ": currentOffset=" + juce::String (currentOffset, 1)
+                                + ", global max score=" + juce::String (globalMax, 4) + ", near-tied peaks (>=max-0.01): "
+                                + juce::String (peakCount) + " -> " + peakList.trim());
+                }
+            }
+        }
     }
 };
 

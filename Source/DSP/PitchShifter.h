@@ -183,6 +183,22 @@ public:
     // already follows.
     void setFreezeAmount (float newFreezeAmount) noexcept { freezeAmount = juce::jlimit (0.0f, 1.0f, newFreezeAmount); }
 
+    // TEST-ONLY (introspection for the 2026-08-24/25 "pitch oscillation"
+    // investigation, see PitchShifterTests.cpp's DIAGNOSTIC tests): rebuilds
+    // the primary pool's alignment reference window from its current
+    // outgoing grain -- the exact same reference findAlignmentOffset() would
+    // use on its NEXT call -- then returns the normalized cross-correlation
+    // score for an ARBITRARY candidate offset, not just the two anchors' own
+    // small ±alignmentSearchRadiusSamples windows. Lets a test sweep/plot the
+    // FULL score curve to directly inspect its shape (e.g. how many
+    // near-tied local maxima it has, and how far apart), rather than only
+    // ever seeing the two anchors' own best-in-window scores. Returns -1.0f
+    // (the same score floor findAlignmentOffset() uses) if there is no
+    // active grain yet to align against. Read-only/non-mutating with respect
+    // to real-time behavior: does not change primaryLastOffset or launch any
+    // grain, only reuses the shared alignmentReferenceBuffer scratch space.
+    float debugScorePrimaryCandidateOffset (float candidateOffset) noexcept;
+
 private:
     using DelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>;
 
@@ -381,6 +397,23 @@ private:
     // getPrimaryAnchorScores()'s comment for why this exists).
     float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores = nullptr);
 
+    // Shared helpers factored out of findAlignmentOffset() so
+    // debugScorePrimaryCandidateOffset() (TEST-ONLY, see its own comment)
+    // can reuse the identical reference-window/scoring math without
+    // duplicating it -- findAlignmentOffset() itself is unchanged behavior,
+    // just calling through these now instead of inlining them.
+    //
+    // Finds the outgoing (oldest active) grain in `grains` and rebuilds
+    // alignmentReferenceBuffer from its trajectory. Returns false (leaving
+    // alignmentReferenceBuffer untouched) if there is no active grain yet.
+    bool buildAlignmentReferenceBuffer (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains) noexcept;
+
+    // Normalized cross-correlation score of one candidate offset against the
+    // CURRENT alignmentReferenceBuffer (see buildAlignmentReferenceBuffer()
+    // above) -- same formula findAlignmentOffset()'s search loop uses per
+    // candidate.
+    float scoreCandidateOffset (float candidateOffset) noexcept;
+
     DelayLineType delayLine;
 
     // Computed once in prepare() from the live sample rate, not recomputed
@@ -425,9 +458,35 @@ private:
     // PitchShifterTests.cpp's DIAGNOSTIC tests for the full measured numbers.
     int alignmentSearchRadiusSamples = 0;
 
+    // REVERTED 2026-08-25: widening this window (independent of
+    // crossfadeSamplesInt, the real audio-splice length) to 5ms/220 samples
+    // was tried to attack the correlation metric's tie-proneness at its root
+    // (see the "correlation score-curve shape" DIAGNOSTIC test and its
+    // discovery memory: a window shorter than the input's own period can't
+    // tell the true alignment apart from a whole-period-away impostor,
+    // measured IDENTICAL at every ratio, not just +-12st). As predicted in
+    // that same analysis, it produced NO improvement on this project's own
+    // pure-sine regression tests (a perfectly periodic signal has an EXACT,
+    // unbreakable tie at ANY window length -- sideband/stability numbers
+    // came back essentially unchanged from baseline) -- but it did have two
+    // real, measured costs: the wall-clock real-time-factor DIAGNOSTIC test
+    // dropped from >=8x to 5.72x (O(window) cost per candidate, ~2.5x more
+    // work), and +24st's offset stability got WORSE, not better (big jumps
+    // recurring roughly every 9 hops instead of the baseline's ~30-50) --
+    // most likely because the wider window started reading the delay line's
+    // jmax(0.0f, ...) floor for part of its length at that ratio's tighter
+    // capacity margin (exactly the risk the reverted attempt's own comment
+    // had flagged), degrading the reference data rather than improving it.
+    // Reverted back to using crossfadeSamplesInt directly for this window.
+    // NOTE: this does NOT rule out a wider window helping on REAL
+    // (non-perfectly-periodic) program material -- only that this project's
+    // synthetic pure-sine tests cannot demonstrate any such benefit, while
+    // they CAN and did demonstrate the cost. A real test would need actual
+    // recorded audio material, not a lab tone.
+
     // Reused scratch buffer for findAlignmentOffset()'s reference window --
-    // sized once in prepare() to crossfadeSamplesInt samples, never resized in
-    // the audio-thread hot path (real-time safety).
+    // sized once in prepare() to crossfadeSamplesInt samples, never resized
+    // in the audio-thread hot path (real-time safety).
     std::vector<float> alignmentReferenceBuffer;
 
     // Cached so processSample() never calls std::pow (updated only when
