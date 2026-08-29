@@ -1124,6 +1124,83 @@ public:
                             + "block-to-block oscillation in second 1-2: " + juce::String (oscillationDb, 2)
                             + " dB (min=" + juce::String (oscMin, 6) + ", max=" + juce::String (oscMax, 6) + ")");
         }
+
+        beginTest ("DIAGNOSTIC: sustained-input RMS trend at default (non-frozen) settings -- investigating a by-ear 'volume keeps rising' report");
+        {
+            // By-ear complaint (2026-08-23, after wiring FormantEnvelopeCorrector
+            // in place of SpectralTiltCompensator): "sounds tuned, no chipmunk
+            // on the high note but highly distorted, with some glitches and a
+            // lo-fi touch. Also its volume seems to raise and raise, like if it
+            // was constantly amplified." The existing "Sustained noise stays
+            // finite and bounded for at least 30 seconds" test above only
+            // asserts peak <= 10.0f -- far too loose to catch a perceptually
+            // obvious "getting louder over time" trend (e.g. climbing from
+            // ~0.3 to ~3.0 would still pass that bound without ever tripping
+            // it). This measures the actual RMS trend over time instead of
+            // just boundedness, same discipline as the Freeze-tail diagnostic
+            // above -- at DEFAULT (non-frozen) settings, which is what was
+            // actually being listened to.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+            constexpr int totalSeconds = 30;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            // Defaults: pitchShift=12st, shimmerAmount=1.0, feedback=0.7 -- no
+            // setFreezeAmount() call, this is the plain, most common use case.
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (24681012);
+
+            std::vector<float> perSecondRms ((size_t) totalSeconds, 0.0f);
+
+            for (int sec = 0; sec < totalSeconds; ++sec)
+            {
+                double sumSquares = 0.0;
+                juce::int64 numSamplesThisSecond = 0;
+
+                for (int b = 0; b < blocksPerSecond; ++b)
+                {
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getWritePointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            data[i] = random.nextFloat() * 0.6f - 0.3f;
+                    }
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getReadPointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                        {
+                            expect (std::isfinite (data[i]), "Non-finite sample during sustained-input RMS trend measurement");
+                            sumSquares += (double) data[i] * (double) data[i];
+                            ++numSamplesThisSecond;
+                        }
+                    }
+                }
+
+                perSecondRms[(size_t) sec] = (float) std::sqrt (sumSquares / (double) numSamplesThisSecond);
+            }
+
+            juce::String trend;
+            for (int sec = 0; sec < totalSeconds; sec += 5)
+                trend += juce::String (perSecondRms[(size_t) sec], 4) + (sec + 5 < totalSeconds ? ", " : "");
+            logMessage ("Sustained-input RMS at 5s intervals (default settings, input amplitude +-0.3): " + trend);
+
+            const float firstSecondRms = perSecondRms[0];
+            const float lastSecondRms = perSecondRms[(size_t) (totalSeconds - 1)];
+            const float growthDb = 20.0f * std::log10 (juce::jmax (1.0e-9f, lastSecondRms) / juce::jmax (1.0e-9f, firstSecondRms));
+            logMessage ("RMS growth over " + juce::String (totalSeconds) + "s: first-second=" + juce::String (firstSecondRms, 4)
+                        + ", last-second=" + juce::String (lastSecondRms, 4) + " (" + juce::String (growthDb, 2) + " dB)");
+        }
     }
 };
 

@@ -140,6 +140,24 @@ public:
     // other externally-visible DSP state.
     float getPitchRatio() const noexcept { return pitchRatio; }
 
+    // For inspection/testing of the primary pool's running WSOLA alignment
+    // offset (see findAlignmentOffset()'s comment) -- lets a test observe
+    // whether this value drifts smoothly between grain launches or jumps
+    // erratically between the two competing anchors (previousOffset vs the
+    // fixed zero origin), without needing to duplicate the search logic
+    // itself.
+    float getPrimaryLastOffset() const noexcept { return primaryLastOffset; }
+
+    // For inspection/testing only: the primary pool's most recent
+    // findAlignmentOffset() call's best correlation score found around EACH
+    // anchor in isolation -- [0] is the previousOffset (continuous-drift)
+    // anchor, [1] is the fixed-zero anchor. Lets a test confirm whether a
+    // given offset "reset" (see getPrimaryLastOffset()'s big-jump behavior)
+    // actually corresponds to the zero anchor's score overtaking the
+    // previousOffset anchor's, rather than assuming it from the offset jump
+    // alone.
+    std::array<float, 2> getPrimaryAnchorScores() const noexcept { return primaryAnchorScores; }
+
     float processSample (float input);
 
     // Read-only peek at the quadrature voice group's crossfaded output from
@@ -164,6 +182,43 @@ public:
     // engaged" convention every other freeze-aware DSP class in this project
     // already follows.
     void setFreezeAmount (float newFreezeAmount) noexcept { freezeAmount = juce::jlimit (0.0f, 1.0f, newFreezeAmount); }
+
+    // TEST-ONLY (introspection for the 2026-08-24/25 "pitch oscillation"
+    // investigation, see PitchShifterTests.cpp's DIAGNOSTIC tests): rebuilds
+    // the primary pool's alignment reference window from its current
+    // outgoing grain -- the exact same reference findAlignmentOffset() would
+    // use on its NEXT call -- then returns the normalized cross-correlation
+    // score for an ARBITRARY candidate offset, not just the two anchors' own
+    // small ±alignmentSearchRadiusSamples windows. Lets a test sweep/plot the
+    // FULL score curve to directly inspect its shape (e.g. how many
+    // near-tied local maxima it has, and how far apart), rather than only
+    // ever seeing the two anchors' own best-in-window scores. Returns -1.0f
+    // (the same score floor findAlignmentOffset() uses) if there is no
+    // active grain yet to align against. Read-only/non-mutating with respect
+    // to real-time behavior: does not change primaryLastOffset or launch any
+    // grain, only reuses the shared alignmentReferenceBuffer scratch space.
+    float debugScorePrimaryCandidateOffset (float candidateOffset) noexcept;
+
+    // TEST-ONLY (2026-08-29 "pitch oscillation" investigation continued):
+    // evaluates ONLY the previousOffset anchor's own small
+    // ±alignmentSearchRadiusSamples local search -- the exact same loop
+    // findAlignmentOffset() runs for anchor index 0 -- and returns the
+    // resulting best OFFSET (not just its score, unlike
+    // getPrimaryAnchorScores()). Lets a test check whether that ONE anchor's
+    // own answer is stable hop-to-hop entirely on its own, independent of
+    // whether the zero anchor ever competes with or overrides it -- both the
+    // distance-gated score-margin and small-move-dwell fixes only gate WHICH
+    // anchor's answer gets used, so if this anchor's own local search is
+    // itself unstable at a given ratio, neither fix could ever help,
+    // regardless of tuning. Read-only/non-mutating, same convention as
+    // debugScorePrimaryCandidateOffset() above.
+    float debugFindPreviousOffsetAnchorLocalBest (float previousOffset) noexcept;
+
+    // TEST-ONLY: exposes the live alignmentSearchRadiusSamples value (see its
+    // own comment) so a test can compare it against an independently
+    // measured pitch period of real program material, without duplicating
+    // prepare()'s formula.
+    int getAlignmentSearchRadiusSamples() const noexcept { return alignmentSearchRadiusSamples; }
 
 private:
     using DelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>;
@@ -247,6 +302,59 @@ private:
     // baseDelayGrainMultiple above applies here: unaffected by grain count.
     static constexpr float maxDelayExtraGrainMultiple = 2.0f;
 
+    // Freeze-decay mitigation, experiment 2 (see setFreezeAmount()'s comment
+    // above for the full rationale). ShimmerReverbEngine's Freeze bug
+    // (DattorroTank.h's frozenMaxShimmerBlendWeight comment) is destructive
+    // comb-filtering interference at a STATIC ~80ms offset between the
+    // tank's own direct feedback and this shifter's baseDelaySamples-delayed
+    // copy. Dithering that mean delay slowly and slightly -- the same
+    // principle chorus/flanger effects use to hide comb coloration under
+    // slow delay modulation -- turns that one fixed, fully-destructive notch
+    // into a slowly wandering one, which is far less audible than a static
+    // one even though it isn't literally removed. Depth (+-2ms) and rate
+    // (0.15Hz) are REASONED starting points (small enough to be inaudible as
+    // its own pitch wobble -- roughly +-4 cents at these values -- slow
+    // enough not to read as vibrato), not exhaustively ear-tuned.
+    //
+    // IMPORTANT, verified 2026-08-22: this mechanism was confirmed WORKING
+    // (a standalone sanity check drove the live dither value to exactly its
+    // configured depth every time) but produces NO measurable change on
+    // ShimmerReverbEngineTests.cpp's existing Freeze-decay/oscillation
+    // diagnostic (RMS-based), even at 7.5x this depth (15ms, tested then
+    // reverted) as a sanity-check upper bound. This is expected, not a
+    // failure of the mechanism: total broadband energy lost to destructive
+    // comb interference is theoretically conserved whether the null sits at
+    // one static frequency or wanders across several over time -- a moving
+    // null still removes just as much energy at any given instant, only at
+    // a different, changing location. The claimed benefit here is
+    // PERCEPTUAL (a wandering, chorus-like coloration reads as far less
+    // objectionable than a static, "dead" one -- see
+    // docs/fdn-shimmer-reverb-research.md section 9), not a reduction in
+    // measured decay-dB or RMS-oscillation. This project's existing
+    // automated diagnostics cannot confirm or deny that perceptual claim --
+    // only a listening pass can. Treat this constant's value as unvalidated
+    // by ear as of this note.
+    //
+    // Lowered 2.0f -> 0.4f, 2026-08-22 (by-ear report: "chipmunk effect
+    // again... works nice for low notes, but sounds a bit ridiculous on
+    // higher notes"). Root cause: this dither's induced pitch deviation
+    // (1 - d(delay)/dt, the same mechanism that gives chorus/vibrato its
+    // pitch wobble) is a fixed RELATIVE (cents) shift -- roughly constant
+    // regardless of what note is playing -- but a fixed relative shift is a
+    // proportionally LARGER absolute Hz deviation on a higher note (e.g. ~3
+    // cents at the old 2.0f depth is ~0.2Hz at 110Hz but ~1.7Hz at 880Hz).
+    // Applied across a harmonically rich higher note, every harmonic drifts
+    // by a proportionally larger absolute amount, which reads as
+    // inter-harmonic detuning/chipmunk character rather than a subtle
+    // wobble. 0.4f keeps the depth-rate product (and hence the induced
+    // cents deviation) roughly 5x smaller than before, aiming to keep the
+    // wobble subtle even on higher notes -- still a REASONED value, not
+    // exhaustively ear-tuned; may need further reduction (or a rate change
+    // instead/also, since induced deviation scales with depth*rate) after
+    // another listening pass.
+    static constexpr float freezeDriftDepthMs = 0.4f;
+    static constexpr float freezeDriftRateHz = 0.15f;
+
     // grainDelaySamples(elapsed) = baseDelaySamples - elapsed * (pitchRatio - 1.0f)
     // This makes the delay change by exactly (1 - pitchRatio) per sample as a
     // grain ages by 1 sample per sample -- precisely the rate needed for the
@@ -303,7 +411,29 @@ private:
     // fixes this while staying just as cheap (one more small window, not a
     // full grain-length one) -- see PitchShifterTests.cpp's DIAGNOSTIC tests
     // for the measured before/after numbers.
-    float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset);
+    // outAnchorScores (optional, nullptr by default): if non-null, writes the
+    // best score found around EACH anchor in isolation to outAnchorScores[0]
+    // (previousOffset anchor) and outAnchorScores[1] (fixed-zero anchor) --
+    // pure introspection, does not affect which candidate wins overall (see
+    // getPrimaryAnchorScores()'s comment for why this exists).
+    float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores = nullptr);
+
+    // Shared helpers factored out of findAlignmentOffset() so
+    // debugScorePrimaryCandidateOffset() (TEST-ONLY, see its own comment)
+    // can reuse the identical reference-window/scoring math without
+    // duplicating it -- findAlignmentOffset() itself is unchanged behavior,
+    // just calling through these now instead of inlining them.
+    //
+    // Finds the outgoing (oldest active) grain in `grains` and rebuilds
+    // alignmentReferenceBuffer from its trajectory. Returns false (leaving
+    // alignmentReferenceBuffer untouched) if there is no active grain yet.
+    bool buildAlignmentReferenceBuffer (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains) noexcept;
+
+    // Normalized cross-correlation score of one candidate offset against the
+    // CURRENT alignmentReferenceBuffer (see buildAlignmentReferenceBuffer()
+    // above) -- same formula findAlignmentOffset()'s search loop uses per
+    // candidate.
+    float scoreCandidateOffset (float candidateOffset) noexcept;
 
     DelayLineType delayLine;
 
@@ -349,14 +479,107 @@ private:
     // PitchShifterTests.cpp's DIAGNOSTIC tests for the full measured numbers.
     int alignmentSearchRadiusSamples = 0;
 
+    // REVERTED 2026-08-29: two anchor-selection gates were tried and removed
+    // in the same session -- a distance-gated SCORE MARGIN, then a
+    // distance-gated TIME DWELL (both only allowed to intervene when the two
+    // anchors' candidates were already close together, so a genuine large
+    // corrective jump like +24st's plateau rescue would stay unaffected).
+    // Both only produced a weak, quickly-plateauing effect on the real-
+    // material DIAGNOSTIC tests (margin: capped around a ~20-point reversal
+    // reduction even at an unusably extreme value; dwell: capped similarly
+    // at 5 hops with ZERO further improvement at 20 hops). A follow-up trace
+    // (debugFindPreviousOffsetAnchorLocalBest(), still present, TEST-ONLY)
+    // explains why: the previousOffset anchor's own small search window,
+    // measured in complete isolation with the zero anchor never considered,
+    // reverses direction at essentially the SAME rate as the whole two-
+    // anchor system (e.g. drone1.wav +12st: 49.6% alone vs 50.0% overall).
+    // The instability is not anchor-vs-anchor competition at all -- it lives
+    // inside ONE anchor's own +-alignmentSearchRadiusSamples window on this
+    // content at this ratio, so gating which anchor wins could never have
+    // fixed it. See findAlignmentOffset()'s own comment and
+    // PitchShifterTests.cpp's real-material DIAGNOSTIC tests for the full
+    // measured trail, and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
+    //
+    // CLOSED 2026-08-29 as a documented, permanent limitation, not an
+    // actively-patched bug: after this and one more attempt (below) both
+    // failed for related structural reasons -- see
+    // docs/formant-preserving-pitch-shifter-research.md section 11 for the
+    // full seven-attempt trail and section 12 for candidate DIFFERENT
+    // strategies (not decision-rule tuning) to investigate in a future
+    // session.
+
+    // REVERTED 2026-08-29: an ADAPTIVE WIDE-SEARCH FALLBACK was tried next --
+    // triggered only when an anchor's small-radius search landed exactly at
+    // its window's edge (a cheap, reliable signal that the true optimum lies
+    // outside the window, measured on real +-12st tonal content to be
+    // anywhere from ~50 to ~250 samples away -- comparable to a large
+    // fraction of a full grain length). The idea was to pay the expensive
+    // wide search's cost (permanently widening alignmentSearchRadiusSamples
+    // itself would multiply per-hop cost ~11x for EVERY hop at EVERY ratio,
+    // reintroducing the exact real-time problem the incremental two-anchor
+    // design exists to avoid) only on the specific hops that actually need
+    // it. REVERTED because "edge-pinned" cannot tell a genuine large
+    // necessary correction apart from previousOffset already being stuck in
+    // a bad, self-consistent WRONG plateau -- both look identical from
+    // outside, but the wide search made the plateau case WORSE (it can find
+    // an even more convincing-scoring but still wrong distant answer),
+    // breaking the +24st spectral-sideband regression test the exact same
+    // way as the 2026-08-24 margin attempt. See findAlignmentOffset()'s own
+    // comment for the full detail and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
+
+    // REVERTED 2026-08-25: widening this window (independent of
+    // crossfadeSamplesInt, the real audio-splice length) to 5ms/220 samples
+    // was tried to attack the correlation metric's tie-proneness at its root
+    // (see the "correlation score-curve shape" DIAGNOSTIC test and its
+    // discovery memory: a window shorter than the input's own period can't
+    // tell the true alignment apart from a whole-period-away impostor,
+    // measured IDENTICAL at every ratio, not just +-12st). As predicted in
+    // that same analysis, it produced NO improvement on this project's own
+    // pure-sine regression tests (a perfectly periodic signal has an EXACT,
+    // unbreakable tie at ANY window length -- sideband/stability numbers
+    // came back essentially unchanged from baseline) -- but it did have two
+    // real, measured costs: the wall-clock real-time-factor DIAGNOSTIC test
+    // dropped from >=8x to 5.72x (O(window) cost per candidate, ~2.5x more
+    // work), and +24st's offset stability got WORSE, not better (big jumps
+    // recurring roughly every 9 hops instead of the baseline's ~30-50) --
+    // most likely because the wider window started reading the delay line's
+    // jmax(0.0f, ...) floor for part of its length at that ratio's tighter
+    // capacity margin (exactly the risk the reverted attempt's own comment
+    // had flagged), degrading the reference data rather than improving it.
+    // Reverted back to using crossfadeSamplesInt directly for this window.
+    // NOTE: this does NOT rule out a wider window helping on REAL
+    // (non-perfectly-periodic) program material -- only that this project's
+    // synthetic pure-sine tests cannot demonstrate any such benefit, while
+    // they CAN and did demonstrate the cost. A real test would need actual
+    // recorded audio material, not a lab tone.
+
     // Reused scratch buffer for findAlignmentOffset()'s reference window --
-    // sized once in prepare() to crossfadeSamplesInt samples, never resized in
-    // the audio-thread hot path (real-time safety).
+    // sized once in prepare() to crossfadeSamplesInt samples, never resized
+    // in the audio-thread hot path (real-time safety).
     std::vector<float> alignmentReferenceBuffer;
 
     // Cached so processSample() never calls std::pow (updated only when
     // setPitchShiftSemitones() is called).
     float pitchRatio = 1.0f;
+
+    // Freeze-decay mitigation state (see freezeDriftDepthMs's comment
+    // above). freezeAmount is set by setFreezeAmount(); freezeDriftDepthSamples
+    // and driftPhaseIncrement are computed once in prepare() from the live
+    // sample rate; driftPhase accumulates every sample in processSample()
+    // (wrapped, never allowed to grow unbounded); currentDriftSamples is the
+    // actual per-sample dither value (0 at freezeAmount=0.0f) added to
+    // baseDelaySamples everywhere it's used for an actual delay-line read
+    // (grainDelaySamples() and findAlignmentOffset()) -- NOT added to the
+    // capacity-sizing/initial-setDelay() uses in prepare(), which stay based
+    // on the fixed nominal baseDelaySamples plus this drift's own max
+    // excursion as extra headroom.
+    float freezeAmount = 0.0f;
+    float freezeDriftDepthSamples = 0.0f;
+    float driftPhaseIncrement = 0.0f;
+    float driftPhase = 0.0f;
+    float currentDriftSamples = 0.0f;
 
     // Primary pool: same role as the old primaryVoices group, feeds the
     // recirculating tank path via processSample()'s return value. See the
@@ -389,6 +612,13 @@ private:
     // that searched +-grainLengthSamplesInt from a fixed origin at every launch.
     float primaryLastOffset = 0.0f;
     float quadratureLastOffset = 0.0f;
+
+    // Primary pool's most recent per-anchor best scores, for test
+    // introspection only -- see getPrimaryAnchorScores()'s comment. Not
+    // populated for the quadrature pool (its findAlignmentOffset() call
+    // passes no out-param); this is investigation-only state, not something
+    // any real-time behavior reads back.
+    std::array<float, 2> primaryAnchorScores { -1.0f, -1.0f };
 
     // Cached crossfaded (and normalized) output of the quadrature pool from
     // the most recent processSample() call, exposed via

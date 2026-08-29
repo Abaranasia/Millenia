@@ -11,6 +11,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
     freezeLeveler.prepare (spec);
+    formantCorrector.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
@@ -46,6 +47,7 @@ void ShimmerReverbEngine::reset()
     safetyLimiter.reset();
     quadratureDcBlocker.reset();
     freezeLeveler.reset();
+    formantCorrector.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -93,6 +95,7 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
     freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
     tank.setFreezeAmount (freezeAmount);
     freezeLeveler.setFreezeAmount (freezeAmount);
+    shifter.setFreezeAmount (freezeAmount);
 
     // Re-derive the shifter's ratio against the just-updated freezeAmount --
     // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()
@@ -109,8 +112,38 @@ void ShimmerReverbEngine::updateShifterRatio()
     // amount essentially untouched through most of the dial's travel and
     // only pulls it toward unity near full freeze, while still reaching
     // EXACTLY 0 semitones (ratio 1.0) at freezeAmount=1.0, same as before.
-    const float crossfade = std::pow (1.0f - freezeAmount, pitchShiftCrossfadeCurve);
-    shifter.setPitchShiftSemitones (pitchShiftSemitones * crossfade);
+    //
+    // BUG, found and fixed 2026-08-22 (by-ear report: "a pitch variation is
+    // noticeable when moving the freeze dial" -- still present after the
+    // original fix, plus an unrelated-seeming Width loss at high freeze):
+    // this used to be std::pow(1.0f - freezeAmount, pitchShiftCrossfadeCurve)
+    // -- (1-f)^4 -- which is a real arithmetic error, not the curve shape
+    // described above. (1-f)^4 is STEEPEST right at f=0 and FLATTENS out
+    // near f=1: at f=0.5 it evaluates to 0.0625 (94% of the shift already
+    // gone at the HALFWAY point of the dial, not "essentially untouched").
+    // That is the exact opposite of the intended shape, and explains both
+    // symptoms: pitch dropping audibly as soon as the dial leaves 0 (not
+    // concentrated near full freeze), and reduced Width through most of the
+    // range too (Width's sideShift term is the difference between the
+    // primary/quadrature shifted signals -- less actual shift happening
+    // means less spectral difference between them, hence a narrower-sounding
+    // result, independent of anything specific to Width's own code). The
+    // correct shape for "flat near 0, steep drop near 1, exactly 0 at 1" is
+    // 1 - f^4, not (1-f)^4 -- e.g. at f=0.5 this evaluates to 0.9375 (94%
+    // RETAINED, matching what was originally intended/described), still
+    // reaching exactly 0 at f=1.0 (the anti-cascade guarantee is unaffected).
+    const float crossfade = 1.0f - std::pow (freezeAmount, pitchShiftCrossfadeCurve);
+    const float effectiveSemitones = pitchShiftSemitones * crossfade;
+    shifter.setPitchShiftSemitones (effectiveSemitones);
+
+    // Chipmunk-mitigation, LPC-based formant correction (see
+    // FormantEnvelopeCorrector.h): keyed to the same EFFECTIVE shift actually
+    // reaching the shifter right now (post freeze crossfade), not the raw
+    // user-facing knob value, so the correction arms/disarms with whatever
+    // shift is really happening -- and stays a bit-identical passthrough at
+    // effectiveSemitones<=0, same convention as every other conditional DSP
+    // stage in this codebase.
+    formantCorrector.setPitchShiftSemitones (effectiveSemitones);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -146,7 +179,21 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // the shimmer the tank's actual sustain mechanism rather than a
         // weak side-loop competing with the tank's own unshifted decayGain
         // recirculation.
-        float shiftedFeedback = shifter.processSample (tank.peekFeedbackSignal());
+        float dryFeedback = tank.peekFeedbackSignal();
+        float shiftedFeedback = shifter.processSample (dryFeedback);
+
+        // Chipmunk-mitigation, LPC-based formant correction (see
+        // FormantEnvelopeCorrector.h and docs/formant-preserving-pitch-shifter-
+        // research.md sections 8-9): estimates the spectral envelope of the
+        // signal entering the shifter (dryFeedback) and of the signal leaving it
+        // (shiftedFeedback), then pulls the shifted signal's envelope back
+        // toward the original -- replacing SpectralTiltCompensator's cruder
+        // darkening-only approach, which this project's own research proved
+        // structurally unable to fix the complaint on high notes. Applied here,
+        // immediately after the shift and before DC blocking/limiting, so it
+        // shapes exactly the signal that's about to re-enter the tank -- same
+        // position in the chain SpectralTiltCompensator occupied.
+        shiftedFeedback = formantCorrector.processSample (dryFeedback, shiftedFeedback);
 
         // Phase 4: remove DC/subsonic bias from the recirculating signal
         // before it hits the tanh soft-clip below -- DC removal has to
@@ -197,6 +244,13 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // second, quadrature-offset voice pair internally; read its
         // crossfaded output here.
         float quadratureRaw = shifter.getQuadratureOutput();
+
+        // Shares formantCorrector's already-computed coefficients (from the
+        // primary dry/shifted pair above) rather than running a second
+        // independent LPC analysis -- see FormantEnvelopeCorrector.h's
+        // processQuadratureSample() comment for why this is valid (both grain
+        // pools read the identical shared delay line).
+        quadratureRaw = formantCorrector.processQuadratureSample (quadratureRaw);
 
         // Own DCBlocker instance -- this class holds per-sample state
         // (previousInput/previousOutput) that would corrupt both signals if

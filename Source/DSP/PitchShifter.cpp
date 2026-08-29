@@ -20,7 +20,18 @@ void PitchShifter::prepare (const juce::dsp::ProcessSpec& spec)
     alignmentSearchRadiusSamples = juce::jmax (16, crossfadeSamplesInt / 4);
     alignmentReferenceBuffer.assign ((size_t) crossfadeSamplesInt, 0.0f);
 
-    auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple;
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // computed once here from the live sample rate, same convention as
+    // every other ms-based constant in this class.
+    freezeDriftDepthSamples = freezeDriftDepthMs * 0.001f * (float) spec.sampleRate;
+    driftPhaseIncrement = juce::MathConstants<float>::twoPi * freezeDriftRateHz / (float) spec.sampleRate;
+
+    // +freezeDriftDepthSamples: the dither above can push the effective
+    // delay up to that far beyond the nominal baseDelaySamples/+grain-length
+    // margin already computed below -- the delay line's capacity must cover
+    // that excursion too, or a read would clamp/misbehave right when Freeze
+    // is engaged.
+    auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple + freezeDriftDepthSamples;
     delayLine.setMaximumDelayInSamples (juce::roundToInt (neededSamples) + 1);
 
     juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
@@ -66,6 +77,12 @@ void PitchShifter::reset()
     // before this reset() would seed the first post-reset search.
     primaryLastOffset = 0.0f;
     quadratureLastOffset = 0.0f;
+
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // rewind the drift LFO's phase too, so a reset() produces the same
+    // starting dither state every time rather than resuming mid-cycle.
+    driftPhase = 0.0f;
+    currentDriftSamples = 0.0f;
 }
 
 void PitchShifter::setPitchShiftSemitones (float semitones)
@@ -75,7 +92,10 @@ void PitchShifter::setPitchShiftSemitones (float semitones)
 
 float PitchShifter::grainDelaySamples (int elapsed) const noexcept
 {
-    return baseDelaySamples - (float) elapsed * (pitchRatio - 1.0f);
+    // currentDriftSamples is 0.0f unless Freeze is engaged (see
+    // freezeDriftDepthMs's header comment) -- at freezeAmount=0.0f this is
+    // bit-identical to the pre-existing formula.
+    return baseDelaySamples + currentDriftSamples - (float) elapsed * (pitchRatio - 1.0f);
 }
 
 float PitchShifter::grainWindow (int elapsed) const noexcept
@@ -90,7 +110,7 @@ float PitchShifter::grainWindow (int elapsed) const noexcept
     return 1.0f;
 }
 
-float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset)
+bool PitchShifter::buildAlignmentReferenceBuffer (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains) noexcept
 {
     const Grain* outgoing = nullptr;
     for (auto& grain : grains)
@@ -98,9 +118,15 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
             outgoing = &grain;
 
     if (outgoing == nullptr)
-        return previousOffset;
+        return false;
 
-    const float outgoingBaseDelay = baseDelaySamples + outgoing->baseDelayOffset;
+    // baseDelaySamples + currentDriftSamples (not bare baseDelaySamples): the
+    // search must operate against the SAME currently-drifted reference the
+    // active grains themselves are reading via grainDelaySamples(), or it
+    // would hunt for alignment against a stale/wrong delay and find a
+    // spuriously bad offset. currentDriftSamples is 0.0f unless Freeze is
+    // engaged (see freezeDriftDepthMs's header comment).
+    const float outgoingBaseDelay = baseDelaySamples + currentDriftSamples + outgoing->baseDelayOffset;
     const float outgoingCurrentDelay = outgoingBaseDelay - (float) outgoing->age * (pitchRatio - 1.0f);
 
     const int windowSamples = (int) alignmentReferenceBuffer.size();
@@ -129,8 +155,67 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         alignmentReferenceBuffer[(size_t) k] = delayLine.popSample (0, delaySamples, false);
     }
 
+    return true;
+}
+
+float PitchShifter::scoreCandidateOffset (float candidateOffset) noexcept
+{
+    const int windowSamples = (int) alignmentReferenceBuffer.size();
+    const float candidateBaseDelay = baseDelaySamples + currentDriftSamples + candidateOffset;
+
+    float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
+
+    for (int k = 0; k < windowSamples; ++k)
+    {
+        // Same fixed-snapshot rate correction as buildAlignmentReferenceBuffer()'s
+        // own loop above: pitchRatio, not (pitchRatio - 1.0f).
+        const float delaySamples = juce::jmax (0.0f, candidateBaseDelay - (float) k * pitchRatio);
+        const float candidateSample = delayLine.popSample (0, delaySamples, false);
+
+        dot += alignmentReferenceBuffer[(size_t) k] * candidateSample;
+        refEnergy += alignmentReferenceBuffer[(size_t) k] * alignmentReferenceBuffer[(size_t) k];
+        candEnergy += candidateSample * candidateSample;
+    }
+
+    const float denom = std::sqrt (refEnergy * candEnergy);
+    return denom > 1.0e-8f ? dot / denom : -1.0f;
+}
+
+float PitchShifter::debugScorePrimaryCandidateOffset (float candidateOffset) noexcept
+{
+    if (! buildAlignmentReferenceBuffer (primaryGrains))
+        return -1.0f;
+
+    return scoreCandidateOffset (candidateOffset);
+}
+
+float PitchShifter::debugFindPreviousOffsetAnchorLocalBest (float previousOffset) noexcept
+{
+    if (! buildAlignmentReferenceBuffer (primaryGrains))
+        return previousOffset;
+
     float bestScore = -1.0f;
-    float bestOffset = previousOffset; // fallback: carry the previous offset forward if no lag improves on it
+    float bestOffset = previousOffset;
+
+    for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
+    {
+        const float candidateOffset = previousOffset + (float) lag;
+        const float score = scoreCandidateOffset (candidateOffset);
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestOffset = candidateOffset;
+        }
+    }
+
+    return bestOffset;
+}
+
+float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores)
+{
+    if (! buildAlignmentReferenceBuffer (grains))
+        return previousOffset;
 
     // Two-anchor search: re-check both a small window around the running
     // per-pool offset estimate (previousOffset -- cheap continuous drift
@@ -157,37 +242,112 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
     // fix produced.
     const float anchorOffsets[] = { previousOffset, 0.0f };
 
-    for (float anchor : anchorOffsets)
+    // Per-anchor best score AND best offset, tracked independently -- see the
+    // anchor-switch-margin comment below for why the final decision is no
+    // longer a single global max across every candidate from both anchors.
+    float bestScorePerAnchor[2] = { -1.0f, -1.0f };
+    float bestOffsetPerAnchor[2] = { previousOffset, 0.0f };
+
+    for (int anchorIndex = 0; anchorIndex < 2; ++anchorIndex)
     {
+        const float anchor = anchorOffsets[(size_t) anchorIndex];
+
         for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
         {
             const float candidateOffset = anchor + (float) lag;
-            const float candidateBaseDelay = baseDelaySamples + candidateOffset;
+            const float score = scoreCandidateOffset (candidateOffset);
 
-            float dot = 0.0f, refEnergy = 0.0f, candEnergy = 0.0f;
-
-            for (int k = 0; k < windowSamples; ++k)
+            if (score > bestScorePerAnchor[anchorIndex])
             {
-                // Same fixed-snapshot rate correction as the reference-window
-                // loop above: pitchRatio, not (pitchRatio - 1.0f).
-                const float delaySamples = juce::jmax (0.0f, candidateBaseDelay - (float) k * pitchRatio);
-                const float candidateSample = delayLine.popSample (0, delaySamples, false);
-
-                dot += alignmentReferenceBuffer[(size_t) k] * candidateSample;
-                refEnergy += alignmentReferenceBuffer[(size_t) k] * alignmentReferenceBuffer[(size_t) k];
-                candEnergy += candidateSample * candidateSample;
-            }
-
-            const float denom = std::sqrt (refEnergy * candEnergy);
-            const float score = denom > 1.0e-8f ? dot / denom : -1.0f;
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestOffset = candidateOffset;
+                bestScorePerAnchor[anchorIndex] = score;
+                bestOffsetPerAnchor[anchorIndex] = candidateOffset;
             }
         }
     }
+
+    // REVERTED 2026-08-29 (see adaptiveWideSearchRadiusSamples' header
+    // comment for the full rationale): an adaptive wide-search fallback was
+    // tried here, triggered whenever an anchor's small-radius search landed
+    // exactly at its window's edge. Tried twice, both broke the +24st
+    // spectral-sideband regression test with the EXACT same failure and
+    // number as the 2026-08-24 REVERTED margin attempt (-8.23dB, needed
+    // <=-30dB) -- first applying it to both anchors (the fixed zero anchor's
+    // whole purpose is staying confined near a known-good region; widening
+    // IT lets it wander into a distant, coincidentally-equal-scoring but
+    // WRONG plateau), then restricting it to previousOffset alone (STILL
+    // broke identically). The second failure is the real finding: "edge-
+    // pinned" cannot distinguish a genuine large necessary correction (the
+    // +-12st failure this was meant to fix) from previousOffset already
+    // being stuck in a bad, self-consistent wrong plateau (the +24st
+    // failure this whole two-anchor design exists to rescue from) --
+    // BOTH look identical from outside (true optimum outside the small
+    // window), yet need opposite treatment: one should widen and follow,
+    // the other must not be trusted further and should defer to the zero
+    // anchor instead. No fix implemented from this session's adaptive-radius
+    // line of investigation. See PitchShifterTests.cpp's real-material
+    // DIAGNOSTIC tests and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
+
+    if (outAnchorScores != nullptr)
+    {
+        outAnchorScores[0] = bestScorePerAnchor[0];
+        outAnchorScores[1] = bestScorePerAnchor[1];
+    }
+
+    // REVERTED 2026-08-24: an anchor-switch-margin gate was tried here
+    // (investigating the "pitch oscillation" report -- see
+    // docs/formant-preserving-pitch-shifter-research.md section 10/11) to
+    // stop the zero anchor from winning on noise-level score ties. It DID
+    // eliminate the sawtooth reset pattern (confirmed via
+    // PitchShifterTests.cpp's DIAGNOSTIC "primary alignment-offset
+    // stability" test -- zero big jumps at all four ratios afterward), but
+    // broke the existing +24st spectral-sideband regression test
+    // (-8.23dB, needed <=-30dB): with the zero anchor gated to only
+    // override on a clear win, the previousOffset anchor's search settled
+    // into and STAYED in a self-consistent bad local optimum -- exactly the
+    // "plateau" failure this two-anchor design was originally built to
+    // rescue (see this function's class-level comment above). The
+    // underlying reason a score-margin can't safely distinguish "noise-level
+    // tie" from "same score, different (bad) plateau": on a periodic input,
+    // normalized cross-correlation stays close to 1.0 for almost ANY
+    // phase-shifted copy of the signal against itself, so a structurally
+    // wrong alignment can score just as well as the correct one -- the score
+    // gap is not a reliable proxy for alignment quality here. Restored the
+    // original global-best-across-both-anchors decision (mathematically
+    // equivalent to comparing the two per-anchor bests found above) so the
+    // zero-anchor rescue still fires exactly as often as before; only the
+    // score-tracking instrumentation (outAnchorScores) was kept.
+    // REVERTED 2026-08-29: two anchor-selection gates were tried here in the
+    // same session -- a distance-gated SCORE MARGIN (require the zero anchor
+    // to beat previousOffset by a fixed amount when their candidates are
+    // close together), then a distance-gated TIME DWELL (throttle how often
+    // a close-together override can happen at all, unconditional on score).
+    // Both were measured on the cleanest real-material DIAGNOSTIC test
+    // (drone1.wav) to have only a weak, quickly-plateauing effect (margin:
+    // even at 0.9, near the top of the [-1,1] score range, +-12st reversal
+    // only dropped from ~50-65% to ~41%; dwell: 5 hops got a similar partial
+    // drop, and 20 hops produced NO further improvement at all -- a hard,
+    // early ceiling). A follow-up trace explains why NEITHER could ever have
+    // fully worked: a new TEST-ONLY introspection method
+    // (debugFindPreviousOffsetAnchorLocalBest()) measured the previousOffset
+    // anchor's own small-window search IN ISOLATION, with the zero anchor
+    // never even considered, and found it reverses direction at
+    // ESSENTIALLY THE SAME RATE as the full two-anchor system (e.g. drone1
+    // +12st: 49.6% alone vs 50.0% overall; -12st: 48.4% alone vs 48.4%
+    // overall). The instability is not anchor-vs-anchor competition at all --
+    // it lives entirely inside ONE anchor's own +-alignmentSearchRadiusSamples
+    // window, on this content, at this ratio. Gating which anchor's answer
+    // is used can only ever address anchor-vs-anchor disagreement, so both
+    // attempts were solving the wrong layer of the problem by construction.
+    // Restored the original unconditional best-score-wins decision.
+    // Next hypothesis (not yet investigated in code): alignmentSearchRadiusSamples
+    // itself may simply be too wide relative to this content's own pitch
+    // period at this ratio, letting more than one real cycle fit inside a
+    // single anchor's window and creating a genuine second competing peak
+    // there. See PitchShifterTests.cpp's real-material DIAGNOSTIC tests and
+    // Engram topic_key millenia/pitch-oscillation-investigation for the full
+    // trail.
+    float bestOffset = bestScorePerAnchor[1] > bestScorePerAnchor[0] ? bestOffsetPerAnchor[1] : bestOffsetPerAnchor[0];
 
     // Safety clamp: keep the cumulative offset within the delay line's
     // already-verified capacity margin (baseDelayGrainMultiple/
@@ -209,6 +369,18 @@ float PitchShifter::processSample (float input)
     delayLine.pushSample (0, input);
     delayLine.popSample (0);
 
+    // Freeze-decay mitigation (see freezeDriftDepthMs's header comment):
+    // advance the drift LFO's phase once per sample and recompute the
+    // current dither value used by grainDelaySamples()/findAlignmentOffset()
+    // below. Scaled by freezeAmount so this is exactly 0.0f (no phase
+    // advance needed even, since the sine is multiplied by zero) unless
+    // Freeze is actually engaged -- bit-identical to before this feature at
+    // freezeAmount=0.0f.
+    driftPhase += driftPhaseIncrement;
+    if (driftPhase >= juce::MathConstants<float>::twoPi)
+        driftPhase -= juce::MathConstants<float>::twoPi;
+    currentDriftSamples = freezeAmount * freezeDriftDepthSamples * std::sin (driftPhase);
+
     // No interpolator-reset step is needed here at any grain's launch:
     // DelayLine<Lagrange3rd>'s interpolation carries no history/state
     // between calls (unlike e.g. Thiran) -- each read is a pure function of
@@ -221,7 +393,7 @@ float PitchShifter::processSample (float input)
     // replaces the old fixed COLA-derived constant).
     if (primarySamplesUntilLaunch <= 0)
     {
-        primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset);
+        primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset, primaryAnchorScores.data());
         primaryGrains[(size_t) primaryNextSlot] = { true, 0, primaryLastOffset };
         primaryNextSlot = (primaryNextSlot + 1) % maxConcurrentGrainsPerGroup;
         primarySamplesUntilLaunch = hopSamples;

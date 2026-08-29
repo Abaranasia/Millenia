@@ -6,6 +6,7 @@
 #include "DCBlocker.h"
 #include "SafetyLimiter.h"
 #include "FreezeLeveler.h"
+#include "FormantEnvelopeCorrector.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -209,6 +210,20 @@ private:
     // signals. safetyLimiter above is genuinely stateless (only a fixed
     // threshold) and is reused for both signals.
     DCBlocker quadratureDcBlocker;
+
+    // LPC-based formant-preserving correction (2026-08-23, see
+    // docs/formant-preserving-pitch-shifter-research.md sections 8-9),
+    // replacing SpectralTiltCompensator -- that cheap one-pole fallback was
+    // proven structurally unable to fix the "chipmunk on high notes"
+    // complaint (the frequency band carrying the artifact and the wanted
+    // shimmer effect are the same band on high notes, so no static filter
+    // could separate them -- see SpectralTiltCompensator.h's own updated
+    // class comment). Only ONE instance: the quadrature path shares its
+    // coefficients via processQuadratureSample() rather than running a
+    // second independent analysis (both grain pools read the identical
+    // shared delay line -- see PitchShifter.h's class comment) -- see
+    // FormantEnvelopeCorrector.h's own comment for the full rationale.
+    FormantEnvelopeCorrector formantCorrector;
 
     // Phase 9 Freeze follow-up (2026-08-22, see FreezeLeveler.h): feed-forward
     // output-stage compensation for Freeze's measured amplitude decay --
