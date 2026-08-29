@@ -245,11 +245,12 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // crossfaded output here.
         float quadratureRaw = shifter.getQuadratureOutput();
 
-        // Shares formantCorrector's already-computed coefficients (from the
-        // primary dry/shifted pair above) rather than running a second
-        // independent LPC analysis -- see FormantEnvelopeCorrector.h's
-        // processQuadratureSample() comment for why this is valid (both grain
-        // pools read the identical shared delay line).
+        // Runs its own independent LPC analysis of this signal (2026-08-29
+        // stereo-width fix -- see FormantEnvelopeCorrector.h's
+        // processQuadratureSample() comment) while still reusing
+        // formantCorrector's dry-signal analysis from the primary call
+        // above (dry genuinely is one shared signal between the two grain
+        // pools, unlike their actual shifted output).
         quadratureRaw = formantCorrector.processQuadratureSample (quadratureRaw);
 
         // Own DCBlocker instance -- this class holds per-sample state
