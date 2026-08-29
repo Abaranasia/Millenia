@@ -189,6 +189,29 @@ float PitchShifter::debugScorePrimaryCandidateOffset (float candidateOffset) noe
     return scoreCandidateOffset (candidateOffset);
 }
 
+float PitchShifter::debugFindPreviousOffsetAnchorLocalBest (float previousOffset) noexcept
+{
+    if (! buildAlignmentReferenceBuffer (primaryGrains))
+        return previousOffset;
+
+    float bestScore = -1.0f;
+    float bestOffset = previousOffset;
+
+    for (int lag = -alignmentSearchRadiusSamples; lag <= alignmentSearchRadiusSamples; ++lag)
+    {
+        const float candidateOffset = previousOffset + (float) lag;
+        const float score = scoreCandidateOffset (candidateOffset);
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestOffset = candidateOffset;
+        }
+    }
+
+    return bestOffset;
+}
+
 float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset, float* outAnchorScores)
 {
     if (! buildAlignmentReferenceBuffer (grains))
@@ -242,6 +265,29 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
         }
     }
 
+    // REVERTED 2026-08-29 (see adaptiveWideSearchRadiusSamples' header
+    // comment for the full rationale): an adaptive wide-search fallback was
+    // tried here, triggered whenever an anchor's small-radius search landed
+    // exactly at its window's edge. Tried twice, both broke the +24st
+    // spectral-sideband regression test with the EXACT same failure and
+    // number as the 2026-08-24 REVERTED margin attempt (-8.23dB, needed
+    // <=-30dB) -- first applying it to both anchors (the fixed zero anchor's
+    // whole purpose is staying confined near a known-good region; widening
+    // IT lets it wander into a distant, coincidentally-equal-scoring but
+    // WRONG plateau), then restricting it to previousOffset alone (STILL
+    // broke identically). The second failure is the real finding: "edge-
+    // pinned" cannot distinguish a genuine large necessary correction (the
+    // +-12st failure this was meant to fix) from previousOffset already
+    // being stuck in a bad, self-consistent wrong plateau (the +24st
+    // failure this whole two-anchor design exists to rescue from) --
+    // BOTH look identical from outside (true optimum outside the small
+    // window), yet need opposite treatment: one should widen and follow,
+    // the other must not be trusted further and should defer to the zero
+    // anchor instead. No fix implemented from this session's adaptive-radius
+    // line of investigation. See PitchShifterTests.cpp's real-material
+    // DIAGNOSTIC tests and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
+
     if (outAnchorScores != nullptr)
     {
         outAnchorScores[0] = bestScorePerAnchor[0];
@@ -271,6 +317,36 @@ float PitchShifter::findAlignmentOffset (const std::array<Grain, maxConcurrentGr
     // equivalent to comparing the two per-anchor bests found above) so the
     // zero-anchor rescue still fires exactly as often as before; only the
     // score-tracking instrumentation (outAnchorScores) was kept.
+    // REVERTED 2026-08-29: two anchor-selection gates were tried here in the
+    // same session -- a distance-gated SCORE MARGIN (require the zero anchor
+    // to beat previousOffset by a fixed amount when their candidates are
+    // close together), then a distance-gated TIME DWELL (throttle how often
+    // a close-together override can happen at all, unconditional on score).
+    // Both were measured on the cleanest real-material DIAGNOSTIC test
+    // (drone1.wav) to have only a weak, quickly-plateauing effect (margin:
+    // even at 0.9, near the top of the [-1,1] score range, +-12st reversal
+    // only dropped from ~50-65% to ~41%; dwell: 5 hops got a similar partial
+    // drop, and 20 hops produced NO further improvement at all -- a hard,
+    // early ceiling). A follow-up trace explains why NEITHER could ever have
+    // fully worked: a new TEST-ONLY introspection method
+    // (debugFindPreviousOffsetAnchorLocalBest()) measured the previousOffset
+    // anchor's own small-window search IN ISOLATION, with the zero anchor
+    // never even considered, and found it reverses direction at
+    // ESSENTIALLY THE SAME RATE as the full two-anchor system (e.g. drone1
+    // +12st: 49.6% alone vs 50.0% overall; -12st: 48.4% alone vs 48.4%
+    // overall). The instability is not anchor-vs-anchor competition at all --
+    // it lives entirely inside ONE anchor's own +-alignmentSearchRadiusSamples
+    // window, on this content, at this ratio. Gating which anchor's answer
+    // is used can only ever address anchor-vs-anchor disagreement, so both
+    // attempts were solving the wrong layer of the problem by construction.
+    // Restored the original unconditional best-score-wins decision.
+    // Next hypothesis (not yet investigated in code): alignmentSearchRadiusSamples
+    // itself may simply be too wide relative to this content's own pitch
+    // period at this ratio, letting more than one real cycle fit inside a
+    // single anchor's window and creating a genuine second competing peak
+    // there. See PitchShifterTests.cpp's real-material DIAGNOSTIC tests and
+    // Engram topic_key millenia/pitch-oscillation-investigation for the full
+    // trail.
     float bestOffset = bestScorePerAnchor[1] > bestScorePerAnchor[0] ? bestOffsetPerAnchor[1] : bestOffsetPerAnchor[0];
 
     // Safety clamp: keep the cumulative offset within the delay line's

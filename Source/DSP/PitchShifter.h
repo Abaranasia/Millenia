@@ -199,6 +199,27 @@ public:
     // grain, only reuses the shared alignmentReferenceBuffer scratch space.
     float debugScorePrimaryCandidateOffset (float candidateOffset) noexcept;
 
+    // TEST-ONLY (2026-08-29 "pitch oscillation" investigation continued):
+    // evaluates ONLY the previousOffset anchor's own small
+    // ±alignmentSearchRadiusSamples local search -- the exact same loop
+    // findAlignmentOffset() runs for anchor index 0 -- and returns the
+    // resulting best OFFSET (not just its score, unlike
+    // getPrimaryAnchorScores()). Lets a test check whether that ONE anchor's
+    // own answer is stable hop-to-hop entirely on its own, independent of
+    // whether the zero anchor ever competes with or overrides it -- both the
+    // distance-gated score-margin and small-move-dwell fixes only gate WHICH
+    // anchor's answer gets used, so if this anchor's own local search is
+    // itself unstable at a given ratio, neither fix could ever help,
+    // regardless of tuning. Read-only/non-mutating, same convention as
+    // debugScorePrimaryCandidateOffset() above.
+    float debugFindPreviousOffsetAnchorLocalBest (float previousOffset) noexcept;
+
+    // TEST-ONLY: exposes the live alignmentSearchRadiusSamples value (see its
+    // own comment) so a test can compare it against an independently
+    // measured pitch period of real program material, without duplicating
+    // prepare()'s formula.
+    int getAlignmentSearchRadiusSamples() const noexcept { return alignmentSearchRadiusSamples; }
+
 private:
     using DelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd>;
 
@@ -457,6 +478,56 @@ private:
     // See PitchShifter.cpp's prepare() for the exact formula and
     // PitchShifterTests.cpp's DIAGNOSTIC tests for the full measured numbers.
     int alignmentSearchRadiusSamples = 0;
+
+    // REVERTED 2026-08-29: two anchor-selection gates were tried and removed
+    // in the same session -- a distance-gated SCORE MARGIN, then a
+    // distance-gated TIME DWELL (both only allowed to intervene when the two
+    // anchors' candidates were already close together, so a genuine large
+    // corrective jump like +24st's plateau rescue would stay unaffected).
+    // Both only produced a weak, quickly-plateauing effect on the real-
+    // material DIAGNOSTIC tests (margin: capped around a ~20-point reversal
+    // reduction even at an unusably extreme value; dwell: capped similarly
+    // at 5 hops with ZERO further improvement at 20 hops). A follow-up trace
+    // (debugFindPreviousOffsetAnchorLocalBest(), still present, TEST-ONLY)
+    // explains why: the previousOffset anchor's own small search window,
+    // measured in complete isolation with the zero anchor never considered,
+    // reverses direction at essentially the SAME rate as the whole two-
+    // anchor system (e.g. drone1.wav +12st: 49.6% alone vs 50.0% overall).
+    // The instability is not anchor-vs-anchor competition at all -- it lives
+    // inside ONE anchor's own +-alignmentSearchRadiusSamples window on this
+    // content at this ratio, so gating which anchor wins could never have
+    // fixed it. See findAlignmentOffset()'s own comment and
+    // PitchShifterTests.cpp's real-material DIAGNOSTIC tests for the full
+    // measured trail, and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
+    //
+    // CLOSED 2026-08-29 as a documented, permanent limitation, not an
+    // actively-patched bug: after this and one more attempt (below) both
+    // failed for related structural reasons -- see
+    // docs/formant-preserving-pitch-shifter-research.md section 11 for the
+    // full seven-attempt trail and section 12 for candidate DIFFERENT
+    // strategies (not decision-rule tuning) to investigate in a future
+    // session.
+
+    // REVERTED 2026-08-29: an ADAPTIVE WIDE-SEARCH FALLBACK was tried next --
+    // triggered only when an anchor's small-radius search landed exactly at
+    // its window's edge (a cheap, reliable signal that the true optimum lies
+    // outside the window, measured on real +-12st tonal content to be
+    // anywhere from ~50 to ~250 samples away -- comparable to a large
+    // fraction of a full grain length). The idea was to pay the expensive
+    // wide search's cost (permanently widening alignmentSearchRadiusSamples
+    // itself would multiply per-hop cost ~11x for EVERY hop at EVERY ratio,
+    // reintroducing the exact real-time problem the incremental two-anchor
+    // design exists to avoid) only on the specific hops that actually need
+    // it. REVERTED because "edge-pinned" cannot tell a genuine large
+    // necessary correction apart from previousOffset already being stuck in
+    // a bad, self-consistent WRONG plateau -- both look identical from
+    // outside, but the wide search made the plateau case WORSE (it can find
+    // an even more convincing-scoring but still wrong distant answer),
+    // breaking the +24st spectral-sideband regression test the exact same
+    // way as the 2026-08-24 margin attempt. See findAlignmentOffset()'s own
+    // comment for the full detail and Engram topic_key
+    // millenia/pitch-oscillation-investigation for the complete history.
 
     // REVERTED 2026-08-25: widening this window (independent of
     // crossfadeSamplesInt, the real audio-splice length) to 5ms/220 samples

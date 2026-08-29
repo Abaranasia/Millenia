@@ -1027,6 +1027,502 @@ public:
                 }
             }
         }
+
+        // 2026-08-29 continuation of the "pitch oscillation" investigation
+        // (docs/formant-preserving-pitch-shifter-research.md section 10). Every
+        // measurement above this point uses a pure sine tone, which has an
+        // exact, unbreakable correlation tie at any window length or ratio --
+        // structurally unable to confirm (or refute) a mechanism that depends
+        // on real, non-perfectly-periodic program material actually differing
+        // from a lab tone. Reruns the exact same offset-stability measurement
+        // as the sine-tone DIAGNOSTIC test above, driven by a real recording,
+        // to see whether the anchor-flip-flop mechanism looks any different on
+        // real material. Factored into a lambda so multiple real-world test
+        // files can be run through it -- whisper8.wav (aperiodic breath
+        // content, confirmed by ear NOT to reproduce the original "oscillation"
+        // percept -- no fundamental pitch to wobble, though it did surface a
+        // real, distinct glitch at +24st) and a held tonal drone (the kind of
+        // sustained, pitched material the original complaint was actually
+        // reported against).
+        auto runRealMaterialAlignmentDiagnostic = [this] (const juce::File& wavFile)
+        {
+            if (! wavFile.existsAsFile())
+            {
+                logMessage ("SKIPPED: " + wavFile.getFullPathName() + " not found on this machine -- this "
+                            "DIAGNOSTIC test only runs where the user's own test recording is present.");
+            }
+            else
+            {
+                juce::AudioFormatManager formatManager;
+                formatManager.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (wavFile));
+
+                expect (reader != nullptr, "Failed to create an AudioFormatReader for " + wavFile.getFullPathName());
+
+                if (reader != nullptr)
+                {
+                    const double sampleRate = reader->sampleRate;
+                    const int numSourceSamples = (int) reader->lengthInSamples;
+
+                    juce::AudioBuffer<float> source ((int) reader->numChannels, numSourceSamples);
+                    reader->read (&source, 0, numSourceSamples, 0, true, true);
+
+                    std::vector<float> mono ((size_t) numSourceSamples, 0.0f);
+                    for (int ch = 0; ch < source.getNumChannels(); ++ch)
+                    {
+                        const float* channelData = source.getReadPointer (ch);
+                        for (int i = 0; i < numSourceSamples; ++i)
+                            mono[(size_t) i] += channelData[i];
+                    }
+                    if (source.getNumChannels() > 1)
+                        for (auto& s : mono)
+                            s /= (float) source.getNumChannels();
+
+                    logMessage ("Loaded " + wavFile.getFullPathName() + ": " + juce::String (numSourceSamples)
+                                + " samples, " + juce::String (source.getNumChannels()) + " ch, "
+                                + juce::String (sampleRate, 0) + "Hz (" + juce::String ((float) (numSourceSamples / sampleRate), 2)
+                                + "s)");
+
+                    // 2026-08-29 new hypothesis (see findAlignmentOffset()'s
+                    // REVERTED comment in PitchShifter.cpp): the previousOffset
+                    // anchor's own +-alignmentSearchRadiusSamples local search
+                    // was measured unstable in isolation, independent of the
+                    // zero anchor entirely -- possibly because more than one
+                    // real cycle of this content's own pitch period fits
+                    // inside that single window, creating a genuine second
+                    // competing peak there. Estimate the dry signal's own
+                    // fundamental period via normalized autocorrelation (same
+                    // idiom as PitchShifter's own scoreCandidateOffset(), just
+                    // applied directly to the source instead of a shifted
+                    // copy) and compare it against the live
+                    // alignmentSearchRadiusSamples value, before touching any
+                    // production code again.
+                    {
+                        const int periodAnalysisStart = juce::jmin ((int) (sampleRate * 0.5), numSourceSamples / 4);
+                        const int periodAnalysisLength = juce::jmin ((int) (sampleRate * 0.3), numSourceSamples - periodAnalysisStart);
+
+                        if (periodAnalysisLength > 0)
+                        {
+                            constexpr int minLagSamples = 20;
+                            const int maxLagSamples = juce::jmin (2000, periodAnalysisLength / 2);
+
+                            double bestCorrelation = -1.0;
+                            int bestLag = minLagSamples;
+
+                            for (int lag = minLagSamples; lag <= maxLagSamples; ++lag)
+                            {
+                                double dot = 0.0, energyA = 0.0, energyB = 0.0;
+                                for (int i = 0; i < periodAnalysisLength - lag; ++i)
+                                {
+                                    const float a = mono[(size_t) (periodAnalysisStart + i)];
+                                    const float b = mono[(size_t) (periodAnalysisStart + i + lag)];
+                                    dot += (double) a * (double) b;
+                                    energyA += (double) a * (double) a;
+                                    energyB += (double) b * (double) b;
+                                }
+                                const double denom = std::sqrt (energyA * energyB);
+                                const double correlation = denom > 1.0e-9 ? dot / denom : -1.0;
+
+                                if (correlation > bestCorrelation)
+                                {
+                                    bestCorrelation = correlation;
+                                    bestLag = lag;
+                                }
+                            }
+
+                            PitchShifter radiusProbe;
+                            juce::dsp::ProcessSpec radiusSpec { sampleRate, (juce::uint32) 512, 1 };
+                            radiusProbe.prepare (radiusSpec);
+                            const int searchRadius = radiusProbe.getAlignmentSearchRadiusSamples();
+                            const int windowSpan = 2 * searchRadius;
+
+                            logMessage ("Dry signal's own estimated fundamental period: " + juce::String (bestLag)
+                                        + " samples (~" + juce::String (sampleRate / (double) bestLag, 1) + "Hz, autocorrelation="
+                                        + juce::String (bestCorrelation, 4) + ") vs alignmentSearchRadiusSamples="
+                                        + juce::String (searchRadius) + " (a single anchor's window spans " + juce::String (windowSpan)
+                                        + " samples end-to-end) -- "
+                                        + (bestLag < windowSpan
+                                               ? "period is SMALLER than one anchor's own window span: more than one "
+                                                 "real cycle can fit inside a single local search, a plausible "
+                                                 "internal-multimodality mechanism"
+                                               : "period is LARGER than one anchor's own window span: this specific "
+                                                 "theory does not obviously apply here"));
+                        }
+                    }
+
+                    for (float semitones : { 12.0f, -12.0f, 24.0f, -24.0f })
+                    {
+                        PitchShifter shifter;
+                        juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                        shifter.prepare (spec);
+                        shifter.reset();
+                        shifter.setPitchShiftSemitones (semitones);
+
+                        // Warm up on the file's own leading ~0.5s (or half the
+                        // file for a very short recording) so the delay line
+                        // holds real signal history before trusting alignment
+                        // offsets -- same rationale as the sine-tone version of
+                        // this test above.
+                        const int warmupSamples = juce::jmin ((int) (sampleRate * 0.5), numSourceSamples / 2);
+
+                        // Render the FULL shifted output (warmup included) so
+                        // the user can actually listen to it and report which
+                        // timestamp(s) sound like the reported oscillation --
+                        // the measurement below only tracks offsets from
+                        // warmupSamples onward, but the audio itself should
+                        // start from the top so timestamps line up with the
+                        // rendered file.
+                        std::vector<float> renderedOutput;
+                        renderedOutput.reserve ((size_t) numSourceSamples);
+
+                        for (int i = 0; i < warmupSamples; ++i)
+                            renderedOutput.push_back (shifter.processSample (mono[(size_t) i]));
+
+                        std::vector<float> launchOffsets;
+                        std::vector<std::array<float, 2>> launchAnchorScores;
+                        std::vector<int> launchSampleIndices;
+                        // Independent trace of ONLY the previousOffset
+                        // anchor's own local search result at each launch
+                        // (debugFindPreviousOffsetAnchorLocalBest(), called
+                        // with the SAME previousOffset value that hop's real
+                        // findAlignmentOffset() call used) -- decoupled from
+                        // whichever anchor the gated fix actually chose, to
+                        // test whether this one anchor is stable on its own.
+                        std::vector<float> anchorZeroOnlyOffsets;
+                        float lastSeen = shifter.getPrimaryLastOffset();
+                        launchOffsets.push_back (lastSeen);
+                        launchAnchorScores.push_back (shifter.getPrimaryAnchorScores());
+                        launchSampleIndices.push_back (warmupSamples);
+                        anchorZeroOnlyOffsets.push_back (shifter.debugFindPreviousOffsetAnchorLocalBest (lastSeen));
+
+                        // Dense (every-launch, not sparse-sampled) flatness/
+                        // argmax trace of the correlation surface INSIDE the
+                        // previousOffset anchor's own +-alignmentSearchRadiusSamples
+                        // window (2026-08-29). A sparse (every-40th-launch)
+                        // version of this found the argmax consistently
+                        // pinned at the EDGE of the window (not a flat
+                        // plateau -- there's a real gradient, just clipped)
+                        // at +-12st on drone1.wav, but not at +-24st -- too
+                        // sparse a sample to tell whether that's a
+                        // persistent effect or coincidence, or whether it
+                        // correlates with the previously-measured ~50%
+                        // sign-reversal rate. Records argmaxLag/flatness at
+                        // EVERY launch instead, then cross-tabulates
+                        // edge-pinning against the SAME sign-reversal
+                        // definition anchorZeroOnlyOffsets already uses.
+                        const int searchRadius = shifter.getAlignmentSearchRadiusSamples();
+                        std::vector<float> argmaxLags;
+                        std::vector<float> flatnessValues;
+
+                        // Whenever the narrow (+-alignmentSearchRadiusSamples)
+                        // sweep is edge-pinned, also sweep a MUCH wider range
+                        // (2026-08-29, sizing a possible search-radius widen
+                        // fix from measurement instead of a guess) to find
+                        // where the TRUE, unclipped optimum actually sits.
+                        // Coarser step (2 samples) to keep this affordable
+                        // given how often drone1.wav's +-12st case is
+                        // edge-pinned (measured 99.6% of launches).
+                        constexpr int wideSweepRadius = 300;
+                        constexpr int wideSweepStep = 2;
+                        std::vector<float> wideArgmaxLags;
+                        std::vector<bool> wideStillClipped;
+
+                        auto sweepFlatness = [&] (float centerOffset)
+                        {
+                            float minScore = std::numeric_limits<float>::max();
+                            float maxScore = -std::numeric_limits<float>::max();
+                            float argmaxLag = 0.0f;
+
+                            for (int lag = -searchRadius; lag <= searchRadius; ++lag)
+                            {
+                                const float score = shifter.debugScorePrimaryCandidateOffset (centerOffset + (float) lag);
+                                if (score < minScore) minScore = score;
+                                if (score > maxScore) { maxScore = score; argmaxLag = (float) lag; }
+                            }
+
+                            argmaxLags.push_back (argmaxLag);
+                            flatnessValues.push_back (maxScore - minScore);
+
+                            if (std::abs (std::abs (argmaxLag) - (float) searchRadius) < 0.5f)
+                            {
+                                float wideBestScore = -std::numeric_limits<float>::max();
+                                float wideArgmaxLag = 0.0f;
+
+                                for (int lag = -wideSweepRadius; lag <= wideSweepRadius; lag += wideSweepStep)
+                                {
+                                    const float score = shifter.debugScorePrimaryCandidateOffset (centerOffset + (float) lag);
+                                    if (score > wideBestScore) { wideBestScore = score; wideArgmaxLag = (float) lag; }
+                                }
+
+                                wideArgmaxLags.push_back (wideArgmaxLag);
+                                wideStillClipped.push_back (std::abs (std::abs (wideArgmaxLag) - (float) wideSweepRadius) < (float) wideSweepStep);
+                            }
+                        };
+
+                        sweepFlatness (lastSeen);
+
+                        for (int i = warmupSamples; i < numSourceSamples; ++i)
+                        {
+                            renderedOutput.push_back (shifter.processSample (mono[(size_t) i]));
+
+                            const float current = shifter.getPrimaryLastOffset();
+                            if (current != lastSeen)
+                            {
+                                launchOffsets.push_back (current);
+                                launchAnchorScores.push_back (shifter.getPrimaryAnchorScores());
+                                launchSampleIndices.push_back (i);
+                                anchorZeroOnlyOffsets.push_back (shifter.debugFindPreviousOffsetAnchorLocalBest (lastSeen));
+                                sweepFlatness (lastSeen);
+                                lastSeen = current;
+                            }
+                        }
+
+                        int edgePinnedCount = 0;
+                        double flatnessSum = 0.0;
+                        constexpr float edgeEpsilon = 0.5f;
+                        for (float lag : argmaxLags)
+                        {
+                            if (std::abs (std::abs (lag) - (float) searchRadius) < edgeEpsilon)
+                                ++edgePinnedCount;
+                        }
+                        for (float f : flatnessValues)
+                            flatnessSum += f;
+                        const double edgePinnedFraction = ! argmaxLags.empty() ? (double) edgePinnedCount / (double) argmaxLags.size() : 0.0;
+                        const double avgFlatness = ! flatnessValues.empty() ? flatnessSum / (double) flatnessValues.size() : 0.0;
+
+                        int reversalsWhenEdgePinned = 0, totalWhenEdgePinned = 0;
+                        int reversalsWhenNotEdgePinned = 0, totalWhenNotEdgePinned = 0;
+                        for (size_t i = 2; i < anchorZeroOnlyOffsets.size(); ++i)
+                        {
+                            const float deltaPrev = anchorZeroOnlyOffsets[i - 1] - anchorZeroOnlyOffsets[i - 2];
+                            const float deltaCurr = anchorZeroOnlyOffsets[i] - anchorZeroOnlyOffsets[i - 1];
+
+                            if (std::abs (deltaPrev) > 1.0e-3f && std::abs (deltaCurr) > 1.0e-3f)
+                            {
+                                const bool isReversal = (deltaPrev > 0.0f) != (deltaCurr > 0.0f);
+                                const bool edgePinned = std::abs (std::abs (argmaxLags[i]) - (float) searchRadius) < edgeEpsilon;
+
+                                if (edgePinned) { ++totalWhenEdgePinned; if (isReversal) ++reversalsWhenEdgePinned; }
+                                else { ++totalWhenNotEdgePinned; if (isReversal) ++reversalsWhenNotEdgePinned; }
+                            }
+                        }
+
+                        logMessage ("Dense flatness trace at " + juce::String (semitones) + "st (real material): "
+                                    + juce::String ((int) argmaxLags.size()) + " launches, edge-pinned " + juce::String (edgePinnedCount)
+                                    + "/" + juce::String ((int) argmaxLags.size()) + " (" + juce::String (edgePinnedFraction * 100.0, 1)
+                                    + "%), avg flatness=" + juce::String (avgFlatness, 4) + "; reversal rate WHEN edge-pinned: "
+                                    + juce::String (reversalsWhenEdgePinned) + "/" + juce::String (totalWhenEdgePinned) + " ("
+                                    + juce::String (totalWhenEdgePinned > 0 ? 100.0 * reversalsWhenEdgePinned / totalWhenEdgePinned : 0.0, 1)
+                                    + "%), reversal rate when NOT edge-pinned: " + juce::String (reversalsWhenNotEdgePinned) + "/"
+                                    + juce::String (totalWhenNotEdgePinned) + " ("
+                                    + juce::String (totalWhenNotEdgePinned > 0 ? 100.0 * reversalsWhenNotEdgePinned / totalWhenNotEdgePinned : 0.0, 1)
+                                    + "%)");
+
+                        if (! wideArgmaxLags.empty())
+                        {
+                            float minAbsWideLag = std::numeric_limits<float>::max();
+                            float maxAbsWideLag = 0.0f;
+                            double sumAbsWideLag = 0.0;
+                            int stillClippedCount = 0;
+
+                            for (size_t w = 0; w < wideArgmaxLags.size(); ++w)
+                            {
+                                const float absLag = std::abs (wideArgmaxLags[w]);
+                                minAbsWideLag = juce::jmin (minAbsWideLag, absLag);
+                                maxAbsWideLag = juce::jmax (maxAbsWideLag, absLag);
+                                sumAbsWideLag += absLag;
+                                if (wideStillClipped[w])
+                                    ++stillClippedCount;
+                            }
+
+                            logMessage ("  Wide sweep (+-" + juce::String (wideSweepRadius) + " samples) at "
+                                        + juce::String (semitones) + "st, over " + juce::String ((int) wideArgmaxLags.size())
+                                        + " edge-pinned launches: true optimum's |offset| from center ranges "
+                                        + juce::String (minAbsWideLag, 1) + ".." + juce::String (maxAbsWideLag, 1) + " samples (avg "
+                                        + juce::String (sumAbsWideLag / (double) wideArgmaxLags.size(), 1) + "), vs the narrow "
+                                        + juce::String (searchRadius) + "-sample radius -- still clipped even at the wide radius: "
+                                        + juce::String (stillClippedCount) + "/" + juce::String ((int) wideArgmaxLags.size()));
+                        }
+
+                        // Write the rendered output next to the source file so
+                        // the user can listen and report exact timestamps of
+                        // audible artifacts, cross-referenced against the jump
+                        // log below.
+                        {
+                            const juce::String suffix = (semitones >= 0.0f ? "+" : "") + juce::String ((int) semitones) + "st";
+                            const juce::File outFile = wavFile.getSiblingFile (
+                                wavFile.getFileNameWithoutExtension() + "_shifted_" + suffix + ".wav");
+                            std::unique_ptr<juce::FileOutputStream> outStream (outFile.createOutputStream());
+
+                            if (outStream != nullptr)
+                            {
+                                outStream->setPosition (0);
+                                outStream->truncate();
+
+                                juce::WavAudioFormat wavFormat;
+                                std::unique_ptr<juce::AudioFormatWriter> writer (
+                                    wavFormat.createWriterFor (outStream.get(), sampleRate, 1, 32, {}, 0));
+
+                                if (writer != nullptr)
+                                {
+                                    outStream.release(); // writer now owns the stream
+
+                                    juce::AudioBuffer<float> outBuffer (1, (int) renderedOutput.size());
+                                    outBuffer.copyFrom (0, 0, renderedOutput.data(), (int) renderedOutput.size());
+                                    writer->writeFromAudioSampleBuffer (outBuffer, 0, outBuffer.getNumSamples());
+
+                                    logMessage ("Rendered shifted output to " + outFile.getFullPathName());
+                                }
+                            }
+                        }
+
+                        int signReversals = 0;
+                        int deltaPairs = 0;
+                        float maxAbsDelta = 0.0f;
+
+                        for (size_t i = 2; i < launchOffsets.size(); ++i)
+                        {
+                            const float deltaPrev = launchOffsets[i - 1] - launchOffsets[i - 2];
+                            const float deltaCurr = launchOffsets[i] - launchOffsets[i - 1];
+                            maxAbsDelta = juce::jmax (maxAbsDelta, std::abs (deltaCurr));
+
+                            if (std::abs (deltaPrev) > 1.0e-3f && std::abs (deltaCurr) > 1.0e-3f)
+                            {
+                                ++deltaPairs;
+                                if ((deltaPrev > 0.0f) != (deltaCurr > 0.0f))
+                                    ++signReversals;
+                            }
+                        }
+
+                        const double reversalFraction = deltaPairs > 0 ? (double) signReversals / (double) deltaPairs : 0.0;
+
+                        // Tracing which mechanism drives the small-scale
+                        // reversal: findAlignmentOffset() picks anchor 1
+                        // (fixed zero) whenever its score beats anchor 0
+                        // (previousOffset) -- see PitchShifter.cpp line ~274.
+                        // getPrimaryAnchorScores() already gives both anchors'
+                        // scores at EVERY launch (not just around big jumps),
+                        // so the winning anchor per launch, and how often it
+                        // FLIPS from one launch to the next, can be reconstructed
+                        // here with no new production-code instrumentation. A
+                        // low anchor-flip fraction alongside a HIGH offset
+                        // sign-reversal fraction would mean the same anchor
+                        // keeps winning every hop, but that anchor's own
+                        // +-alignmentSearchRadiusSamples local search itself
+                        // returns a different best lag almost every time --
+                        // i.e. the instability lives INSIDE one anchor's own
+                        // window, not in anchor-vs-anchor switching.
+                        int anchorFlips = 0;
+                        for (size_t i = 1; i < launchAnchorScores.size(); ++i)
+                        {
+                            const int prevWinner = launchAnchorScores[i - 1][1] > launchAnchorScores[i - 1][0] ? 1 : 0;
+                            const int currWinner = launchAnchorScores[i][1] > launchAnchorScores[i][0] ? 1 : 0;
+                            if (prevWinner != currWinner)
+                                ++anchorFlips;
+                        }
+                        const double anchorFlipFraction = launchAnchorScores.size() > 1
+                                                               ? (double) anchorFlips / (double) (launchAnchorScores.size() - 1)
+                                                               : 0.0;
+
+                        // Direct test of the "instability lives INSIDE one
+                        // anchor's own window" theory above: sign-reversal
+                        // rate of anchorZeroOnlyOffsets, an INDEPENDENT trace
+                        // of the previousOffset anchor's own local search
+                        // result at each launch, decoupled from whichever
+                        // anchor the applied fix actually chose. If this
+                        // reversal rate is comparably high on its own, that
+                        // anchor is unstable by itself -- no anchor-switching
+                        // gate (score-margin or dwell) could ever help.
+                        int anchorZeroSignReversals = 0;
+                        int anchorZeroDeltaPairs = 0;
+                        for (size_t i = 2; i < anchorZeroOnlyOffsets.size(); ++i)
+                        {
+                            const float deltaPrev = anchorZeroOnlyOffsets[i - 1] - anchorZeroOnlyOffsets[i - 2];
+                            const float deltaCurr = anchorZeroOnlyOffsets[i] - anchorZeroOnlyOffsets[i - 1];
+
+                            if (std::abs (deltaPrev) > 1.0e-3f && std::abs (deltaCurr) > 1.0e-3f)
+                            {
+                                ++anchorZeroDeltaPairs;
+                                if ((deltaPrev > 0.0f) != (deltaCurr > 0.0f))
+                                    ++anchorZeroSignReversals;
+                            }
+                        }
+                        const double anchorZeroReversalFraction = anchorZeroDeltaPairs > 0
+                                                                       ? (double) anchorZeroSignReversals / (double) anchorZeroDeltaPairs
+                                                                       : 0.0;
+
+                        std::vector<int> bigJumpLaunchIndices;
+                        for (size_t i = 1; i < launchOffsets.size(); ++i)
+                            if (std::abs (launchOffsets[i] - launchOffsets[i - 1]) > 100.0f)
+                                bigJumpLaunchIndices.push_back ((int) i);
+
+                        juce::String bigJumpList;
+                        for (int idx : bigJumpLaunchIndices)
+                            bigJumpList += juce::String (idx) + "@" + juce::String (launchSampleIndices[(size_t) idx] / sampleRate, 2) + "s ";
+
+                        logMessage ("Offset stability at " + juce::String (semitones) + "st (real material): "
+                                    + juce::String ((int) launchOffsets.size()) + " launches, " + juce::String (signReversals)
+                                    + "/" + juce::String (deltaPairs) + " sign reversals (" + juce::String (reversalFraction * 100.0, 1)
+                                    + "%), anchor flips " + juce::String (anchorFlips) + "/" + juce::String ((int) launchAnchorScores.size() - 1)
+                                    + " (" + juce::String (anchorFlipFraction * 100.0, 1) + "%), previousOffset-anchor-ALONE reversals "
+                                    + juce::String (anchorZeroSignReversals) + "/" + juce::String (anchorZeroDeltaPairs) + " ("
+                                    + juce::String (anchorZeroReversalFraction * 100.0, 1) + "%), max per-launch delta=" + juce::String (maxAbsDelta, 2)
+                                    + " samples, big jumps (>100 samples) at launch index@time: [" + bigJumpList.trim() + "]");
+
+                        if (! bigJumpLaunchIndices.empty())
+                        {
+                            const int jumpIdx = bigJumpLaunchIndices.front();
+                            const int windowStart = juce::jmax (0, jumpIdx - 3);
+                            const int windowEnd = juce::jmin ((int) launchOffsets.size() - 1, jumpIdx + 2);
+
+                            logMessage ("  Anchor scores around first jump (launch " + juce::String (jumpIdx)
+                                        + " @ " + juce::String (launchSampleIndices[(size_t) jumpIdx] / sampleRate, 2)
+                                        + "s) at " + juce::String (semitones) + "st (real material):");
+                            for (int i = windowStart; i <= windowEnd; ++i)
+                            {
+                                const auto& scores = launchAnchorScores[(size_t) i];
+                                logMessage ("    launch " + juce::String (i) + " @ " + juce::String (launchSampleIndices[(size_t) i] / sampleRate, 2)
+                                            + "s: offset=" + juce::String (launchOffsets[(size_t) i], 2)
+                                            + ", previousOffset-anchor score=" + juce::String (scores[0], 5)
+                                            + ", zero-anchor score=" + juce::String (scores[1], 5)
+                                            + (i == jumpIdx ? "  <-- jump lands here" : ""));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        beginTest ("DIAGNOSTIC: primary alignment-offset stability on REAL recorded material (whisper8.wav) at "
+                   "+-12st vs +-24st");
+        runRealMaterialAlignmentDiagnostic (juce::File ("C:\\Etheral\\whisper8.wav"));
+
+        beginTest ("DIAGNOSTIC: primary alignment-offset stability on a REAL held tonal drone (Lo Drone 6.wav) at "
+                   "+-12st vs +-24st");
+        {
+            // The user confirmed by ear that whisper8.wav's aperiodic content
+            // does NOT reproduce the originally-reported "oscillation" percept
+            // (no fundamental pitch to perceive as wobbling), though it did
+            // surface a real, distinct glitch at +24st. This drone is a
+            // sustained, tonal recording -- the kind of material the original
+            // complaint was actually reported against -- to test whether the
+            // anchor-flip-flop mechanism looks different here, closer to (or
+            // still unlike) the pure-sine tests' own octave-tie pattern.
+            runRealMaterialAlignmentDiagnostic (juce::File ("C:\\Etheral\\Lo Drone 6.wav"));
+        }
+
+        beginTest ("DIAGNOSTIC: primary alignment-offset stability on a second REAL held tonal drone (drone1.wav) "
+                   "at +-12st vs +-24st");
+        {
+            // Lo Drone 6.wav's +24st "ring bell / duplicated" report turned
+            // out to be confounded -- the user confirmed the unshifted source
+            // itself may already carry a bell-like/inharmonic quality, so that
+            // specific test couldn't tell PitchShifter-introduced doubling
+            // apart from source coloration. This is a second recording, made
+            // deliberately simple and harmonically clean by the user
+            // specifically to remove that confound.
+            runRealMaterialAlignmentDiagnostic (juce::File ("C:\\Etheral\\drone1.wav"));
+        }
     }
 };
 
