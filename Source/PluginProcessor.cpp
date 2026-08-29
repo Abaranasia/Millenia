@@ -126,6 +126,21 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
+
+    // 2026-08-29: tried giving Freeze its own longer ramp (0.3s, then 1.0s)
+    // after a by-ear report that the freezeQuickToggle checkbox produced "a
+    // quick initial highly-pitched noise... like a DJ scratch effect" that
+    // manual dial drags didn't. REVERTED -- both attempts made it WORSE, not
+    // better ("even worse because... it takes longer"): the problem isn't
+    // sweep SPEED at all, it's that the pitch-ratio glide itself is
+    // unwanted for a toggle -- the user wants a clean swap between "live"
+    // and "frozen" output, not an audible pitch-bend transition of any
+    // duration, so stretching the transition out just prolongs an
+    // unwanted characteristic. See docs/shimmer-reverb-implementation-
+    // plan.md's Phase 10 section for the real fix this points toward (a
+    // buffer capture-and-loop redesign that crossfades OUTPUT, not the
+    // shifter's own pitch ratio) and Engram topic_key
+    // millenia/freeze-toggle-pitch-artifact for the full investigation.
     smoothedFreeze.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());

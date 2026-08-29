@@ -164,14 +164,28 @@ private:
     // which is exactly the "pitch down" the user heard well before Freeze
     // was anywhere near fully engaged. Raising (1.0f - freezeAmount) to this
     // power instead keeps the reduction negligible through most of the
-    // dial's travel and concentrates it near the top: at freezeAmount=0.5 a
-    // +12st shift is only reduced to ~+11.25st (a 6% cut, well under a
-    // semitone -- essentially inaudible) instead of half; the curve still
-    // reaches exactly 0 at freezeAmount=1.0, so the anti-cascade guarantee
-    // is unchanged. A REASONED value, not exhaustively ear-tuned -- picked
-    // for a "barely noticeable until well past halfway" shape, open to
-    // revisiting after a listening pass.
-    static constexpr float pitchShiftCrossfadeCurve = 4.0f;
+    // dial's travel and concentrates it near the top; the curve still
+    // reaches exactly 0 at freezeAmount=1.0 regardless of the exponent, so
+    // the anti-cascade guarantee is unaffected by tuning this value.
+    //
+    // Steepened further, 2026-08-29 (by-ear report continued: the original
+    // 2026-08-22 fix concentrated most of the reduction near the top of the
+    // dial's travel, but a real fraction of it was still landing across
+    // roughly the last quarter, e.g. at 4.0 a +12st shift is already down to
+    // ~+8.2st by freezeAmount=0.75 -- audible, and easy to land on while
+    // using the dial normally, not just at the very top). Raised 4.0 -> 16.0
+    // to push nearly all of the reduction into the last ~10% of travel: at
+    // 16.0, freezeAmount=0.75 retains ~+11.9st (a 1% cut, essentially
+    // inaudible, vs 4.0's ~32% cut at the same point); freezeAmount=0.9
+    // retains ~+9.8st (82%, vs 4.0's ~66%); freezeAmount=0.95 retains ~+6.7st
+    // (56%, vs 4.0's ~46%) -- the glide is still real and still reaches
+    // exactly 0 at freezeAmount=1.0, just compressed into a narrower final
+    // stretch of the dial instead of starting around three-quarters of the
+    // way through it. A REASONED value from this session's own numbers, NOT
+    // exhaustively ear-tuned -- open to revisiting after another listening
+    // pass (this exact convention already flagged the prior 4.0 value the
+    // same way).
+    static constexpr float pitchShiftCrossfadeCurve = 16.0f;
 
     // Phase 5 default -- was Phase 3's hardcoded shiftSemitones constant,
     // now just the value setPitchShiftSemitones() is seeded with once in
