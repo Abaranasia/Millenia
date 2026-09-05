@@ -12,6 +12,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     quadratureDcBlocker.prepare (spec);
     freezeLeveler.prepare (spec);
     formantCorrector.prepare (spec);
+    loopCapture.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
@@ -48,6 +49,7 @@ void ShimmerReverbEngine::reset()
     quadratureDcBlocker.reset();
     freezeLeveler.reset();
     formantCorrector.reset();
+    loopCapture.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -103,6 +105,16 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
     // crossfade exists at all), so this call is what actually applies each
     // block's freeze amount rather than lagging one block behind it.
     updateShifterRatio();
+}
+
+void ShimmerReverbEngine::setLoopFreezeAmount (float newAmount)
+{
+    loopFreezeAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+}
+
+void ShimmerReverbEngine::setLoopLengthMs (float newLoopLengthMs)
+{
+    loopCapture.setLoopLengthMs (newLoopLengthMs);
 }
 
 void ShimmerReverbEngine::updateShifterRatio()
@@ -301,6 +313,22 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const float freezeLevelerGain = freezeLeveler.computeGain (0.5f * (wetLeft + wetRight));
         wetLeft *= freezeLevelerGain;
         wetRight *= freezeLevelerGain;
+
+        // Phase 10 Loop Freeze (see docs/shimmer-reverb-implementation-plan.md
+        // and LoopCapture.h): a NEW, purely additive feature, deliberately
+        // wired in strictly AFTER freezeLeveler's gain application above and
+        // strictly BEFORE the dry/wet mix below -- so Loop Freeze's "live"
+        // input is whatever Phase 9's Freeze mechanism currently outputs.
+        // This is what lets the two features layer sensibly with zero
+        // special-case interaction code: engaging both means Loop Freeze
+        // captures and repeats a static snapshot of whatever the classic
+        // drone currently sounds like, including its own gain compensation.
+        // At loopFreezeAmount=0.0f (default) loopCapture.process() returns
+        // its inputs completely unchanged, so this is a bit-identical no-op
+        // unless Loop Freeze is actually engaged.
+        const auto looped = loopCapture.process (loopFreezeAmount, wetLeft, wetRight);
+        wetLeft = looped.first;
+        wetRight = looped.second;
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

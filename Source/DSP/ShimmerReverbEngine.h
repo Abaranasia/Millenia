@@ -7,6 +7,7 @@
 #include "SafetyLimiter.h"
 #include "FreezeLeveler.h"
 #include "FormantEnvelopeCorrector.h"
+#include "LoopCapture.h"
 
 // Top-level DSP object: composes the Dattorro tank and the pitch shifter
 // into the actual shimmer reverb feedback loop (Phase 3, see
@@ -145,6 +146,24 @@ public:
     // the tank only ever owns the second of those.
     void setFreezeAmount (float amount);
 
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop
+    // Freeze -- a NEW, fully independent, additive feature alongside Phase
+    // 9's Freeze above (that mechanism is completely untouched by this one).
+    // Forwards to loopCapture's own setters; clamped to [0, 1] here, same
+    // convention as every other continuous setter in this class. Wired into
+    // process() strictly after freezeLeveler's gain application and strictly
+    // before the dry/wet mix, so Loop Freeze's "live" input is whatever
+    // Phase 9's Freeze mechanism currently outputs -- see process()'s
+    // comment at that exact spot for why, and LoopCapture.h for the capture/
+    // playback mechanism itself.
+    void setLoopFreezeAmount (float newAmount);
+
+    // Thin passthrough to loopCapture.setLoopLengthMs() -- see that method's
+    // own comment for why it only stores a PENDING length, applied at the
+    // next rising edge, and why clamping happens inside LoopCapture itself
+    // rather than here.
+    void setLoopLengthMs (float newLoopLengthMs);
+
 private:
     // Recomputes and applies the shifter's actual pitch ratio from the
     // current pitchShiftSemitones/freezeAmount -- shared by prepare(),
@@ -245,6 +264,14 @@ private:
     // the recirculating loop.
     FreezeLeveler freezeLeveler;
 
+    // Phase 10 (see setLoopFreezeAmount()/LoopCapture.h): additive, fully
+    // independent of every DSP member above -- captures and repeats a static
+    // loop of whatever freezeLeveler's output currently is. Its rolling-
+    // history buffer is written unconditionally every sample regardless of
+    // loopFreezeAmount, same "always running, only gated at the read/blend
+    // stage" convention as freezeLeveler itself.
+    LoopCapture loopCapture;
+
     float shimmerWidthGain = defaultShimmerWidthGain;
 
     // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
@@ -267,6 +294,16 @@ private:
     // whatever's already recirculating (now sustained near-losslessly via
     // DattorroTank::setFreezeAmount()'s effectiveDecayGain).
     float freezeAmount = 0.0f;
+
+    // Phase 10 Loop Freeze (see setLoopFreezeAmount()): default 0.0f so an
+    // untouched engine is bit-identical to pre-Phase-10 behavior -- same
+    // "default is a true no-op" convention as freezeAmount above. Unlike
+    // freezeAmount, this value never affects anything upstream of
+    // loopCapture.process() in process() -- it only gates the loop-capture
+    // blend applied right after freezeLeveler's gain, so the two features'
+    // mechanisms genuinely don't interact except through the plain data flow
+    // (Loop Freeze's live input being whatever Freeze currently outputs).
+    float loopFreezeAmount = 0.0f;
 
     // Phase 9 Freeze follow-up (see setFreezeAmount()'s comment): the
     // user/APVTS-driven pitch shift target, stored separately from whatever

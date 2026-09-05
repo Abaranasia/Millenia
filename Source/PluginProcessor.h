@@ -96,6 +96,16 @@ private:
     // value in [0, 1], not just snap between the two extremes.
     std::atomic<float>* freezeParam     = nullptr;
 
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
+    // -- additive, fully independent of freezeParam above. loopFreezeParam
+    // backs an AudioParameterBool but, like bypassParam, its raw APVTS-backed
+    // value is still a float (0.0/1.0). loopLengthParam is read RAW every
+    // block with no smoother of its own (see processBlock()'s comment) --
+    // same "only matters at a discrete instant, not a continuous gain"
+    // precedent as bypassParam.
+    std::atomic<float>* loopFreezeParam = nullptr;
+    std::atomic<float>* loopLengthParam = nullptr;
+
     // Phase 5: one smoother per continuous parameter, driven from the cached
     // atomics above and .skip()'d once per block in processBlock() before
     // pushing into shimmerReverbEngine -- see that method's comment for why
@@ -113,6 +123,13 @@ private:
     // bypass driving smoothedMix instead of a hard switch (see
     // processBlock()'s comment).
     juce::SmoothedValue<float> smoothedFreeze;
+
+    // Phase 10 Loop Freeze: mirrors the existing bypass -> smoothedMix
+    // precedent -- a bool parameter driving a smoothed 0/1 target gives
+    // click-free engage/disengage without needing a continuous dial (Loop
+    // Length is a discrete capture-window size, not something that needs its
+    // own smoother -- see loopLengthParam's comment above).
+    juce::SmoothedValue<float> smoothedLoopFreeze;
 
     // Schema v1 -- the first version ever; no migration logic exists yet.
     // A future schema bump needs an explicit migration branch in

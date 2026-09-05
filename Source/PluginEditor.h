@@ -36,8 +36,8 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider, freezeSlider;
-    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel;
+    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider;
+    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel;
     juce::ToggleButton bypassButton { "Bypass" };
 
     // 2026-08-22 (recovered by user request, see freezeSlider/freezeAttachment
@@ -56,6 +56,13 @@ private:
     juce::ToggleButton freezeQuickToggle { "Freeze" };
     float freezeValueBeforeQuickToggle = 0.0f;
 
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
+    // -- additive, fully independent of freezeQuickToggle/freezeSlider above.
+    // A clean on/off toggle directly attached to ParamIDs::loopFreeze (unlike
+    // freezeQuickToggle, this IS the real APVTS-attached control, same
+    // convention as bypassButton, not a GUI-only quick-access gesture).
+    juce::ToggleButton loopFreezeToggle { "Loop" };
+
     juce::TextButton presetNeg12Button { "-12 st" };
     juce::TextButton preset0Button  { "0 st" };
     juce::TextButton preset7Button  { "+7 st" };
@@ -73,6 +80,10 @@ private:
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> freezeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
+
+    // Phase 10 Loop Freeze.
+    std::unique_ptr<SliderAttachment> loopLengthAttachment;
+    std::unique_ptr<ButtonAttachment> loopFreezeAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessorEditor)
 };

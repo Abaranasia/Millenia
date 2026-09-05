@@ -117,5 +117,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         0.0f));
 
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
+    // Source/DSP/LoopCapture.h): Loop Freeze -- additive, fully independent
+    // of Freeze above. Default false, matching LoopCapture's own "default is
+    // a true no-op" convention (loopFreezeAmount=0.0f never reads back the
+    // captured loop).
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::loopFreeze, 1 },
+        "Loop",
+        false));
+
+    // Range 50-4000ms MUST EXACTLY MATCH LoopCapture::minLoopLengthMs (50.0f)
+    // and LoopCapture::maxLoopLengthMs (4000.0f) -- an upper bound here
+    // higher than LoopCapture's actual buffer capacity would silently
+    // truncate a requested max-length capture; a mismatch either way is a
+    // real bug, not just a tuning concern (see LoopCapture.h's
+    // maxLoopLengthMs comment for the full rationale). Default 500ms matches
+    // LoopCapture::defaultLoopLengthMs.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::loopLength, 1 },
+        "Loop Length",
+        juce::NormalisableRange<float> (50.0f, 4000.0f),
+        500.0f));
+
     return layout;
 }

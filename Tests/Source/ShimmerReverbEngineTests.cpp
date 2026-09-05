@@ -1201,6 +1201,277 @@ public:
             logMessage ("RMS growth over " + juce::String (totalSeconds) + "s: first-second=" + juce::String (firstSecondRms, 4)
                         + ", last-second=" + juce::String (lastSecondRms, 4) + " (" + juce::String (growthDb, 2) + " dB)");
         }
+
+        // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop
+        // Freeze -- a NEW, purely additive static-loop-capture feature,
+        // fully independent of Phase 9's classic decay-pin Freeze above.
+        // Same default-equivalence convention as the "Freeze defaults to
+        // 0.0..." test above: an untouched engine and one with
+        // setLoopFreezeAmount(0.0f) explicitly called must be bit-identical,
+        // proving Loop Freeze is a genuine opt-in with zero behavior change
+        // at its default (LoopCapture's own rolling-history buffer is
+        // written every sample regardless, but never read back into the
+        // output until a rising edge is seen -- see LoopCapture.h).
+        beginTest ("Loop Freeze defaults to off and reproduces pre-existing behavior bit-for-bit");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = 100;
+
+            ShimmerReverbEngine defaultEngine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            defaultEngine.prepare (spec);
+            defaultEngine.reset();
+
+            ShimmerReverbEngine explicitEngine;
+            explicitEngine.prepare (spec);
+            explicitEngine.reset();
+            explicitEngine.setLoopFreezeAmount (0.0f);
+
+            juce::AudioBuffer<float> defaultBuffer (numChannels, blockSize);
+            juce::AudioBuffer<float> explicitBuffer (numChannels, blockSize);
+
+            juce::Random random (10203040);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getWritePointer (ch);
+                    auto* explicitData = explicitBuffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        float sample = random.nextFloat() * 0.6f - 0.3f;
+                        defaultData[i] = sample;
+                        explicitData[i] = sample;
+                    }
+                }
+
+                juce::dsp::AudioBlock<float> defaultBlock (defaultBuffer);
+                juce::dsp::AudioBlock<float> explicitBlock (explicitBuffer);
+                defaultEngine.process (defaultBlock);
+                explicitEngine.process (explicitBlock);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* defaultData = defaultBuffer.getReadPointer (ch);
+                    auto* explicitData = explicitBuffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expectEquals (explicitData[i], defaultData[i], "setLoopFreezeAmount(0.0f) diverged from the "
+                                                                            "untouched default at channel "
+                                                                            + juce::String (ch) + ", block "
+                                                                            + juce::String (b) + ", sample "
+                                                                            + juce::String (i));
+                    }
+                }
+            }
+        }
+
+        beginTest ("Loop Freeze alone captures and repeats a periodic loop");
+        {
+            // Runs at block size 1 so the exact global sample index a given
+            // output value was produced at can be tracked precisely -- needed
+            // to independently re-derive LoopCapture's own read-position
+            // sequence (N = loop length in samples, X = active crossfade
+            // samples, period = N - X, see LoopCapture.h's class comment)
+            // and know exactly which sample pairs must match.
+            constexpr double sampleRate = 44100.0;
+            constexpr int numChannels = 2;
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 1, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+
+            // Short loop length (well inside [minLoopLengthMs, maxLoopLengthMs])
+            // so this test runs quickly -- only takes effect at the NEXT
+            // rising edge (see LoopCapture::setLoopLengthMs()'s comment), so
+            // setting it here, before any capture, is safe.
+            constexpr float loopLengthMs = 100.0f;
+            engine.setLoopLengthMs (loopLengthMs);
+
+            // Independent re-derivation of LoopCapture's own N/X/period math
+            // (LoopCapture.cpp's prepare()/captureLoop()), not a re-use of
+            // its internals -- if this drifts from LoopCapture's own
+            // formula, this test would need updating alongside it.
+            const int N = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            const int crossfadeSamples = juce::jmax (0, juce::roundToInt (25.0f * 0.001f * (float) sampleRate));
+            const int X = juce::jmin (crossfadeSamples, N / 2);
+            const int period = N - X;
+
+            juce::AudioBuffer<float> buffer (numChannels, 1);
+            juce::Random random (11223344);
+
+            // Phase A: build up real, non-silent wet content (Loop Freeze off)
+            // so the capture below pulls a genuine, non-trivial loop out of
+            // the rolling history buffer, not silence.
+            const int burstSamples = N + 1000;
+            for (int i = 0; i < burstSamples; ++i)
+            {
+                buffer.setSample (0, 0, random.nextFloat() * 0.6f - 0.3f);
+                buffer.setSample (1, 0, random.nextFloat() * 0.6f - 0.3f);
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+            }
+
+            // Phase B: engage Loop Freeze -- the rising edge is seen on the
+            // very next process() call, capturing the most recent N samples
+            // of wet output into the loop.
+            engine.setLoopFreezeAmount (1.0f);
+
+            // Keep feeding FRESH, different noise for several loop periods --
+            // must be entirely ignored (loopFreezeAmount clamps to exactly
+            // 1.0f, so the live signal's weight in the blend is exactly 0.0f)
+            // if the loop is genuinely static rather than still leaking live
+            // input through.
+            constexpr int numPeriodsToRun = 5;
+            const int totalSamplesAfterCapture = N + numPeriodsToRun * period;
+
+            std::vector<float> outLeft ((size_t) totalSamplesAfterCapture);
+            std::vector<float> outRight ((size_t) totalSamplesAfterCapture);
+
+            float maxPeak = 0.0f;
+
+            for (int i = 0; i < totalSamplesAfterCapture; ++i)
+            {
+                buffer.setSample (0, 0, random.nextFloat() * 0.6f - 0.3f);
+                buffer.setSample (1, 0, random.nextFloat() * 0.6f - 0.3f);
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                const float left = buffer.getSample (0, 0);
+                const float right = buffer.getSample (1, 0);
+
+                expect (std::isfinite (left), "Left channel is not finite at sample " + juce::String (i) + " (Loop Freeze engaged)");
+                expect (std::isfinite (right), "Right channel is not finite at sample " + juce::String (i) + " (Loop Freeze engaged)");
+                maxPeak = juce::jmax (maxPeak, juce::jmax (std::abs (left), std::abs (right)));
+
+                outLeft[(size_t) i] = left;
+                outRight[(size_t) i] = right;
+            }
+
+            expect (maxPeak <= 10.0f, "Loop Freeze output exceeded the safety bound of 10.0 (peak: " + juce::String (maxPeak) + ")");
+
+            // Exact periodicity check: once past the first full pass (global
+            // index >= N), the read position only ever cycles through
+            // [X, N) -- an exact period of (N - X) samples, bit-identical
+            // every repeat (see LoopCapture.h's class comment). Compared
+            // outside the seam's crossfade window (the final X samples of
+            // each period) per this phase's own test-writing brief, though
+            // the design's own contract is that even the blended region
+            // repeats identically.
+            for (int p = 0; p < numPeriodsToRun - 1; ++p)
+            {
+                const int base = N + p * period;
+
+                for (int i = 0; i < period - X; ++i)
+                {
+                    expectEquals (outLeft[(size_t) (base + i)], outLeft[(size_t) (base + i + period)],
+                                  "Left channel not exactly periodic at period " + juce::String (period)
+                                      + " samples, period index " + juce::String (p) + ", offset " + juce::String (i));
+                    expectEquals (outRight[(size_t) (base + i)], outRight[(size_t) (base + i + period)],
+                                  "Right channel not exactly periodic at period " + juce::String (period)
+                                      + " samples, period index " + juce::String (p) + ", offset " + juce::String (i));
+                }
+            }
+        }
+
+        beginTest ("Freeze and Loop Freeze together stay finite and produce a genuine layered result");
+        {
+            // Interaction case, previously impossible: Phase 9's classic
+            // Freeze (decay-pin drone sustain) and Phase 10's Loop Freeze
+            // (static loop capture) engaged TOGETHER on the same engine
+            // instance. Loop Freeze is wired in strictly after
+            // freezeLeveler's gain application (see ShimmerReverbEngine::
+            // process()), so its "live" input is whatever Phase 9's own
+            // mechanism currently outputs -- this test confirms that
+            // layering actually works (bounded/finite, genuinely non-silent,
+            // i.e. the loop is repeating the drone's real current output,
+            // not accidentally silencing it), not just that neither feature
+            // alone regresses.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (99887766);
+
+            // Burst 2s of noise (both features off) so both the tank's own
+            // recirculation and LoopCapture's rolling-history buffer are
+            // filled with real content before either feature engages.
+            constexpr int burstBlocks = 2 * blocksPerSecond;
+            for (int b = 0; b < burstBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+            }
+
+            // Engage classic Freeze first (drone sustain), then Loop Freeze
+            // (captures a snapshot of whatever the drone currently outputs,
+            // per the wiring point's own design intent).
+            engine.setFreezeAmount (1.0f);
+            engine.setLoopFreezeAmount (1.0f);
+
+            constexpr int tailSeconds = 5;
+            constexpr int tailBlocks = tailSeconds * blocksPerSecond;
+
+            float maxPeak = 0.0f;
+            double sumSquares = 0.0;
+            juce::int64 numSamplesTotal = 0;
+
+            for (int b = 0; b < tailBlocks; ++b)
+            {
+                // Keep feeding fresh noise -- Freeze mutes it from reaching
+                // the tank's diffuser, and Loop Freeze's blend excludes it
+                // entirely at loopFreezeAmount=1.0, so it must have zero
+                // effect on the output either way.
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block " + juce::String (b)
+                                                              + ", sample " + juce::String (i) + " (Freeze + Loop Freeze engaged)");
+                        maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                        sumSquares += (double) data[i] * (double) data[i];
+                        ++numSamplesTotal;
+                    }
+                }
+
+                expect (maxPeak <= 10.0f, "Freeze + Loop Freeze together exceeded the safety bound of 10.0 at block "
+                                              + juce::String (b) + " (peak so far: " + juce::String (maxPeak) + ")");
+            }
+
+            const float overallRms = (float) std::sqrt (sumSquares / (double) numSamplesTotal);
+            expect (overallRms > 1.0e-4f, "Freeze + Loop Freeze together produced effective silence (RMS: "
+                                              + juce::String (overallRms, 8) + ") -- the loop should be repeating "
+                                              "the drone's real current output, not silencing it");
+        }
     }
 };
 
