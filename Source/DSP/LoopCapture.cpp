@@ -12,6 +12,8 @@ void LoopCapture::prepare (const juce::dsp::ProcessSpec& spec)
     capturedLoopLeft.assign ((size_t) maxCapacitySamples, 0.0f);
     capturedLoopRight.assign ((size_t) maxCapacitySamples, 0.0f);
 
+    smoothedLoopFreezeAmount.reset (sampleRate, loopFreezeRampSeconds);
+
     reset();
 }
 
@@ -27,6 +29,12 @@ void LoopCapture::reset() noexcept
     activeCrossfadeSamples = 0;
     readPosition = 0;
     previousLoopFreezeAmount = 0.0f;
+    smoothedLoopFreezeAmount.setCurrentAndTargetValue (0.0f);
+}
+
+void LoopCapture::setLoopFreezeAmount (float newAmount) noexcept
+{
+    smoothedLoopFreezeAmount.setTargetValue (juce::jlimit (0.0f, 1.0f, newAmount));
 }
 
 void LoopCapture::setLoopLengthMs (float newLoopLengthMs) noexcept
@@ -88,12 +96,17 @@ float LoopCapture::readLoopChannel (const std::vector<float>& capturedLoop, int 
     return capturedLoop[(size_t) position];
 }
 
-std::pair<float, float> LoopCapture::process (float loopFreezeAmount, float wetLeft, float wetRight) noexcept
+std::pair<float, float> LoopCapture::process (float wetLeft, float wetRight) noexcept
 {
     // 1. Unconditional rolling-history write, regardless of loopFreezeAmount.
     rollingLeft[(size_t) rollingWriteIndex] = wetLeft;
     rollingRight[(size_t) rollingWriteIndex] = wetRight;
     rollingWriteIndex = (rollingWriteIndex + 1) % maxCapacitySamples;
+
+    // 1b. Advance the engage/disengage ramp by exactly one sample -- see
+    // setLoopFreezeAmount()'s comment for why this class owns the ramp
+    // itself instead of trusting a pre-smoothed caller value.
+    const float loopFreezeAmount = smoothedLoopFreezeAmount.getNextValue();
 
     // 2. Rising-edge trigger.
     if (previousLoopFreezeAmount == 0.0f && loopFreezeAmount > 0.0f)

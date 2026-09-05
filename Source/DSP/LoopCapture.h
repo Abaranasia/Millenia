@@ -11,11 +11,14 @@
 // drives it directly.
 //
 // Captures a window of recent stereo audio and repeats it as a static,
-// crossfaded loop, gated by a continuous 0..1 "loop freeze amount" value
-// (the eventual APVTS-driven parameter a later stage will pass in here every
-// sample, same "arrives pre-smoothed from the caller" convention every other
-// freeze-aware class in this project already follows -- see
-// DattorroTank::setFreezeAmount()/FreezeLeveler.h).
+// crossfaded loop, gated by a continuous 0..1 "loop freeze amount" value.
+//
+// Unlike every other freeze-aware class in this project (see
+// DattorroTank::setFreezeAmount()/FreezeLeveler.h, both of which trust the
+// caller to arrive pre-smoothed), this class owns its OWN per-sample
+// smoothing ramp for loopFreezeAmount -- see setLoopFreezeAmount()'s comment
+// for why: it's a deliberate, narrow exception found necessary by a real
+// 2026-09-06 by-ear bug report ("small glitch noise upon toggling").
 //
 // ---------------------------------------------------------------------------
 // Mechanism
@@ -106,19 +109,44 @@ public:
     // enforces upstream.
     void setLoopLengthMs (float newLoopLengthMs) noexcept;
 
+    // Sets the TARGET loop-freeze amount; the actual value process() uses
+    // ramps toward it over loopFreezeRampSeconds (50ms), sample-accurately,
+    // regardless of how often/abruptly this setter itself is called.
+    //
+    // Found necessary 2026-09-06 (by-ear report: "small glitch noise upon
+    // toggling"). The original design (see this file's own prior revision)
+    // left ALL smoothing to the caller, same "arrives pre-smoothed" trust
+    // every other freeze-aware class in this project extends -- but
+    // PluginProcessor's caller-side smoothing only applied ONE value per
+    // host audio BLOCK (juce::SmoothedValue::skip(numSamples)), holding it
+    // constant across every sample in that block. Loop Freeze is driven by a
+    // discrete on/off toggle every single time it's used (unlike a
+    // continuously-dragged dial, which never produces a hard full-range
+    // target jump under normal use) -- so if a host's buffer size is
+    // comparable to or larger than the 50ms ramp, that block-granularity
+    // smoothing could fast-forward the entire ramp within a single block,
+    // applying a near-instant full-strength switch between the live wet
+    // signal and the captured loop for that block's samples. Owning the
+    // ramp here, applied per sample inside process() itself, makes the
+    // engage/disengage transition genuinely click-free at any host buffer
+    // size -- the caller (ShimmerReverbEngine/PluginProcessor) can now just
+    // forward the raw APVTS toggle value straight through.
+    void setLoopFreezeAmount (float newAmount) noexcept;
+
     // Writes wetLeft/wetRight into the rolling history buffers unconditionally
-    // (see the class comment above), checks for a rising edge of
-    // loopFreezeAmount and captures a fresh loop if one just occurred, reads
-    // (and crossfades, if applicable) the current loop-playback sample, and
+    // (see the class comment above), advances the internal loopFreezeAmount
+    // ramp by one sample (see setLoopFreezeAmount()), checks for a rising
+    // edge and captures a fresh loop if one just occurred, reads (and
+    // crossfades, if applicable) the current loop-playback sample, and
     // returns the loopFreezeAmount-weighted blend of the live and looped
     // signal: { (1-loopFreezeAmount)*wetLeft + loopFreezeAmount*loopLeft,
     // (1-loopFreezeAmount)*wetRight + loopFreezeAmount*loopRight }. If no
     // loop has ever been captured (currentLoopLengthSamples == 0), the loop
-    // signal is treated as 0.0f -- this is only reachable if a caller somehow
-    // passes loopFreezeAmount > 0.0f before any rising edge has ever occurred
-    // (loopFreezeAmount starts at 0.0f in every real usage), handled
-    // defensively rather than reading uninitialized/stale buffer content.
-    std::pair<float, float> process (float loopFreezeAmount, float wetLeft, float wetRight) noexcept;
+    // signal is treated as 0.0f -- this is only reachable if the ramp somehow
+    // reads > 0.0f before any rising edge has ever occurred (it starts at
+    // 0.0f in every real usage), handled defensively rather than reading
+    // uninitialized/stale buffer content.
+    std::pair<float, float> process (float wetLeft, float wetRight) noexcept;
 
     // Test-only introspection -- same "peek" idiom as
     // DattorroTank::peekFeedbackSignal() and PitchShifter::getPrimaryLastOffset().
@@ -172,6 +200,12 @@ private:
     // (minLoopLengthMs) rather than eating into the loop's own perceived
     // rhythm.
     static constexpr float crossfadeMs = 25.0f;
+
+    // 50ms -- see setLoopFreezeAmount()'s comment for the full rationale.
+    // Matches PluginProcessor's original (now-redundant) block-granularity
+    // ramp duration for this same parameter, so the audible fade time is
+    // unchanged, just now genuinely sample-accurate.
+    static constexpr double loopFreezeRampSeconds = 0.05;
 
     // Raised-cosine (Hann-shaped) fade-in used at the capture's own wrap
     // seam -- identical shape to PitchShifter::grainWindow()'s ramp-in half
@@ -253,11 +287,12 @@ private:
     // rising-edge capture (see captureLoop()).
     float pendingLoopLengthMs = defaultLoopLengthMs;
 
-    // Last-seen loopFreezeAmount, used purely to detect a 0.0f -> >0.0f
-    // rising edge on the NEXT process() call -- not itself an output or a
-    // smoothed value (the caller is responsible for arriving pre-smoothed,
-    // same convention as every other freeze-aware class here).
+    // Last-seen (already-ramped) loopFreezeAmount, used purely to detect a
+    // 0.0f -> >0.0f rising edge on the NEXT process() call.
     float previousLoopFreezeAmount = 0.0f;
+
+    // Owns the actual per-sample ramp -- see setLoopFreezeAmount()'s comment.
+    juce::SmoothedValue<float> smoothedLoopFreezeAmount;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LoopCapture)
 };

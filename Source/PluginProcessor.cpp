@@ -145,17 +145,12 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // millenia/freeze-toggle-pitch-artifact for the full investigation.
     smoothedFreeze.reset (sampleRate, 0.05);
 
-    // Phase 10 Loop Freeze: same 50ms ramp as every other continuous/
-    // smoothed parameter here -- see smoothedLoopFreeze's header comment.
-    smoothedLoopFreeze.reset (sampleRate, 0.05);
-
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
     smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
-    smoothedLoopFreeze.setCurrentAndTargetValue (loopFreezeParam->load());
 
     // Bypass folds into the mix smoother's seed value too -- see
     // processBlock()'s comment for why bypass drives smoothedMix rather than
@@ -232,7 +227,6 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
     smoothedFreeze.setTargetValue (freezeParam->load());
-    smoothedLoopFreeze.setTargetValue (loopFreezeParam->load());
 
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
@@ -265,16 +259,18 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // smoothedMix instead of a hard switch (see the comment above).
     shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
 
-    // Phase 10 Loop Freeze: same block-granularity smoothing treatment as
-    // Freeze above -- no ordering dependency on pitchShift/freeze, since
-    // Loop Freeze never touches the shifter ratio at all. loopLengthParam is
-    // deliberately read RAW here, once per block, with no smoother -- same
-    // "only matters at a discrete instant" precedent as bypassParam above;
+    // Phase 10 Loop Freeze: read RAW, no smoother here -- moved into
+    // LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment) so the engage/disengage
+    // ramp is genuinely sample-accurate regardless of host buffer size,
+    // instead of the block-granularity smoothing this used to do (which
+    // could click on a large-enough buffer). loopLengthParam is read RAW
+    // too, for the unrelated "only matters at a discrete instant" reason --
     // LoopCapture itself only ever applies a new length at its own next
     // rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment), so
     // smoothing this value would add nothing but latency to when a length
     // change is picked up.
-    shimmerReverbEngine.setLoopFreezeAmount (smoothedLoopFreeze.skip ((int) numSamples));
+    shimmerReverbEngine.setLoopFreezeAmount (loopFreezeParam->load());
     shimmerReverbEngine.setLoopLengthMs (loopLengthParam->load());
 
     juce::dsp::AudioBlock<float> block (buffer);

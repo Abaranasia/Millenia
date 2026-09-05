@@ -149,13 +149,23 @@ public:
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop
     // Freeze -- a NEW, fully independent, additive feature alongside Phase
     // 9's Freeze above (that mechanism is completely untouched by this one).
-    // Forwards to loopCapture's own setters; clamped to [0, 1] here, same
+    // Forwards to loopCapture's own setter; clamped to [0, 1] here, same
     // convention as every other continuous setter in this class. Wired into
     // process() strictly after freezeLeveler's gain application and strictly
     // before the dry/wet mix, so Loop Freeze's "live" input is whatever
     // Phase 9's Freeze mechanism currently outputs -- see process()'s
     // comment at that exact spot for why, and LoopCapture.h for the capture/
     // playback mechanism itself.
+    //
+    // 2026-09-06 fix: this class used to store its own loopFreezeAmount
+    // member and pass it into loopCapture.process() every sample, trusting
+    // PluginProcessor to have already smoothed it -- but that caller-side
+    // smoothing only applied once per host BLOCK, which clicked on a
+    // large-enough buffer (see LoopCapture::setLoopFreezeAmount()'s comment
+    // for the full root-cause trail). LoopCapture now owns a genuine
+    // per-sample ramp itself, so this is a thin, un-smoothed passthrough --
+    // the caller (PluginProcessor) can forward the raw APVTS toggle value
+    // directly, same "read raw" convention as setLoopLengthMs() below.
     void setLoopFreezeAmount (float newAmount);
 
     // Thin passthrough to loopCapture.setLoopLengthMs() -- see that method's
@@ -294,16 +304,6 @@ private:
     // whatever's already recirculating (now sustained near-losslessly via
     // DattorroTank::setFreezeAmount()'s effectiveDecayGain).
     float freezeAmount = 0.0f;
-
-    // Phase 10 Loop Freeze (see setLoopFreezeAmount()): default 0.0f so an
-    // untouched engine is bit-identical to pre-Phase-10 behavior -- same
-    // "default is a true no-op" convention as freezeAmount above. Unlike
-    // freezeAmount, this value never affects anything upstream of
-    // loopCapture.process() in process() -- it only gates the loop-capture
-    // blend applied right after freezeLeveler's gain, so the two features'
-    // mechanisms genuinely don't interact except through the plain data flow
-    // (Loop Freeze's live input being whatever Freeze currently outputs).
-    float loopFreezeAmount = 0.0f;
 
     // Phase 9 Freeze follow-up (see setFreezeAmount()'s comment): the
     // user/APVTS-driven pitch shift target, stored separately from whatever

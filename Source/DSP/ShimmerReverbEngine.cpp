@@ -109,7 +109,7 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
 
 void ShimmerReverbEngine::setLoopFreezeAmount (float newAmount)
 {
-    loopFreezeAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+    loopCapture.setLoopFreezeAmount (juce::jlimit (0.0f, 1.0f, newAmount));
 }
 
 void ShimmerReverbEngine::setLoopLengthMs (float newLoopLengthMs)
@@ -326,7 +326,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // At loopFreezeAmount=0.0f (default) loopCapture.process() returns
         // its inputs completely unchanged, so this is a bit-identical no-op
         // unless Loop Freeze is actually engaged.
-        const auto looped = loopCapture.process (loopFreezeAmount, wetLeft, wetRight);
+        const auto looped = loopCapture.process (wetLeft, wetRight);
         wetLeft = looped.first;
         wetRight = looped.second;
 

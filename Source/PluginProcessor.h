@@ -99,10 +99,15 @@ private:
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
     // -- additive, fully independent of freezeParam above. loopFreezeParam
     // backs an AudioParameterBool but, like bypassParam, its raw APVTS-backed
-    // value is still a float (0.0/1.0). loopLengthParam is read RAW every
-    // block with no smoother of its own (see processBlock()'s comment) --
-    // same "only matters at a discrete instant, not a continuous gain"
-    // precedent as bypassParam.
+    // value is still a float (0.0/1.0). Read RAW every block with no
+    // smoother here -- unlike every other continuous parameter below, its
+    // smoothing moved INTO LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment): the block-granularity
+    // smoothing that used to live here could click on a large-enough host
+    // buffer, since Loop Freeze is always driven by a discrete on/off toggle
+    // (a hard full-range target jump every time), unlike a continuously-
+    // dragged dial. loopLengthParam is read RAW too, for the unrelated
+    // "only matters at a discrete instant" reason described below.
     std::atomic<float>* loopFreezeParam = nullptr;
     std::atomic<float>* loopLengthParam = nullptr;
 
@@ -123,13 +128,6 @@ private:
     // bypass driving smoothedMix instead of a hard switch (see
     // processBlock()'s comment).
     juce::SmoothedValue<float> smoothedFreeze;
-
-    // Phase 10 Loop Freeze: mirrors the existing bypass -> smoothedMix
-    // precedent -- a bool parameter driving a smoothed 0/1 target gives
-    // click-free engage/disengage without needing a continuous dial (Loop
-    // Length is a discrete capture-window size, not something that needs its
-    // own smoother -- see loopLengthParam's comment above).
-    juce::SmoothedValue<float> smoothedLoopFreeze;
 
     // Schema v1 -- the first version ever; no migration logic exists yet.
     // A future schema bump needs an explicit migration branch in
