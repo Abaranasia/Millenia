@@ -85,6 +85,7 @@ private:
     std::atomic<float>* pitchShiftParam = nullptr;
     std::atomic<float>* feedbackParam   = nullptr;
     std::atomic<float>* shimmerAmountParam = nullptr;
+    std::atomic<float>* shimmerSustainParam = nullptr;
     std::atomic<float>* dampingParam    = nullptr;
     std::atomic<float>* widthParam      = nullptr;
     std::atomic<float>* mixParam        = nullptr;
@@ -118,6 +119,7 @@ private:
     juce::SmoothedValue<float> smoothedPitchShift;
     juce::SmoothedValue<float> smoothedFeedback;
     juce::SmoothedValue<float> smoothedShimmerAmount;
+    juce::SmoothedValue<float> smoothedShimmerSustain;
     juce::SmoothedValue<float> smoothedDamping;
     juce::SmoothedValue<float> smoothedWidth;
     juce::SmoothedValue<float> smoothedMix;

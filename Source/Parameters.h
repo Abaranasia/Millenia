@@ -15,6 +15,16 @@ namespace ParamIDs
     constexpr auto pitchShift = "pitchShift";
     constexpr auto feedback   = "feedback";
     constexpr auto shimmerAmount = "shimmerAmount";
+
+    // "Shimmer Sustain" task: backs ShimmerReverbEngine::setShimmerSustain()
+    // -- see that method's header comment for its two effects (DattorroTank's
+    // recirculation cap, inverted, plus a direct gate on the audible Width
+    // injection). Default (0.85f) matches
+    // ShimmerReverbEngine::defaultShimmerSustainAmount, a freshly-chosen
+    // default for this control, not a preserved match to any prior hardcoded
+    // constant.
+    constexpr auto shimmerSustain = "shimmerSustain";
+
     constexpr auto damping    = "damping";
     constexpr auto width      = "width";
     constexpr auto mix        = "mix";

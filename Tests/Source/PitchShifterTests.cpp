@@ -287,6 +287,62 @@ public:
             }
         }
 
+        beginTest ("DIAGNOSTIC: primary vs. quadrature difference on a pure periodic tone, bypassing DattorroTank entirely");
+        {
+            // "Shimmer Sustain" glitch investigation follow-up (2026-09-06):
+            // ShimmerReverbEngineTests.cpp's own diagnostic measured
+            // peak|wetLeft-wetRight| = 2.0 (safeFeedback and quadratureSafe
+            // landing at full opposite-polarity extremes) at high Shimmer
+            // Sustain + high Width + high Shimmer Amount, vs. only 0.3 at low
+            // Sustain, for the SAME 220Hz tone input through the WHOLE
+            // engine. Question this test answers: is that difference
+            // inherent to PitchShifter's primary/quadrature pair on a clean
+            // periodic tone BY ITSELF (i.e. Sustain=high just lets
+            // DattorroTank's own recirculation become closer to a clean tone,
+            // exposing a pre-existing PitchShifter property), or does it only
+            // appear once DattorroTank's feedback loop is involved? Bypasses
+            // DattorroTank/ShimmerReverbEngine completely -- feeds a bare
+            // 220Hz sine directly into PitchShifter::processSample() at the
+            // default 12st shift, same as the engine's own default.
+            constexpr double sampleRate = 44100.0;
+            constexpr float toneFrequencyHz = 220.0f;
+            constexpr double totalSeconds = 6.0; // matches the engine-level diagnostic's own duration
+
+            PitchShifter shifter;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+            shifter.prepare (spec);
+            shifter.reset();
+            shifter.setPitchShiftSemitones (12.0f);
+
+            const int totalSamples = (int) (totalSeconds * sampleRate);
+            double phase = 0.0;
+            const double phaseIncrement = 2.0 * juce::MathConstants<double>::pi * toneFrequencyHz / sampleRate;
+
+            float peakPrimary = 0.0f;
+            float peakQuadrature = 0.0f;
+            float peakDiff = 0.0f;
+
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float input = 0.3f * (float) std::sin (phase);
+                phase += phaseIncrement;
+
+                float primary = shifter.processSample (input);
+                float quadrature = shifter.getQuadratureOutput();
+
+                expect (std::isfinite (primary) && std::isfinite (quadrature),
+                        "Non-finite output at sample " + juce::String (i));
+
+                peakPrimary    = juce::jmax (peakPrimary, std::abs (primary));
+                peakQuadrature = juce::jmax (peakQuadrature, std::abs (quadrature));
+                peakDiff       = juce::jmax (peakDiff, std::abs (primary - quadrature));
+            }
+
+            logMessage ("Bare PitchShifter, 220Hz tone direct input (no tank), 12st, 6s: peakPrimary="
+                            + juce::String (peakPrimary, 4) + ", peakQuadrature=" + juce::String (peakQuadrature, 4)
+                            + ", peak|primary-quadrature|=" + juce::String (peakDiff, 4));
+        }
+
         beginTest ("Output frequency stays within tolerance across the full -24..+24 semitone range");
         {
             constexpr double sampleRate = 44100.0;

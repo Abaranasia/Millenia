@@ -108,6 +108,41 @@ public:
     // kept the shimmer character audible even at shimmerAmount=0.0f).
     void setShimmerAmount (float newShimmerAmount);
 
+    // "Shimmer Sustain" task: clamped to [0, 1], same convention as
+    // setShimmerAmount()/setWidth()/setFreezeAmount(). Controls how present
+    // and how long-lived the shimmer layer is, independent of Feedback
+    // (decayGain) and Shimmer Amount (shimmerFeedbackGain, the OVERALL
+    // shimmer level). Two effects, both driven by this single value:
+    //
+    // 1. Forwards to DattorroTank::setMaxShimmerBlendWeight(), INVERTED (see
+    // that method's comment) -- DELIBERATELY INVERTED from
+    // maxShimmerBlendWeight's own sense (2026-09-06, by-ear follow-up):
+    // measured behavior is that a HIGHER internal maxShimmerBlendWeight
+    // actually decays FASTER (more of the recirculating budget rides the
+    // externally-shifted, separately-delayed path, which loses energy every
+    // pass via destructive interference -- see
+    // Tests/Source/ShimmerReverbEngineTests.cpp's low-vs-high decay test for
+    // the measured numbers). So newAmount=1.0 (dial fully up, "maximum
+    // sustain") maps to maxShimmerBlendWeight=0.0 (shimmer content never
+    // re-enters the recirculating loop, so the tank's own natural, uncombed
+    // decay dominates -- genuinely the SLOWEST/most-sustained option), and
+    // newAmount=0.0 to maxShimmerBlendWeight=1.0 (fastest decay).
+    //
+    // 2. ALSO gates process()'s Width/decorrelation sideShift injection
+    // directly (2026-09-06, same-day widening after the by-ear report "I
+    // don't clearly notice any difference"): effect (1) alone only shapes
+    // whether shifted content re-enters DattorroTank's OWN internal mono
+    // recirculation -- a slow, cumulative, easy-to-miss effect on the tail's
+    // shape over many seconds. The actually-obvious, audible "shimmer is
+    // there" character comes from a SEPARATE feed-forward term (see
+    // process()'s sideShift/wetLeft/wetRight comment) that effect (1) never
+    // touched at all. Gating that term too (same multiplicative-gate
+    // convention shimmerAmount already uses there, 2026-08-21) makes turning
+    // this dial down toward 0 produce an unmistakable, immediate reduction
+    // in the shimmer's audible presence (collapsing to near-mono at 0.0f),
+    // not just a subtle long-term tail-shape change.
+    void setShimmerSustain (float newAmount);
+
     // Clamped to [0, 1]. Replaces the old setShimmerWidthGain() name now
     // that this is genuinely public API rather than an internal-only
     // setter -- kept as a single setter rather than two names for the same
@@ -173,6 +208,23 @@ public:
     // next rising edge, and why clamping happens inside LoopCapture itself
     // rather than here.
     void setLoopLengthMs (float newLoopLengthMs);
+
+    // Test-only introspection -- same "peek" idiom as DattorroTank::
+    // peekFeedbackSignal() (which this just forwards) and LoopCapture::
+    // peekCapturedLoopSample(). Added 2026-09-06 for the "Shimmer Amount +
+    // Sustain + Width glitch" investigation, to inspect the ACTUAL signal
+    // reaching PitchShifter inside the real feedback loop (not a synthetic
+    // standalone tone), which is what process() feeds to
+    // shifter.processSample() every sample.
+    float peekDryFeedback() const noexcept { return tank.peekFeedbackSignal(); }
+
+    // Test-only introspection, same idiom -- forwards PitchShifter's own
+    // getPrimaryLastOffset()/getQuadratureLastOffset() so a test can check
+    // whether the two independently-searching grain pools are settling on
+    // the SAME alignment offset or diverging, while driven by the real
+    // feedback loop (not a synthetic standalone tone).
+    float peekShifterPrimaryOffset() const noexcept { return shifter.getPrimaryLastOffset(); }
+    float peekShifterQuadratureOffset() const noexcept { return shifter.getQuadratureLastOffset(); }
 
 private:
     // Recomputes and applies the shifter's actual pitch ratio from the
@@ -242,6 +294,16 @@ private:
     // other defaults above.
     static constexpr float defaultShimmerAmount = 1.0f;
 
+    // "Shimmer Sustain" task (2026-09-06, by-ear follow-up -- see
+    // setShimmerSustain()'s comment): 0.85f is a fresh, deliberately-chosen
+    // default for this control's now-widened scope (both the tank
+    // recirculation cap AND the audible width-injection gate below), NOT a
+    // preserved bit-identical match to any prior hardcoded constant --
+    // that guarantee was dropped on purpose once this parameter's scope
+    // grew to also touch the always-live width path, which the OLD
+    // hardcoded behavior never gated at all.
+    static constexpr float defaultShimmerSustainAmount = 0.85f;
+
     DattorroTank tank;
     PitchShifter shifter;
     DCBlocker feedbackDcBlocker;
@@ -288,6 +350,14 @@ private:
     // -- see setShimmerAmount()'s comment for why process()'s Width term
     // needs its own gating copy rather than trusting the tank alone.
     float shimmerAmount = defaultShimmerAmount;
+
+    // Local copy of setShimmerSustain()'s USER-FACING (not yet inverted)
+    // value -- same "process()'s Width term needs its own gating copy"
+    // reasoning as shimmerAmount immediately above, see setShimmerSustain()'s
+    // comment for the full rationale (2026-09-06 widening: this now ALSO
+    // gates the width-injection term, not just DattorroTank's recirculation
+    // cap).
+    float shimmerSustainAmount = defaultShimmerSustainAmount;
 
     // Phase 5: dry/wet mix (see setMix()) and bypass (see setBypassed()).
     // bypassed does not gate/skip any processing -- it only forces the

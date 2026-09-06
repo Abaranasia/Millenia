@@ -39,6 +39,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         1.0f));
 
+    // Backs ShimmerReverbEngine::setShimmerSustain() -- see that method's
+    // header comment for its two effects (DattorroTank's recirculation cap,
+    // INVERTED, plus a direct gate on process()'s audible Width/decorrelation
+    // injection). Independently controls how present and long-lived the
+    // shimmer layer is, decoupled from both Feedback (decayGain) and Shimmer
+    // Amount (shimmerFeedbackGain, the overall shimmer level).
+    //
+    // Default 0.85f matches ShimmerReverbEngine::defaultShimmerSustainAmount
+    // -- a freshly-chosen default for this control's now-widened scope, NOT
+    // a preserved match to any prior hardcoded constant (that guarantee was
+    // dropped 2026-09-06 once this parameter's scope grew to also gate the
+    // always-live Width path, which the old hardcoded behavior never touched
+    // at all -- see ShimmerReverbEngine.h's defaultShimmerSustainAmount
+    // comment).
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::shimmerSustain, 1 },
+        "Shimmer Sustain",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.85f));
+
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
     // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
     // (by-ear report: "the damping dial provides no noticeable difference") --

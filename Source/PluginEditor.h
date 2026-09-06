@@ -36,8 +36,8 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider;
-    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel;
+    juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, shimmerSustainSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider;
+    juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  shimmerSustainLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel;
     juce::ToggleButton bypassButton { "Bypass" };
 
     // 2026-08-22 (recovered by user request, see freezeSlider/freezeAttachment
@@ -75,6 +75,7 @@ private:
     std::unique_ptr<SliderAttachment> pitchShiftAttachment;
     std::unique_ptr<SliderAttachment> feedbackAttachment;
     std::unique_ptr<SliderAttachment> shimmerAmountAttachment;
+    std::unique_ptr<SliderAttachment> shimmerSustainAttachment;
     std::unique_ptr<SliderAttachment> dampingAttachment;
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;

@@ -50,6 +50,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     pitchShiftSlider.setLookAndFeel (&bipolarLookAndFeel);
     configureRotary (feedbackSlider, feedbackLabel, "Feedback");
     configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
+    configureRotary (shimmerSustainSlider, shimmerSustainLabel, "Shimmer Sustain");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
@@ -112,6 +113,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     pitchShiftAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::pitchShift, pitchShiftSlider);
     feedbackAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::feedback,   feedbackSlider);
     shimmerAmountAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerAmount, shimmerAmountSlider);
+    shimmerSustainAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerSustain, shimmerSustainSlider);
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
@@ -127,8 +129,9 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     setResizable (false, false);
     // Widened from 620 (6 knobs) to fit the Freeze knob, then 720 -> 820
     // (Phase 10) to fit the new Loop Length knob at the same per-knob width
-    // the other 7 already use.
-    setSize (820, 320);
+    // the other 7 already use, then 820 -> 920 ("Shimmer Sustain" task) to
+    // fit this 9th knob at the same per-knob width the other 8 already use.
+    setSize (920, 320);
 }
 
 MilleniaAudioProcessorEditor::~MilleniaAudioProcessorEditor()
@@ -172,7 +175,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider })
+    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

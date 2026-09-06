@@ -148,6 +148,16 @@ public:
     // itself.
     float getPrimaryLastOffset() const noexcept { return primaryLastOffset; }
 
+    // Same idiom, quadrature pool. Added 2026-09-06 ("Shimmer Sustain" glitch
+    // investigation): lets a test compare the two pools' independently
+    // -searched offsets directly, to check whether they settle on the SAME
+    // alignment or diverge onto different (comparably-scoring, per the
+    // near-tied-peaks issue documented at findAlignmentOffset()) offsets --
+    // the latter would explain a large primary-vs-quadrature OUTPUT
+    // difference on periodic content that neither pool's own boundedness
+    // alone would predict.
+    float getQuadratureLastOffset() const noexcept { return quadratureLastOffset; }
+
     // For inspection/testing only: the primary pool's most recent
     // findAlignmentOffset() call's best correlation score found around EACH
     // anchor in isolation -- [0] is the previousOffset (continuous-drift)

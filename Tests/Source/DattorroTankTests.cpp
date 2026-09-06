@@ -265,6 +265,91 @@ public:
             }
         }
 
+        beginTest ("High setMaxShimmerBlendWeight() (near unclamped ceiling) stays finite and bounded at both partial and full Freeze");
+        {
+            // "Shimmer Sustain" task (see Source/DSP/DattorroTank.h's comment
+            // above maxShimmerBlendWeight): this constant just became a
+            // runtime-adjustable, UNCLAMPED (same convention as
+            // setDecay()/setDamping()/setShimmerFeedbackGain()/
+            // setFreezeAmount()) instance member via setMaxShimmerBlendWeight().
+            // The header's own safety argument is that shimmerWeight+plainWeight
+            // == 1.0 exactly for ANY value in [0, 1], so the combined feedback
+            // gain reaching the tank stays bounded by decayGain alone --
+            // proven safe at decayGain <= 0.85 (Phase 4) -- regardless of
+            // maxShimmerBlendWeight. This test verifies that argument
+            // empirically rather than trusting the algebra alone, at a value
+            // (0.99f) near the new setter's unclamped ceiling, driven at BOTH
+            // a partial freeze amount and full freeze -- same duration (3
+            // minutes) and same safety bound (10.0) as the freeze-boundedness
+            // test directly above, since effectiveMaxShimmerBlendWeight's
+            // formula collapses to exactly frozenMaxShimmerBlendWeight at
+            // freezeAmount==1.0 (the new dial's value cancels out
+            // algebraically) but linearly interpolates toward it at
+            // intermediate freezeAmount -- the partial-freeze case is the one
+            // the algebra alone doesn't fully settle.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr double durationSeconds = 180.0; // 3 minutes, same as the freeze-boundedness test above
+            constexpr int numBlocks = (int) (durationSeconds * sampleRate / blockSize);
+            constexpr float highMaxShimmerBlendWeight = 0.99f;
+
+            auto runBoundednessCheck = [&] (float freezeAmountToUse, juce::int64 randomSeed) -> float
+            {
+                DattorroTank tank;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+                tank.prepare (spec);
+                tank.reset();
+                tank.setMaxShimmerBlendWeight (highMaxShimmerBlendWeight);
+                tank.setFreezeAmount (freezeAmountToUse);
+
+                juce::AudioBuffer<float> buffer (numChannels, blockSize);
+                juce::Random random (randomSeed);
+
+                float maxPeak = 0.0f;
+
+                for (int b = 0; b < numBlocks; ++b)
+                {
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getWritePointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                            data[i] = random.nextFloat() * 0.6f - 0.3f; // uniform in [-0.3, 0.3]
+                    }
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    tank.process (block);
+
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        auto* data = buffer.getReadPointer (ch);
+                        for (int i = 0; i < blockSize; ++i)
+                        {
+                            expect (std::isfinite (data[i]), "Sample is not finite (NaN/Inf) at block "
+                                                                  + juce::String (b) + ", sample " + juce::String (i)
+                                                                  + " (maxShimmerBlendWeight=" + juce::String (highMaxShimmerBlendWeight)
+                                                                  + ", freezeAmount=" + juce::String (freezeAmountToUse) + ")");
+                            maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                        }
+                    }
+
+                    expect (maxPeak <= 10.0f, "Output exceeded safety bound of 10.0 at block " + juce::String (b)
+                                                   + " (maxShimmerBlendWeight=" + juce::String (highMaxShimmerBlendWeight)
+                                                   + ", freezeAmount=" + juce::String (freezeAmountToUse)
+                                                   + ", peak so far: " + juce::String (maxPeak) + ")");
+                }
+
+                return maxPeak;
+            };
+
+            const float partialFreezePeak = runBoundednessCheck (0.5f, 13579246);
+            const float fullFreezePeak    = runBoundednessCheck (1.0f, 97531864);
+
+            logMessage ("setMaxShimmerBlendWeight(" + juce::String (highMaxShimmerBlendWeight) + "): "
+                            + "partial freeze (0.5) measured peak=" + juce::String (partialFreezePeak)
+                            + ", full freeze (1.0) measured peak=" + juce::String (fullFreezePeak));
+        }
+
         beginTest ("Freeze sustains a captured tail indefinitely, unlike normal (non-frozen) processing which decays to silence");
         {
             // Phase 9: a short burst, then silence, run in parallel through

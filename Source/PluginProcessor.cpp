@@ -32,6 +32,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
     feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
     shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
+    shimmerSustainParam = apvts.getRawParameterValue (ParamIDs::shimmerSustain);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
@@ -125,6 +126,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.reset (sampleRate, 0.05);
     smoothedFeedback.reset (sampleRate, 0.05);
     smoothedShimmerAmount.reset (sampleRate, 0.05);
+    smoothedShimmerSustain.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
@@ -148,6 +150,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setCurrentAndTargetValue (shimmerSustainParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
     smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
@@ -224,6 +227,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
     smoothedFeedback.setTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setTargetValue (shimmerSustainParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
     smoothedFreeze.setTargetValue (freezeParam->load());
@@ -247,6 +251,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
     shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
     shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerSustain (smoothedShimmerSustain.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
