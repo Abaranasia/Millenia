@@ -12,6 +12,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     quadratureDcBlocker.prepare (spec);
     freezeLeveler.prepare (spec);
     formantCorrector.prepare (spec);
+    loopCapture.prepare (spec);
 
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
@@ -23,6 +24,19 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // pitchShiftSemitones' header comment.
     pitchShiftSemitones = defaultPitchShiftSemitones;
     updateShifterRatio();
+
+    // "Shimmer Sustain" task (2026-09-06, found by a real test failure):
+    // DattorroTank owns its OWN independent maxShimmerBlendWeight member with
+    // its own hardcoded default (0.85f) -- unlike pitchShiftSemitones above,
+    // tank.prepare()/reset() never touches it, so an untouched
+    // ShimmerReverbEngine's tank stayed at THAT stale default forever unless
+    // setShimmerSustain() happened to be called at least once. Re-push the
+    // CURRENT shimmerSustainAmount (the member-initializer default, or a
+    // caller's prior customization surviving a re-prepare, e.g. a host
+    // sample-rate change) through the same inverted mapping
+    // setShimmerSustain() itself uses, so an untouched engine's tank actually
+    // reflects the intended default instead of silently diverging from it.
+    tank.setMaxShimmerBlendWeight (1.0f - shimmerSustainAmount);
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
@@ -48,6 +62,7 @@ void ShimmerReverbEngine::reset()
     quadratureDcBlocker.reset();
     freezeLeveler.reset();
     formantCorrector.reset();
+    loopCapture.reset();
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -73,6 +88,20 @@ void ShimmerReverbEngine::setShimmerAmount (float newShimmerAmount)
 {
     shimmerAmount = juce::jlimit (0.0f, 1.0f, newShimmerAmount);
     tank.setShimmerFeedbackGain (shimmerAmount);
+}
+
+void ShimmerReverbEngine::setShimmerSustain (float newAmount)
+{
+    // Cached locally so process()'s Width/decorrelation term can gate on it
+    // directly too -- see this method's header comment for why (same
+    // "process() needs its own gating copy" reasoning as shimmerAmount).
+    shimmerSustainAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+
+    // Inverted mapping to DattorroTank -- see this method's header comment
+    // for why: higher shimmerSustainAmount (more user-facing "sustain") means
+    // LOWER maxShimmerBlendWeight (less of the lossy, separately-delayed
+    // shimmer path recirculating).
+    tank.setMaxShimmerBlendWeight (1.0f - shimmerSustainAmount);
 }
 
 void ShimmerReverbEngine::setWidth (float newWidth)
@@ -103,6 +132,16 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
     // crossfade exists at all), so this call is what actually applies each
     // block's freeze amount rather than lagging one block behind it.
     updateShifterRatio();
+}
+
+void ShimmerReverbEngine::setLoopFreezeAmount (float newAmount)
+{
+    loopCapture.setLoopFreezeAmount (juce::jlimit (0.0f, 1.0f, newAmount));
+}
+
+void ShimmerReverbEngine::setLoopLengthMs (float newLoopLengthMs)
+{
+    loopCapture.setLoopLengthMs (newLoopLengthMs);
 }
 
 void ShimmerReverbEngine::updateShifterRatio()
@@ -286,9 +325,40 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // same knob). Multiplying by shimmerAmount here makes "no shimmer"
         // mean no shimmer character anywhere in the output, not just in the
         // tank's recirculating budget.
-        float sideShift = safeFeedback - quadratureSafe;
-        float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
-        float wetRight = tankOut - shimmerWidthGain * shimmerAmount * 0.5f * sideShift;
+        // "Shimmer Sustain" task (2026-09-06 widening, see
+        // setShimmerSustain()'s comment, effect 2): gated by
+        // shimmerSustainAmount too, same multiplicative-gate convention
+        // shimmerAmount already established here (2026-08-21) -- at
+        // shimmerSustainAmount=0.0f this collapses to wetLeft == wetRight ==
+        // tankOut exactly, same "gate to mono" behavior shimmerAmount=0.0f
+        // and width=0.0f already produce individually.
+        // Safety net, 2026-09-06 ("Shimmer Sustain" glitch investigation):
+        // safeFeedback/quadratureSafe are each individually bounded by
+        // safetyLimiter above, but their DIFFERENCE never was -- normally
+        // harmless (well under threshold), but root-caused via a real
+        // measurement pass (not guessed): at high Shimmer Sustain (which
+        // drives DattorroTank's maxShimmerBlendWeight toward 0.0, removing
+        // shimmer-cascade content from the tank's own recirculation) the dry
+        // signal reaching PitchShifter becomes close enough to periodic that
+        // the primary/quadrature grain pools' INDEPENDENT alignment searches
+        // can settle on drastically different, comparably-scoring offsets
+        // (measured up to ~265 samples apart, ~178 samples average, over a
+        // sustained tone -- see Tests/Source/ShimmerReverbEngineTests.cpp's
+        // divergence diagnostic) -- this is the same near-tied-peaks
+        // correlation ambiguity PitchShifter::findAlignmentOffset()'s own
+        // class comment documents as a previously-investigated,
+        // NOT-fixed-at-that-layer issue (four separate fix attempts there
+        // all failed or broke something else -- see that function's revert
+        // history). Rather than a fifth attempt at the alignment-search
+        // layer itself, safetyLimiter (already proven stateless/safe to
+        // reuse per its own class comment) catches the resulting
+        // near-full-scale antiphase excursion here, at the one place it
+        // actually reaches the audible output -- transparent in ordinary
+        // operation (typical sideShift magnitude is well under its 0.8f
+        // threshold) and only engages during the pathological case.
+        float sideShift = safetyLimiter.processSample (safeFeedback - quadratureSafe);
+        float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
+        float wetRight = tankOut - shimmerWidthGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
 
         // Phase 9 Freeze follow-up (see FreezeLeveler.h): compensate the
         // wet signal's measured decay under sustained freeze, applied to
@@ -301,6 +371,22 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const float freezeLevelerGain = freezeLeveler.computeGain (0.5f * (wetLeft + wetRight));
         wetLeft *= freezeLevelerGain;
         wetRight *= freezeLevelerGain;
+
+        // Phase 10 Loop Freeze (see docs/shimmer-reverb-implementation-plan.md
+        // and LoopCapture.h): a NEW, purely additive feature, deliberately
+        // wired in strictly AFTER freezeLeveler's gain application above and
+        // strictly BEFORE the dry/wet mix below -- so Loop Freeze's "live"
+        // input is whatever Phase 9's Freeze mechanism currently outputs.
+        // This is what lets the two features layer sensibly with zero
+        // special-case interaction code: engaging both means Loop Freeze
+        // captures and repeats a static snapshot of whatever the classic
+        // drone currently sounds like, including its own gain compensation.
+        // At loopFreezeAmount=0.0f (default) loopCapture.process() returns
+        // its inputs completely unchanged, so this is a bit-identical no-op
+        // unless Loop Freeze is actually engaged.
+        const auto looped = loopCapture.process (wetLeft, wetRight);
+        wetLeft = looped.first;
+        wetRight = looped.second;
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

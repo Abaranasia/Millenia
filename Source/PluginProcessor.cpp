@@ -32,11 +32,14 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
     feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
     shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
+    shimmerSustainParam = apvts.getRawParameterValue (ParamIDs::shimmerSustain);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
     freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
+    loopFreezeParam = apvts.getRawParameterValue (ParamIDs::loopFreeze);
+    loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -123,6 +126,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.reset (sampleRate, 0.05);
     smoothedFeedback.reset (sampleRate, 0.05);
     smoothedShimmerAmount.reset (sampleRate, 0.05);
+    smoothedShimmerSustain.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
@@ -146,6 +150,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setCurrentAndTargetValue (shimmerSustainParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
     smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
@@ -222,6 +227,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
     smoothedFeedback.setTargetValue (feedbackParam->load());
     smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setTargetValue (shimmerSustainParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
     smoothedFreeze.setTargetValue (freezeParam->load());
@@ -245,6 +251,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
     shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
     shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerSustain (smoothedShimmerSustain.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
@@ -256,6 +263,20 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // inside the tank would click, same reasoning as bypass driving
     // smoothedMix instead of a hard switch (see the comment above).
     shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
+
+    // Phase 10 Loop Freeze: read RAW, no smoother here -- moved into
+    // LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment) so the engage/disengage
+    // ramp is genuinely sample-accurate regardless of host buffer size,
+    // instead of the block-granularity smoothing this used to do (which
+    // could click on a large-enough buffer). loopLengthParam is read RAW
+    // too, for the unrelated "only matters at a discrete instant" reason --
+    // LoopCapture itself only ever applies a new length at its own next
+    // rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment), so
+    // smoothing this value would add nothing but latency to when a length
+    // change is picked up.
+    shimmerReverbEngine.setLoopFreezeAmount (loopFreezeParam->load());
+    shimmerReverbEngine.setLoopLengthMs (loopLengthParam->load());
 
     juce::dsp::AudioBlock<float> block (buffer);
     shimmerReverbEngine.process (block);

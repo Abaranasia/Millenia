@@ -90,6 +90,11 @@ void DattorroTank::setShimmerFeedbackGain (float newShimmerFeedbackGain)
     shimmerFeedbackGain = newShimmerFeedbackGain;
 }
 
+void DattorroTank::setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight)
+{
+    maxShimmerBlendWeight = newMaxShimmerBlendWeight;
+}
+
 void DattorroTank::setFreezeAmount (float newFreezeAmount)
 {
     freezeAmount = newFreezeAmount;

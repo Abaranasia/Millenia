@@ -39,6 +39,10 @@
               file="Source/DSP/FormantEnvelopeCorrector.cpp"/>
         <FILE id="dspFEC2" name="FormantEnvelopeCorrector.h" compile="0" resource="0"
               file="Source/DSP/FormantEnvelopeCorrector.h"/>
+        <FILE id="dspLC01" name="LoopCapture.cpp" compile="1" resource="0"
+              file="Source/DSP/LoopCapture.cpp"/>
+        <FILE id="dspLC02" name="LoopCapture.h" compile="0" resource="0"
+              file="Source/DSP/LoopCapture.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>

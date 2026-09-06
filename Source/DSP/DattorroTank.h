@@ -93,6 +93,16 @@ public:
     // before calling this.
     void setShimmerFeedbackGain (float newShimmerFeedbackGain);
 
+    // "Shimmer Sustain" task: runtime setter for maxShimmerBlendWeight (see
+    // that member's comment above and processSample()'s
+    // effectiveMaxShimmerBlendWeight) -- how long the shimmer layer itself
+    // sustains, independent of decayGain (Feedback) and shimmerFeedbackGain
+    // (Shimmer Amount). Not clamped here, same convention as setDecay()/
+    // setDamping()/setShimmerFeedbackGain()/setFreezeAmount() -- the APVTS
+    // parameter range is the source of truth; ShimmerReverbEngine::
+    // setShimmerSustain() clamps to [0, 1] before calling this.
+    void setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight);
+
     // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): 0..1 crossfade
     // between the live, APVTS-driven decayGain (0.0f) and frozenDecayGain
     // (1.0f, near-unity), computed per-sample as effectiveDecayGain inside
@@ -269,7 +279,15 @@ private:
     // (Phase 4's decayGain <= 0.85f) as a reasoned upper bound, still leaving
     // 15% of the budget on the plain path at shimmerAmount's maximum. Not
     // exhaustively ear-tuned beyond this one pass; may need revisiting.
-    static constexpr float maxShimmerBlendWeight = 0.85f;
+    //
+    // "Shimmer Sustain" task: promoted from a compile-time constant to a
+    // plain, runtime-adjustable instance member (see setMaxShimmerBlendWeight()
+    // below) so the user can directly control how long the shimmer layer
+    // itself sustains, independent of decayGain (Feedback) and
+    // shimmerFeedbackGain (Shimmer Amount). The safety argument above --
+    // shimmerWeight + plainWeight == 1.0 exactly, for ANY value in [0, 1] --
+    // holds unchanged regardless of who sets this value or when.
+    float maxShimmerBlendWeight = 0.85f;
 
     // Freeze-time shimmerWeight cap (2026-08-22): crossfades
     // maxShimmerBlendWeight's effective value from 0.85f (freezeAmount=0.0f,

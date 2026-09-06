@@ -85,6 +85,7 @@ private:
     std::atomic<float>* pitchShiftParam = nullptr;
     std::atomic<float>* feedbackParam   = nullptr;
     std::atomic<float>* shimmerAmountParam = nullptr;
+    std::atomic<float>* shimmerSustainParam = nullptr;
     std::atomic<float>* dampingParam    = nullptr;
     std::atomic<float>* widthParam      = nullptr;
     std::atomic<float>* mixParam        = nullptr;
@@ -96,6 +97,21 @@ private:
     // value in [0, 1], not just snap between the two extremes.
     std::atomic<float>* freezeParam     = nullptr;
 
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
+    // -- additive, fully independent of freezeParam above. loopFreezeParam
+    // backs an AudioParameterBool but, like bypassParam, its raw APVTS-backed
+    // value is still a float (0.0/1.0). Read RAW every block with no
+    // smoother here -- unlike every other continuous parameter below, its
+    // smoothing moved INTO LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment): the block-granularity
+    // smoothing that used to live here could click on a large-enough host
+    // buffer, since Loop Freeze is always driven by a discrete on/off toggle
+    // (a hard full-range target jump every time), unlike a continuously-
+    // dragged dial. loopLengthParam is read RAW too, for the unrelated
+    // "only matters at a discrete instant" reason described below.
+    std::atomic<float>* loopFreezeParam = nullptr;
+    std::atomic<float>* loopLengthParam = nullptr;
+
     // Phase 5: one smoother per continuous parameter, driven from the cached
     // atomics above and .skip()'d once per block in processBlock() before
     // pushing into shimmerReverbEngine -- see that method's comment for why
@@ -103,6 +119,7 @@ private:
     juce::SmoothedValue<float> smoothedPitchShift;
     juce::SmoothedValue<float> smoothedFeedback;
     juce::SmoothedValue<float> smoothedShimmerAmount;
+    juce::SmoothedValue<float> smoothedShimmerSustain;
     juce::SmoothedValue<float> smoothedDamping;
     juce::SmoothedValue<float> smoothedWidth;
     juce::SmoothedValue<float> smoothedMix;

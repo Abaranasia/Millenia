@@ -39,6 +39,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         1.0f));
 
+    // Backs ShimmerReverbEngine::setShimmerSustain() -- see that method's
+    // header comment for its two effects (DattorroTank's recirculation cap,
+    // INVERTED, plus a direct gate on process()'s audible Width/decorrelation
+    // injection). Independently controls how present and long-lived the
+    // shimmer layer is, decoupled from both Feedback (decayGain) and Shimmer
+    // Amount (shimmerFeedbackGain, the overall shimmer level).
+    //
+    // Default 0.85f matches ShimmerReverbEngine::defaultShimmerSustainAmount
+    // -- a freshly-chosen default for this control's now-widened scope, NOT
+    // a preserved match to any prior hardcoded constant (that guarantee was
+    // dropped 2026-09-06 once this parameter's scope grew to also gate the
+    // always-live Width path, which the old hardcoded behavior never touched
+    // at all -- see ShimmerReverbEngine.h's defaultShimmerSustainAmount
+    // comment).
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::shimmerSustain, 1 },
+        "Shimmer Sustain",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.85f));
+
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
     // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
     // (by-ear report: "the damping dial provides no noticeable difference") --
@@ -116,6 +136,29 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         "Freeze Amount",
         juce::NormalisableRange<float> (0.0f, 1.0f),
         0.0f));
+
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
+    // Source/DSP/LoopCapture.h): Loop Freeze -- additive, fully independent
+    // of Freeze above. Default false, matching LoopCapture's own "default is
+    // a true no-op" convention (loopFreezeAmount=0.0f never reads back the
+    // captured loop).
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::loopFreeze, 1 },
+        "Loop",
+        false));
+
+    // Range 50-4000ms MUST EXACTLY MATCH LoopCapture::minLoopLengthMs (50.0f)
+    // and LoopCapture::maxLoopLengthMs (4000.0f) -- an upper bound here
+    // higher than LoopCapture's actual buffer capacity would silently
+    // truncate a requested max-length capture; a mismatch either way is a
+    // real bug, not just a tuning concern (see LoopCapture.h's
+    // maxLoopLengthMs comment for the full rationale). Default 500ms matches
+    // LoopCapture::defaultLoopLengthMs.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::loopLength, 1 },
+        "Loop Length",
+        juce::NormalisableRange<float> (50.0f, 4000.0f),
+        500.0f));
 
     return layout;
 }

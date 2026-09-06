@@ -18,6 +18,8 @@
             resource="0" file="Source/SafetyLimiterTests.cpp"/>
       <FILE id="tstFEC" name="FormantEnvelopeCorrectorTests.cpp" compile="1"
             resource="0" file="Source/FormantEnvelopeCorrectorTests.cpp"/>
+      <FILE id="tstLCT" name="LoopCaptureTests.cpp" compile="1"
+            resource="0" file="Source/LoopCaptureTests.cpp"/>
       <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
         <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
               file="../Source/DSP/DattorroTank.cpp"/>
@@ -39,6 +41,10 @@
               file="../Source/DSP/DCBlocker.h"/>
         <FILE id="tstLIC" name="SafetyLimiter.cpp" compile="1" resource="0"
               file="../Source/DSP/SafetyLimiter.cpp"/>
+        <FILE id="tstLCC" name="LoopCapture.cpp" compile="1" resource="0"
+              file="../Source/DSP/LoopCapture.cpp"/>
+        <FILE id="tstLCH" name="LoopCapture.h" compile="0" resource="0"
+              file="../Source/DSP/LoopCapture.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
