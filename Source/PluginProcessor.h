@@ -97,19 +97,21 @@ private:
     // value in [0, 1], not just snap between the two extremes.
     std::atomic<float>* freezeParam     = nullptr;
 
-    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
-    // -- additive, fully independent of freezeParam above. loopFreezeParam
-    // backs an AudioParameterBool but, like bypassParam, its raw APVTS-backed
-    // value is still a float (0.0/1.0). Read RAW every block with no
-    // smoother here -- unlike every other continuous parameter below, its
-    // smoothing moved INTO LoopCapture itself (2026-09-06 fix, see
-    // LoopCapture::setLoopFreezeAmount()'s comment): the block-granularity
-    // smoothing that used to live here could click on a large-enough host
-    // buffer, since Loop Freeze is always driven by a discrete on/off toggle
-    // (a hard full-range target jump every time), unlike a continuously-
-    // dragged dial. loopLengthParam is read RAW too, for the unrelated
-    // "only matters at a discrete instant" reason described below.
-    std::atomic<float>* loopFreezeParam = nullptr;
+    // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Mix --
+    // additive, fully independent of freezeParam above. loopMixParam is read
+    // RAW every block, with NO PluginProcessor-level SmoothedValue, same as
+    // before this parameter was retyped from a bool toggle to a continuous
+    // dial (2026-09-26) -- the actual engage/disengage ramp lives INSIDE
+    // LoopCapture itself (see LoopCapture::setLoopFreezeAmount()'s comment),
+    // sample-accurate regardless of host buffer size, so adding a second,
+    // coarser block-granularity ramp here would be redundant at best and could
+    // interact oddly with LoopCapture's own ramp at worst. loopLengthParam is
+    // read RAW too, for the unrelated "only matters at a discrete instant"
+    // reason -- LoopCapture itself only ever applies a new length at its own
+    // next rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment),
+    // so smoothing this value would add nothing but latency to when a length
+    // change is picked up.
+    std::atomic<float>* loopMixParam = nullptr;
     std::atomic<float>* loopLengthParam = nullptr;
 
     // Phase 5: one smoother per continuous parameter, driven from the cached
