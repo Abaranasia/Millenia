@@ -44,11 +44,23 @@ namespace ParamIDs
     // Source/DSP/LoopCapture.h): a NEW, fully independent feature alongside
     // Freeze above -- captures a window of recent wet output and repeats it
     // as a static, crossfaded loop, rather than pinning the tank's own decay.
-    // A clean on/off juce::AudioParameterBool (unlike freeze's continuous
-    // dial): Loop Length below controls the captured window's SIZE, not a
-    // continuous live/frozen blend amount, so there is no "how much" concept
-    // here to expose as a float.
-    constexpr auto loopFreeze = "loopFreeze";
+    //
+    // Originally a clean on/off juce::AudioParameterBool ("loopFreeze"). Retyped
+    // to a continuous juce::AudioParameterFloat (2026-09-26, "Loop Mix dial"
+    // backlog item resolved as option "a") since LoopCapture::process() already
+    // computes a continuous 0..1 crossfade between the live wet signal and the
+    // captured loop -- the bool toggle was only ever driving that crossfade to
+    // a hard 0 or 1. Renamed id (loopFreeze -> loopMix) rather than keeping the
+    // old id with a new type, since nothing has shipped/released yet (no
+    // saved-preset compatibility to preserve) and a stale bool-flavored id would
+    // be confusing for a parameter that is now genuinely continuous -- see this
+    // file's own header comment on why IDs are normally never retyped, which
+    // does not apply pre-release. Drives ShimmerReverbEngine::setLoopFreezeAmount()
+    // directly -- that method's name is intentionally left unchanged (matches
+    // this project's existing precedent of keeping a DSP setter's old name
+    // after its APVTS parameter was retyped, see setFreezeAmount() after Phase
+    // 9's Freeze bool->float switch).
+    constexpr auto loopMix = "loopMix";
 
     // Loop Length in milliseconds -- backs ShimmerReverbEngine::
     // setLoopLengthMs() -> LoopCapture::setLoopLengthMs(). Range MUST

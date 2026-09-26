@@ -138,14 +138,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         0.0f));
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
-    // Source/DSP/LoopCapture.h): Loop Freeze -- additive, fully independent
-    // of Freeze above. Default false, matching LoopCapture's own "default is
-    // a true no-op" convention (loopFreezeAmount=0.0f never reads back the
-    // captured loop).
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamIDs::loopFreeze, 1 },
-        "Loop",
-        false));
+    // Source/DSP/LoopCapture.h), retyped 2026-09-26 ("Loop Mix dial" backlog
+    // item): continuous blend between the live processing chain and the
+    // captured loop, replacing the old on/off toggle -- see ParamIDs::loopMix's
+    // header comment for the full rationale. Default 0.0f, same no-op default
+    // as the old bool's `false` (loopFreezeAmount=0.0f never reads back the
+    // captured loop; LoopCapture::process()'s rising-edge capture trigger fires
+    // the first time this moves off 0.0f, same as it did for the old toggle's
+    // false->true transition).
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::loopMix, 1 },
+        "Loop Mix",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.0f));
 
     // Range 50-4000ms MUST EXACTLY MATCH LoopCapture::minLoopLengthMs (50.0f)
     // and LoopCapture::maxLoopLengthMs (4000.0f) -- an upper bound here

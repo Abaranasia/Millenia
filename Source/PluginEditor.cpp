@@ -65,15 +65,17 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (freezeSlider,   freezeLabel,   "Freeze Amount");
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Freeze
-    // -- additive, fully independent knob/toggle pair alongside Freeze
+    // -- additive, fully independent knob pair alongside Freeze
     // Amount/freezeQuickToggle above. Loop Length controls the captured
     // window's size, so it belongs in the same rotary-knob row as every
-    // other continuous parameter, same as freezeSlider.
+    // other continuous parameter, same as freezeSlider. Loop Mix (retyped
+    // 2026-09-26 from a discrete on/off toggle to a continuous dial, see
+    // Parameters.cpp's comment) joins it in that same row.
     configureRotary (loopLengthSlider, loopLengthLabel, "Loop Length");
+    configureRotary (loopMixSlider, loopMixLabel, "Loop Mix");
 
     addAndMakeVisible (bypassButton);
     addAndMakeVisible (freezeQuickToggle);
-    addAndMakeVisible (loopFreezeToggle);
 
     // Recovered by user request (2026-08-22): a quick full-freeze toggle
     // above the Freeze knob. Checking remembers the dial's current value
@@ -120,7 +122,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     freezeAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeSlider);
     bypassAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::bypass,     bypassButton);
     loopLengthAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopLength, loopLengthSlider);
-    loopFreezeAttachment = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::loopFreeze, loopFreezeToggle);
+    loopMixAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopMix,    loopMixSlider);
 
     // Phase 6's own goal is a functional editor, not final-polish (see plan
     // doc) -- fixed-size, non-resizable is a deliberate choice for this
@@ -130,8 +132,9 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // Widened from 620 (6 knobs) to fit the Freeze knob, then 720 -> 820
     // (Phase 10) to fit the new Loop Length knob at the same per-knob width
     // the other 7 already use, then 820 -> 920 ("Shimmer Sustain" task) to
-    // fit this 9th knob at the same per-knob width the other 8 already use.
-    setSize (920, 320);
+    // fit this 9th knob, then 920 -> 1020 ("Loop Mix" dial) for the 10th, at
+    // the same per-knob width every prior knob already uses.
+    setSize (1020, 320);
 }
 
 MilleniaAudioProcessorEditor::~MilleniaAudioProcessorEditor()
@@ -164,8 +167,6 @@ void MilleniaAudioProcessorEditor::resized()
     bypassButton.setBounds (topArea.removeFromRight (80));
     topArea.removeFromRight (8); // gap between toggles
     freezeQuickToggle.setBounds (topArea.removeFromRight (80));
-    topArea.removeFromRight (8); // gap between toggles
-    loopFreezeToggle.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 
@@ -175,7 +176,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider })
+    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

@@ -38,7 +38,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
     freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
-    loopFreezeParam = apvts.getRawParameterValue (ParamIDs::loopFreeze);
+    loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
     loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
 }
 
@@ -264,18 +264,20 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // smoothedMix instead of a hard switch (see the comment above).
     shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
 
-    // Phase 10 Loop Freeze: read RAW, no smoother here -- moved into
-    // LoopCapture itself (2026-09-06 fix, see
-    // LoopCapture::setLoopFreezeAmount()'s comment) so the engage/disengage
-    // ramp is genuinely sample-accurate regardless of host buffer size,
-    // instead of the block-granularity smoothing this used to do (which
-    // could click on a large-enough buffer). loopLengthParam is read RAW
-    // too, for the unrelated "only matters at a discrete instant" reason --
-    // LoopCapture itself only ever applies a new length at its own next
-    // rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment), so
+    // Phase 10 Loop Mix: read RAW, no smoother here -- the engage/disengage
+    // ramp lives INSIDE LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment), sample-accurate
+    // regardless of host buffer size. Loop Mix is itself now a continuously-
+    // dragged dial (retyped 2026-09-26 from a discrete on/off toggle), which
+    // makes the case for reading it raw here even clearer than before -- a
+    // second, coarser block-granularity smoother on top of LoopCapture's own
+    // sample-accurate ramp would be redundant at best. loopLengthParam is
+    // read RAW too, for the unrelated "only matters at a discrete instant"
+    // reason -- LoopCapture itself only ever applies a new length at its own
+    // next rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment), so
     // smoothing this value would add nothing but latency to when a length
     // change is picked up.
-    shimmerReverbEngine.setLoopFreezeAmount (loopFreezeParam->load());
+    shimmerReverbEngine.setLoopFreezeAmount (loopMixParam->load());
     shimmerReverbEngine.setLoopLengthMs (loopLengthParam->load());
 
     juce::dsp::AudioBlock<float> block (buffer);
