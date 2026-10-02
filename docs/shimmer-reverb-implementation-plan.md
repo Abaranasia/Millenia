@@ -472,6 +472,16 @@ Raised during Phase 8's ear-testing; captured here so they aren't lost, not yet 
 
 The full `MilleniaTests` suite gave `ALL TESTS PASSED (0 failures)`, with every pre-existing test unchanged. Clean+Build (Release) of `Millenia_SharedCode` and `Millenia_StandalonePlugin` finished with 0 errors. Not yet ear-tested; `levelCeiling` (the sustained loudness of the wash) is the first by-ear tuning candidate.
 
+**Ear test, 2026-10-02.** The user confirmed that Infinite "sounds as described": the tail holds, new input layers on top, and the modulation is fine. `levelCeiling` stays at 0.25 for now.
+
+**Known issue confirmed again, not caused by Infinite.** Moving the Freeze dial from 75% to 100%, or clicking the Freeze quick toggle, produces a short "chipmunk" pitch glide.
+- The user confirmed it happens with Infinite **off**, so it is the pre-existing 2026-08-29 Freeze pitch-glide artifact, not a regression.
+- Cause: `effSemis = semis * (1 - freeze^16)` in `ShimmerReverbEngine::updateShifterRatio()` packs nearly the whole pitch sweep (+12 st down to 0 st) into the top ~25% of the dial. The quick toggle always sweeps that full range.
+- Longer ramps were tried on 2026-08-29 and made it worse.
+- The likely fix is to engage Freeze as an output-level crossfade, as Loop Mix does, instead of crossfading the pitch ratio itself.
+- Infinite may make the glide easier to hear, because the tail no longer decays.
+- Deferred to a future session.
+
 ## File/class structure proposal
 
 ```
