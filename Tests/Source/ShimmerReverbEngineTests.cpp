@@ -2263,6 +2263,113 @@ public:
                                               + juce::String (overallRms, 8) + ") -- the loop should be repeating "
                                               "the drone's real current output, not silencing it");
         }
+
+        //==============================================================================
+        // Infinite mode through the full engine (see DattorroTankTests.cpp's
+        // Infinite section for the bare-tank coverage). Same tight 2.0 bound
+        // as the tank-level test: the existing 10.0 bound would hide slow
+        // growth from unity decay plus continuous fresh input.
+        // alsoFreeze: Infinite runs alone for prefillSeconds first, THEN Freeze
+        // engages on top for durationSeconds. Engaging Freeze from t=0 would
+        // mute every input sample (1 - freezeAmount = 0) and measure an
+        // all-zero, trivially bounded output; pre-filling makes it a real
+        // held drone at unity decay.
+        auto runInfiniteEngineBoundedness = [this] (double durationSeconds, bool alsoFreeze, juce::int64 seed)
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr double prefillSeconds = 5.0;
+            const int prefillBlocks = alsoFreeze ? (int) (prefillSeconds * sampleRate / blockSize) : 0;
+            const int numBlocks = prefillBlocks + (int) (durationSeconds * sampleRate / blockSize);
+
+            ShimmerReverbEngine engine; // defaults: +12st, shimmer amount 1.0
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setInfiniteAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (seed);
+
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+            int firstOverBoundBlock = -1;
+            double lastSecondSumSquares = 0.0;
+            int lastSecondCount = 0;
+            const int lastSecondStart = numBlocks - (int) (sampleRate / blockSize);
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                if (alsoFreeze && b == prefillBlocks)
+                    engine.setFreezeAmount (1.0f);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        if (! std::isfinite (data[i]))
+                        {
+                            ++numNonFinite;
+                        }
+                        else
+                        {
+                            maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+
+                            if (b >= lastSecondStart)
+                            {
+                                lastSecondSumSquares += (double) data[i] * (double) data[i];
+                                ++lastSecondCount;
+                            }
+                        }
+                    }
+                }
+
+                if (firstOverBoundBlock < 0 && maxPeak > 2.0f)
+                    firstOverBoundBlock = b;
+            }
+
+            const float lastSecondRms = (float) std::sqrt (lastSecondSumSquares / (double) juce::jmax (1, lastSecondCount));
+
+            logMessage (juce::String (alsoFreeze ? "Infinite + Freeze" : "Infinite") + " engine, "
+                            + (alsoFreeze ? juce::String (prefillSeconds, 0) + "s Infinite-only prefill + " : juce::String())
+                            + juce::String (durationSeconds, 0) + "s continuous noise: peak=" + juce::String (maxPeak, 4)
+                            + ", last-second RMS=" + juce::String (lastSecondRms, 5)
+                            + (firstOverBoundBlock >= 0 ? ", first exceeded 2.0 at "
+                                   + juce::String (firstOverBoundBlock * blockSize / sampleRate, 1) + "s" : juce::String()));
+
+            expectEquals (numNonFinite, 0, "Infinite engine produced non-finite samples");
+            expect (maxPeak <= 2.0f, "Infinite engine exceeded the 2.0 bound (peak: " + juce::String (maxPeak, 4) + ")");
+            expect (lastSecondRms > 1.0e-3f, "Infinite engine output went near-silent (last-second RMS "
+                                                 + juce::String (lastSecondRms, 6) + ") -- bounded only trivially");
+        };
+
+        beginTest ("Infinite through the full engine stays finite and bounded (peak <= 2.0) over several minutes of sustained input");
+        {
+            runInfiniteEngineBoundedness (180.0, false, 55443322);
+        }
+
+        beginTest ("Infinite + Freeze both on stays finite and bounded (peak <= 2.0) over a minute of sustained input");
+        {
+            // Freeze's dry-input mute still applies when both are engaged
+            // (ShimmerReverbEngine::process() scales the tank input by
+            // 1 - freezeAmount regardless of Infinite), so this is a frozen
+            // drone held at unity decay rather than an accumulating one --
+            // the remaining risk is the decay pin itself (0.999 -> 1.0) plus
+            // FreezeLeveler's make-up gain stacked on the level controller.
+            runInfiniteEngineBoundedness (60.0, true, 66778899);
+        }
     }
 };
 

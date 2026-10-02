@@ -433,6 +433,45 @@ Raised during Phase 8's ear-testing; captured here so they aren't lost, not yet 
 - Freeze (Phase 9, already scheduled above) and the two missing pitch presets are not re-listed here — they're already tracked, just not yet implemented.
 - **Loop Mix dial, raised 2026-09-06 after Phase 10 by-ear testing.** User wants a continuous control to blend the captured loop with the live processing chain, instead of Loop Freeze being an all-or-nothing toggle — so the incoming signal keeps sounding (with the rest of the plugin's parameters still applying to it) while the loop plays underneath. **Smaller than it looks**: `LoopCapture::process()` (`Source/DSP/LoopCapture.cpp:131-132`) already computes exactly this — `(1-loopFreezeAmount)*wet + loopFreezeAmount*loop` — as a continuous 0..1 crossfade; today it's just always driven to a hard 0 or 1 by `loopFreeze`'s `AudioParameterBool`. Adding the dial is mostly an APVTS/editor change, not new DSP. **Open design question, not yet decided**: (a) replace the boolean toggle outright with one continuous `AudioParameterFloat` dial (0% = fully dry-through, 100% = fully looped) that drives `loopFreezeAmount` directly — simplest, but loses a clean "definitely re-capture now" gesture since the rising-edge capture trigger (`previousLoopFreezeAmount == 0.0f && loopFreezeAmount > 0.0f`) would fire on the first nudge off zero, however small; or (b) keep the boolean toggle to decide *when to (re)capture*, and add a separate mix dial that only scales blend depth once engaged (two independent controls, more surface area, clearer capture semantics). Not designed or scheduled to a phase yet. **Resolved 2026-09-26** — option (a) was chosen (replace the boolean toggle outright with one continuous `AudioParameterFloat` dial, `ParamIDs::loopMix`/"Loop Mix", range [0,1], default 0.0f) after the user picked it explicitly over the two-control alternative; implemented as a pure APVTS/editor change (`Parameters.h/.cpp`, `PluginProcessor.h/.cpp`, `PluginEditor.h/.cpp`), no changes to `LoopCapture`/`ShimmerReverbEngine` DSP were needed since the continuous crossfade and the rising-edge capture trigger already existed. Not yet ear-tested.
 
+### Infinite mode (new, added 2026-10-02)
+
+**Goal**: a tail that never decays AND keeps layering fresh input on top. That is the difference from Phase 9's Freeze, which mutes the input. A separate `AudioParameterBool` ("Infinite", `ParamIDs::infinite`, default `false`), independent of Feedback and Freeze. With Infinite off, output must be bit-identical to the pre-Infinite plugin.
+
+**Design** (all inside existing files, so no Projucer resave was needed):
+- `DattorroTank::setInfiniteAmount(0..1)` uses its own `juce::SmoothedValue` with a 0.2 s ramp (`infiniteRampSeconds`) and one `getNextValue()` per sample. This is the same "DSP owns its own ramp" pattern as `LoopCapture`. That ramped value drives three mechanisms, and each one is an exact no-op at 0.0f:
+  - **a. Decay pin.** `effectiveDecayGain += infinite * (infiniteDecayGain - effectiveDecayGain)`, with `infiniteDecayGain = 1.0f`. This is applied on top of Freeze's own 0.999 pin.
+  - **b. allpass1 read-delay modulation in both branches.** Sine LFOs at 0.5 Hz (A) and 0.7 Hz (B, +90°), depth `infinite * 0.5 ms` (Dattorro's ~16 samples at 29.8 kHz). The purpose is to break up the static resonance behind the bare tank's documented long-run instability at near-unity decay. The allpass1 lines were switched from Lagrange3rd to **Thiran** interpolation; see the tuning notes below for why. Each line's maximum size gets `ceil(0.5 ms)+1` samples of headroom.
+  - **c. In-loop level controller.**
+    - An envelope follower on `|feedbackFromB|` (attack 0.05 s, release 0.5 s) sets a target gain of `min(1, levelCeiling/env)`. That gain is one-pole smoothed (0.1 s) and becomes `gEff = 1 + infinite*(g-1)`.
+    - `gEff` multiplies both cross-feed terms: `inA = diffused + effDecay*gEff*(...)` and `inB = diffused + effDecay*gEff*A`.
+    - Its job: unity decay plus continuous input is otherwise a pure energy integrator.
+- `ShimmerReverbEngine::setInfiniteAmount()` clamps the value, caches it and forwards it. `prepare()` re-seeds it, following the `shimmerSustain` re-seed pattern. The engine does NOT mute input for Infinite. With Freeze also on, Freeze's `input*(1-freezeAmount)` mute still applies unchanged. That gives a frozen drone held at exactly unity decay, and the interaction is intentionally left alone.
+- `PluginProcessor` reads the bool raw each block and forwards it as a hard 0/1. The editor has an `infiniteToggle` with a `ButtonAttachment` in the top bar, left of the Freeze quick toggle. There was room, so `setSize()` is unchanged.
+
+**Tuning notes** (full sweep table in `DattorroTank.h` above `levelCeiling`):
+- **Lagrange3rd modulation bled high end on every pass.** With Lagrange3rd on the modulated lines, the "tail does not decay" test sat at **-3.01 dB** over 28 s, right on its 3 dB bound. Changing depth (0.01-0.5 ms) or controller time constants did not move it (-2.61 to -3.10 dB). With modulation off it measured -0.27 dB, so the loss came from the fractional-read lowpass of Lagrange interpolation. Dattorro's paper recommends allpass interpolation for these modulated stages. Switching allpass1 to Thiran gave **-0.23 dB**.
+- **Thiran keeps the default sound unchanged.** At an integer delay, JUCE's Thiran read returns the same buffer sample as Lagrange3rd's frac==1 read. This was verified during development with a temporary harness. It compared the new tank against an exact copy of the pre-Infinite `DattorroTank` (from git HEAD) over 60 s × 5 configurations: shimmer gain, freeze 0/0.5/1, decay, sustain, and external feedback on/off. All 5 configurations had **0 mismatches**.
+- **`levelCeiling` was lowered from the specified 0.5 to 0.25.** At 0.5 the 180 s peaks were 3.04 for the tank and 2.69 for the engine, both over the 2.0 bound. At 0.25, with the specified time constants and depth, they are 1.68 and 1.64.
+
+**Test plan** (written first, red phase = compile failure on the missing `setInfiniteAmount()` API):
+- `DattorroTankTests`:
+  - Infinite OFF is bit-identical: untouched vs explicit `setInfiniteAmount(0.0f)`, 10 s.
+  - 180 s of continuous noise stays finite with peak ≤ 2.0, using `plainWeight=1.0` as the worst case.
+  - The tail does not decay: 2 s burst, then 30 s of silence, last second within 3 dB of seconds 3-4.
+  - A second burst raises the sustained level.
+- `ShimmerReverbEngineTests`:
+  - The full engine at defaults with Infinite on: 180 s, peak ≤ 2.0.
+  - Infinite + Freeze: 5 s Infinite-only prefill, then 60 s with Freeze also on, peak ≤ 2.0 and output not silent. Engaging Freeze from t=0 would mute every input sample and only prove trivial boundedness.
+
+**Status: implemented 2026-10-02, all green.** Measured values (Debug, 44.1 kHz, 512-sample blocks):
+- Tank, 180 s: peak 1.677.
+- Tail: 0.21106 → 0.20391 RMS (-0.30 dB).
+- Layering: 0.20757 → 0.27187 RMS (+2.34 dB).
+- Engine, 180 s: peak 1.6437.
+- Infinite + Freeze: peak 1.3905, last-second RMS 0.15176.
+
+The full `MilleniaTests` suite gave `ALL TESTS PASSED (0 failures)`, with every pre-existing test unchanged. Clean+Build (Release) of `Millenia_SharedCode` and `Millenia_StandalonePlugin` finished with 0 errors. Not yet ear-tested; `levelCeiling` (the sustained loudness of the wash) is the first by-ear tuning candidate.
+
 ## File/class structure proposal
 
 ```

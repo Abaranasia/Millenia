@@ -97,6 +97,12 @@ private:
     // value in [0, 1], not just snap between the two extremes.
     std::atomic<float>* freezeParam     = nullptr;
 
+    // Infinite mode (see ParamIDs::infinite): bool parameter read RAW every
+    // block (compared with `> 0.5f`, same as bypassParam) and forwarded as a
+    // hard 0/1 -- DattorroTank owns the sample-accurate ramp, same "DSP owns
+    // its own smoothing" convention as loopMixParam below.
+    std::atomic<float>* infiniteParam   = nullptr;
+
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Mix --
     // additive, fully independent of freezeParam above. loopMixParam is read
     // RAW every block, with NO PluginProcessor-level SmoothedValue, same as

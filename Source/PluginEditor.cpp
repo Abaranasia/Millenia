@@ -76,6 +76,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
 
     addAndMakeVisible (bypassButton);
     addAndMakeVisible (freezeQuickToggle);
+    addAndMakeVisible (infiniteToggle);
 
     // Recovered by user request (2026-08-22): a quick full-freeze toggle
     // above the Freeze knob. Checking remembers the dial's current value
@@ -121,6 +122,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
     freezeAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeSlider);
     bypassAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::bypass,     bypassButton);
+    infiniteAttachment   = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::infinite,   infiniteToggle);
     loopLengthAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopLength, loopLengthSlider);
     loopMixAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopMix,    loopMixSlider);
 
@@ -167,6 +169,8 @@ void MilleniaAudioProcessorEditor::resized()
     bypassButton.setBounds (topArea.removeFromRight (80));
     topArea.removeFromRight (8); // gap between toggles
     freezeQuickToggle.setBounds (topArea.removeFromRight (80));
+    topArea.removeFromRight (8);
+    infiniteToggle.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 

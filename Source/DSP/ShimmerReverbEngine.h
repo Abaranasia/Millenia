@@ -181,6 +181,20 @@ public:
     // the tank only ever owns the second of those.
     void setFreezeAmount (float amount);
 
+    // Infinite mode (see docs/shimmer-reverb-implementation-plan.md's
+    // "Infinite mode" section and DattorroTank::setInfiniteAmount()):
+    // clamped to [0, 1], cached, and forwarded to the tank, which owns the
+    // whole mechanism (sample-accurate ramp, decay pin to 1.0, allpass
+    // modulation, in-loop level controller). Deliberately does NOT touch the
+    // input: Infinite's point is that fresh input keeps layering on top of
+    // a tail that never decays, the opposite of Freeze's input mute. If both
+    // are engaged, Freeze's input mute (process() scales the tank input by
+    // 1 - freezeAmount) still applies unchanged -- the result is a frozen
+    // drone held at exactly unity decay. That interaction is intentionally
+    // left alone (no special-case code); ShimmerReverbEngineTests.cpp's
+    // "Infinite + Freeze both on" test covers its boundedness.
+    void setInfiniteAmount (float newAmount);
+
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop
     // Freeze -- a NEW, fully independent, additive feature alongside Phase
     // 9's Freeze above (that mechanism is completely untouched by this one).
@@ -374,6 +388,11 @@ private:
     // whatever's already recirculating (now sustained near-losslessly via
     // DattorroTank::setFreezeAmount()'s effectiveDecayGain).
     float freezeAmount = 0.0f;
+
+    // Infinite mode (see setInfiniteAmount()): default 0.0f, i.e. off and
+    // bit-identical to pre-Infinite behavior. Cached so prepare() can
+    // re-seed the tank, same pattern as shimmerSustainAmount.
+    float infiniteAmount = 0.0f;
 
     // Phase 9 Freeze follow-up (see setFreezeAmount()'s comment): the
     // user/APVTS-driven pitch shift target, stored separately from whatever
