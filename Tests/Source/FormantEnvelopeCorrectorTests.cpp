@@ -1148,9 +1148,13 @@ public:
             // shifting in the output." Every OTHER test in this file holds
             // pitchRatio FIXED throughout, so none of them could have caught a
             // problem that only shows up while the ratio is actively changing.
-            // ShimmerReverbEngine's own Freeze mechanism (updateShifterRatio())
-            // continuously crossfades the shifter's effective ratio as the
-            // Freeze dial moves -- this sweeps pitchRatio the same way, on
+            // ShimmerReverbEngine's Freeze mechanism at the time
+            // (updateShifterRatio(), 2026-08 design) continuously crossfaded
+            // the shifter's effective ratio as the Freeze dial moved. Since
+            // 2026-10-10 Freeze is a level crossfade instead (see
+            // ShimmerReverbEngine::applyPitchAndFreezeCrossfade()), so the engine no
+            // longer sweeps the ratio; this test still covers the corrector
+            // under a moving ratio. It sweeps pitchRatio the same way, on
             // both the shifter AND the corrector, and measures the CORRECTED
             // output's instantaneous-frequency tracking error against the RAW
             // (uncorrected) shifted signal's own.

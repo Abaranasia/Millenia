@@ -176,9 +176,10 @@ public:
     // (same convention as setShimmerAmount()/setWidth()/setMix()). Also
     // stored locally so process() can mute the fresh dry input reaching the
     // tank's diffuser -- Freeze's mechanism is now three coordinated things
-    // (mute new input + pin decayGain near unity + crossfade the shifter's
-    // own ratio toward unity, see pitchShiftSemitones' comment below), and
-    // the tank only ever owns the second of those.
+    // (mute new input + pin decayGain near unity + level-crossfade the
+    // in-loop shifter's output toward a 0-semitone unityShifter, see
+    // pitchShiftSemitones' comment below), and the tank only ever owns the
+    // second of those.
     void setFreezeAmount (float amount);
 
     // Infinite mode (see docs/shimmer-reverb-implementation-plan.md's
@@ -241,46 +242,41 @@ public:
     float peekShifterQuadratureOffset() const noexcept { return shifter.getQuadratureLastOffset(); }
 
 private:
-    // Recomputes and applies the shifter's actual pitch ratio from the
-    // current pitchShiftSemitones/freezeAmount -- shared by prepare(),
-    // setPitchShiftSemitones(), and setFreezeAmount() so the crossfade curve
-    // (see pitchShiftCrossfadeCurve below) only lives in one place.
-    void updateShifterRatio();
+    // Applies pitchShiftSemitones to the main shifter (always the full user
+    // value) and formantCorrector, and recomputes unityWeightTarget from
+    // freezeAmount -- shared by prepare(), setPitchShiftSemitones(), and
+    // setFreezeAmount() so the crossfade curve (see freezeUnityCrossfadeCurve
+    // below) only lives in one place. Was updateShifterRatio() until
+    // 2026-10-10, when it still set a freeze-crossfaded ratio on the main
+    // shifter; renamed once that ratio crossfade was replaced by the level
+    // crossfade, since it no longer sets any crossfaded ratio.
+    void applyPitchAndFreezeCrossfade();
 
-    // Phase 9 Freeze pitch-ratio crossfade, curve fix (2026-08-22, by-ear
-    // report: "increasing freeze seems to produce a pitch down change that
-    // wasn't noticeable previously"). The original fix (linear
-    // `pitchShiftSemitones * (1.0f - freezeAmount)`, see
-    // pitchShiftSemitones' comment below) is CORRECT at freezeAmount=1.0
-    // (ratio must reach exactly unity there, or the endless upward-cascading
-    // drone this was built to fix comes back) but was audibly reducing the
-    // shimmer's pitch shift far too early in the dial's travel -- at
-    // freezeAmount=0.5 it had ALREADY cut a +12st shift in half (+6st),
-    // which is exactly the "pitch down" the user heard well before Freeze
-    // was anywhere near fully engaged. Raising (1.0f - freezeAmount) to this
-    // power instead keeps the reduction negligible through most of the
-    // dial's travel and concentrates it near the top; the curve still
-    // reaches exactly 0 at freezeAmount=1.0 regardless of the exponent, so
-    // the anti-cascade guarantee is unaffected by tuning this value.
+    // Phase 9 Freeze LEVEL crossfade curve: unityWeight = freezeAmount^16 is
+    // how much of the in-loop shimmer feedback comes from unityShifter (0
+    // semitones) instead of the main shifter (full user shift). process()
+    // blends LINEARLY (see its comment for why not equal-power). 16.0 puts
+    // nearly all of the fade into the last ~10% of the dial's travel
+    // (weight 0.01 at f=0.75, 0.19 at f=0.9, 0.44 at f=0.95), the same feel
+    // the old ratio crossfade had, and reaches exactly 1.0 at f=1.0 (the
+    // anti-cascade guarantee) and exactly 0.0 at f=0.0 (bit-identical
+    // default sound).
     //
-    // Steepened further, 2026-08-29 (by-ear report continued: the original
-    // 2026-08-22 fix concentrated most of the reduction near the top of the
-    // dial's travel, but a real fraction of it was still landing across
-    // roughly the last quarter, e.g. at 4.0 a +12st shift is already down to
-    // ~+8.2st by freezeAmount=0.75 -- audible, and easy to land on while
-    // using the dial normally, not just at the very top). Raised 4.0 -> 16.0
-    // to push nearly all of the reduction into the last ~10% of travel: at
-    // 16.0, freezeAmount=0.75 retains ~+11.9st (a 1% cut, essentially
-    // inaudible, vs 4.0's ~32% cut at the same point); freezeAmount=0.9
-    // retains ~+9.8st (82%, vs 4.0's ~66%); freezeAmount=0.95 retains ~+6.7st
-    // (56%, vs 4.0's ~46%) -- the glide is still real and still reaches
-    // exactly 0 at freezeAmount=1.0, just compressed into a narrower final
-    // stretch of the dial instead of starting around three-quarters of the
-    // way through it. A REASONED value from this session's own numbers, NOT
-    // exhaustively ear-tuned -- open to revisiting after another listening
-    // pass (this exact convention already flagged the prior 4.0 value the
-    // same way).
-    static constexpr float pitchShiftCrossfadeCurve = 16.0f;
+    // History. This exponent used to shape a RATIO crossfade on a single
+    // shifter (semitones * (1 - f^curve)). 2026-08-22: the first curve was a
+    // real arithmetic bug, (1-f)^4, which dropped 94% of the shift by the
+    // dial's halfway point (audible "pitch down" plus lost Width); fixed to
+    // 1 - f^4. 2026-08-29: steepened 4 -> 16 because 4 still lost ~32% of a
+    // +12st shift by f=0.75. 2026-10-10: the ratio crossfade itself was
+    // replaced by this level crossfade -- the Freeze quick-toggle sweeps f
+    // 0 -> 1 in 50ms, so every toggle GLIDED the in-loop pitch from +12st
+    // to 0st (an audible "chipmunk / DJ-scratch" bend, baked into the
+    // frozen loop), and no ramp time fixed it (0.3s and 1.0s ramps were
+    // tried 2026-08-29 and sounded worse: a longer glide). Measured by
+    // ShimmerReverbEngineFreezeCrossfadeTests' T1 (intermediate-pitch
+    // energy around a toggle vs a no-ramp baseline, L/R): glide +16.76dB /
+    // +20.97dB (128 / 512-sample blocks), level crossfade +3.20dB / +4.65dB.
+    static constexpr float freezeUnityCrossfadeCurve = 16.0f;
 
     // Phase 5 default -- was Phase 3's hardcoded shiftSemitones constant,
     // now just the value setPitchShiftSemitones() is seeded with once in
@@ -320,6 +316,19 @@ private:
 
     DattorroTank tank;
     PitchShifter shifter;
+
+    // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()): a second
+    // in-loop PitchShifter permanently at 0 semitones (ratio 1.0), fed the
+    // same dryFeedback every sample and faded in by unityWeight as Freeze
+    // engages. Gets the same setFreezeAmount() drift as `shifter`, so at full
+    // freeze it has the same ratio (1.0) and drift the old single shifter
+    // had there. One measured difference: having never run at another
+    // ratio, its primary and quadrature grain pools sit at identical
+    // offsets, so sideShift (and with it the Width term) is exactly 0 at
+    // full freeze -- the old glided shifter kept a side channel ~28dB below
+    // the mid from leftover grain offsets.
+    PitchShifter unityShifter;
+
     DCBlocker feedbackDcBlocker;
     SafetyLimiter safetyLimiter;
 
@@ -394,9 +403,47 @@ private:
     // re-seed the tank, same pattern as shimmerSustainAmount.
     float infiniteAmount = 0.0f;
 
+    // Freeze level crossfade weight (see applyPitchAndFreezeCrossfade()/
+    // freezeUnityCrossfadeCurve): unityWeightTarget = freezeAmount^16, a
+    // function of freezeAmount ONLY. It is merely recomputed on every
+    // applyPitchAndFreezeCrossfade() call (once per block in practice),
+    // including those from setPitchShiftSemitones(), because that function
+    // is shared -- a pitch change alone never moves it. 0.0f = main shifter only (default,
+    // bit-identical), 1.0f = unityShifter only (full freeze, no cascade).
+    // unityWeight is the value actually applied at the end of the last
+    // processed block; process() ramps linearly from it to the target,
+    // per sample, across each block. Measured reason (2026-10-10, T1 in
+    // ShimmerReverbEngineFreezeCrossfadeTests run at 512-sample blocks):
+    // the 50ms toggle ramp is only ~4 blocks long there, and the ^16 curve
+    // puts the weight at ~0.31 one block before the end, so a per-block step
+    // jumps 0.31 -> 1.0 in one sample. Its own measured share of T1's
+    // 512-block artifact was small (~0.35dB); most came from the per-block
+    // freezeAmount steps processedFreezeAmount below removes. Kept because
+    // a hard step between two different signals is a discontinuity by
+    // construction, and the ramp is one multiply-add per sample.
+    float unityWeightTarget = 0.0f;
+    float unityWeight = 0.0f;
+
+    // freezeAmount as actually applied at the end of the last processed
+    // block. process() ramps the input mute (1 - freezeAmount) and
+    // DattorroTank's freezeAmount linearly from this to the current
+    // freezeAmount, per sample, across each block (2026-10-10). Measured
+    // reason: at 512-sample blocks the 50ms toggle ramp is ~4 steps of
+    // ~0.23 each; stepping the tank's effectiveDecayGain/shimmer blend cap
+    // and the input gain that coarsely amplitude-modulated the tail with a
+    // zipper whose splatter alone measured +15.75dB in T1 even with the
+    // pitch glide gone (+3.4dB at 128-sample blocks). Per-sample ramping
+    // took the 512-block figure to the same few dB as 128. At constant
+    // freeze (start == target) it is bit-identical to the old per-block
+    // value, so every fixed-freeze test and the default sound are
+    // unchanged. Same lesson as LoopCapture's 2026-09-06 click fix:
+    // caller-side per-block smoothing alone is not enough on large buffers.
+    float processedFreezeAmount = 0.0f;
+
     // Phase 9 Freeze follow-up (see setFreezeAmount()'s comment): the
-    // user/APVTS-driven pitch shift target, stored separately from whatever
-    // is actually loaded into `shifter` right now. Tried gating
+    // user/APVTS-driven pitch shift target. Since 2026-10-10 this is ALWAYS
+    // what `shifter` runs at; Freeze no longer modifies it (see the end of
+    // this comment). Tried gating
     // DattorroTank's shimmerWeight/plainWeight crossfade by freezeAmount
     // first (stop feeding shifted content into the loop at all once frozen)
     // -- that broke DattorroTankTests' 3-minute frozen-boundedness test
@@ -406,15 +453,17 @@ private:
     // 0.999 -- forcing plainWeight to 1.0 (100% of the loop riding on the
     // tank's own unshifted feedbackFromB alone) let the tank's two-branch
     // cross-feed network's own resonant gain exceed unity at that decay,
-    // something the pre-existing 0.15 floor was accidentally masking. This
-    // member drives a DIFFERENT mechanism instead, left at the
-    // already-validated shimmerWeight math: the shifter's own ratio
-    // crossfades toward 1.0 (0 semitones, i.e. a plain delay tap) as
-    // freezeAmount goes 0 -> 1, so the loop keeps its proven-stable
-    // 0.85/0.15 blend but the shimmer-injected side of that blend stops
-    // cascading the pitch further with every recirculation -- this is what
-    // actually stops the frozen drone from endlessly climbing/falling in
-    // pitch, without touching Phase 8's stability-critical weight split.
+    // something the pre-existing 0.15 floor was accidentally masking. A
+    // DIFFERENT mechanism was used instead, left at the already-validated
+    // shimmerWeight math: the shimmer-injected side of that blend is moved
+    // to an unshifted signal as freezeAmount goes 0 -> 1, so the loop keeps
+    // its proven-stable 0.85/0.15 blend but stops cascading the pitch
+    // further with every recirculation. Originally (2026-08) that was done
+    // by gliding THIS shifter's ratio toward 1.0; since 2026-10-10 it is a
+    // linear level crossfade from `shifter` (always at this value) to
+    // `unityShifter` (always at 0 semitones), weighted by unityWeight --
+    // same endpoint at full freeze, but no audible pitch glide in between
+    // (see freezeUnityCrossfadeCurve's comment).
     float pitchShiftSemitones = defaultPitchShiftSemitones;
 
     // Mono scratch buffer, pre-sized in prepare() so process() never

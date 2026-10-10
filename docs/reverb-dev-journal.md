@@ -75,6 +75,39 @@ Exit code `0`. This closes the objective half of Phase 1's "impulse response" De
 - **Add a `DattorroTankTests.cpp`/`PitchShifterTests.cpp` etc. to `Tests/` as each class lands in Phase 2+** — the runner now exists specifically so this is a small increment per class, not a project.
 - Phase 2 onward proceeds exactly as scoped in the implementation plan — nothing about this pass changed any of the "Committed, non-negotiable" decisions at the top of that doc.
 
+## 2026-10-10 — Freeze toggle pitch glide fixed (level crossfade)
+
+**Status: code complete, unit-tested, plugin builds. Not yet ear-tested.** Branch `fix/freeze-glide`.
+
+### What was built
+
+- **`Source/DSP/ShimmerReverbEngine.h/.cpp`**:
+  - Added a second in-loop `PitchShifter unityShifter`, permanently at 0 st. It is prepared and reset with `shifter` and gets the same `setFreezeAmount()` drift.
+  - The main `shifter` now always runs at the full `pitchShiftSemitones`, and `formantCorrector` is keyed to that same value.
+  - `updateShifterRatio()` was renamed `applyPitchAndFreezeCrossfade()`, since it no longer sets a crossfaded ratio. It computes `unityWeightTarget = freeze^16` and pushes the full `pitchShiftSemitones` to the main shifter and the formant corrector. The curve constant was renamed `pitchShiftCrossfadeCurve` → `freezeUnityCrossfadeCurve`; it is engine-private, so the rename stays contained.
+  - `process()` linearly blends main and unity output, for both the primary signal (after formant correction) and the quadrature signal (after its formant correction, before its DC blocker).
+  - `unityShifter.processSample()` runs every sample, even at freeze 0.
+- **Per-sample freeze ramps (new, not in the original plan).** At 512-sample blocks the first version still scored +15.75 dB on T1. The cause was not the glide: it was the per-block steps of the tank's `freezeAmount` and of the input mute (`1 - freeze`), together a zipper. `process()` now ramps both linearly per sample from the previous block's value (`processedFreezeAmount`), and ramps the crossfade weight the same way. When start equals target, every sample's value is exactly that target, so all constant-freeze behaviour is bit-identical.
+- **`Tests/Source/ShimmerReverbEngineTests.cpp`**: new `ShimmerReverbEngineFreezeCrossfadeTests` class in the same .cpp, so no Projucer resave was needed. Run it alone with the `FreezeCrossfade` filter.
+
+### Verification
+
+| Test | Old ratio glide | New level crossfade |
+|---|---|---|
+| T1, intermediate-pitch excess in L/R around a toggle (128 / 512-sample blocks), threshold 8 dB | +16.76 / +20.97 dB, **FAILS** | +3.20 / +4.65 dB, passes |
+| T2, worst 10 ms level dip (128 / 512-sample blocks), limit -3 dB | -0.16 / -0.21 dB | -0.17 / -0.22 dB |
+| T3, 880 Hz growth over a 60 s freeze hold, limit +1 dB | -2.15 dB | -3.94 dB (a mutation that keeps the main shifter at +12 st: +2.74 dB, **FAILS**) |
+| Default-settings output fingerprint | `be7b4e1487c0ce8b` | `be7b4e1487c0ce8b` (bit-identical) |
+| Engine processing/audio ratio (Release) | ~0.037 | ~0.052 |
+
+The first T1 draft measured the mid channel over a 1.4 s tail. It could not tell the two designs apart (+9.90 vs +9.19 dB). The glide's audible path turned out to be the feed-forward Width term (`sideShift`), not the loop. At freeze, `DattorroTank` caps the shimmer path at 0.01 of the loop. The first T3 draft used a brightness proxy and was blind to the cascade mutation. Both were replaced before being trusted.
+
+### Still open
+
+- Ear test of the toggle and of the 75→100% dial sweep.
+- At full freeze the output now collapses to mono: `unityShifter`'s two grain pools are identical at ratio 1.0, so `sideShift` is 0. The old code kept a side channel about 28 dB below the mid, left over from grain offsets of the glided shifter. Worth a listen.
+- At Shimmer Sustain 0, freezing dips the level by about 12–14 dB (10 ms windows) in **both** old and new code. This is pre-existing and unrelated to the crossfade.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against
