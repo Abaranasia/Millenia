@@ -136,6 +136,78 @@ The cold start was the worry, since T2's earlier comment noted it could not see 
 
 - Ear test of a quick re-engage. If `frozenMaxShimmerBlendWeight` or the ^16 curve ever changes, re-check T2 for a cold-start dip.
 
+## 2026-10-10 — Loop Mix silent loop fixed (re-arm + deferred capture)
+
+**Status: code complete, unit-tested, plugin builds. Not yet ear-tested.** Branch `fix/loop-capture-rearm`.
+
+By-ear report: at Loop Mix = 1 the loop was sometimes silent, leaving only the dry part of the main Mix, or total silence at Mix = 1. Turning Loop Mix to 0 and back up fixed it, "but not always". The loop records the wet output, so Freeze/Infinite tails were captured fine and were not the cause. The capture trigger was an exact rising edge, `previousLoopFreezeAmount == 0.0f && loopFreezeAmount > 0.0f`, and it had three root causes:
+
+1. **Restart capture of an empty history.** `prepare()`/`reset()` zero the history and restart the ramp at 0. With Loop Mix already up (restored state at Standalone launch, a device restart, a sample-rate change), the first sample was an "edge" and captured all zeros: a silent loop for as long as Loop Mix stayed up.
+2. **The dial doesn't land exactly on 0.** At e.g. 0.003 the capture never re-armed, so the old (possibly silent) loop kept playing.
+3. **A quick down-and-up** faster than the 50 ms ramp never reaches 0, so there is no edge.
+
+### What was built
+
+- **`Source/DSP/LoopCapture.h/.cpp`** only. No engine, processor or parameter changes.
+  - **Re-arm with hysteresis.** Capture re-arms when the ramped amount and its target are both <= `rearmThreshold` (0.01, -40 dB of old-loop blend). An armed capture fires when the ramped amount rises above `retriggerThreshold` (0.02, -34 dB); firing disarms. A single threshold would re-capture on every jitter crossing of 0.01. The exact-zero edge is kept verbatim as a separate OR term, so the classic engage captures on the same sample as before.
+  - **Deferred capture.** A capture fired with less history than the requested N goes pending. While pending the output is the live wet signal. On the sample that completes N samples of history, the capture runs (N recomputed from `pendingLoopLengthMs` then) and the smoothed amount snaps to 0 and is re-targeted, so the normal 50 ms engage ramp runs again. Parking near zero cancels a pending capture. "History" first meant `validHistorySamples`, samples written since the last reset, with real-but-silent history deliberately captured as is. That decision was reversed the same day; see "Follow-up: wait for sound" below.
+  - **No-loop passthrough.** With no loop captured, `process()` now returns the wet signal untouched. Before, it blended toward a 0.0f loop, which was unreachable then but is reachable now after a cancelled deferred capture.
+  - Cause 3 is intentionally left as "keeps the old loop": the ramp never fell below -40 dB, so the loop never faded out.
+  - Test hooks: `getCaptureCount()`, `isCapturePending()`. Only ints, bools and floats were added; nothing allocates, locks or throws per sample.
+- **`Tests/Source/LoopCaptureTests.cpp`**: four new tests, written first and run RED against the old code.
+
+### Verification
+
+| Test | Old code (RED) | New code (GREEN) |
+|---|---|---|
+| Restart path: pending-window passthrough error (limit 1e-6) | 0.5 (output dips toward a zero loop) | 0.000000 |
+| Restart path: engaged level vs input (limit ±3 dB) | -200 dB (silent loop) | 0.00 dB |
+| Restart path: deferred engage delta vs steady delta (limit 3x) | n/a (nothing engages) | 0.031348 vs 0.031340 |
+| Near-zero re-arm (park at 0.005, switch to tone B, raise): B − A Goertzel | -153.95 dB (loop still tone A), captures 1 → 1 | +151.66 dB, captures 1 → 2 |
+| Jitter guard: captures after 2 s wobble below 0.01 / straddling 0.004–0.016 / then a raise | 1 / 1 / 1 (raise did not capture) | 1 / 1 / 2 |
+| Pending cancel: captures, passthrough error | 1 capture, 0.5 | 0 captures, 0.000000 |
+| Default-settings output fingerprint | `be7b4e1487c0ce8b` | `be7b4e1487c0ce8b` |
+
+All seven pre-existing `LoopCaptureTests` pass unchanged, with identical logged numbers (seam 0.034192/0.034007, engage 0.018806/0.018814). A mutation that collapses the hysteresis band to a single threshold fails the jitter guard with 16 spurious captures.
+
+### Follow-up: wait for sound (reverses "silence is not special-cased")
+
+A diagnostic replay of the user's actual launch state (Mix 1, Loop Mix 1, Loop Length 3225.8 ms, 48 kHz, 480-sample blocks) showed the deferred capture counted samples, not sound:
+
+- If the source app wasn't playing during the first ~3.2 s after launch, the capture fired anyway on pure silence. At Loop Mix 1 the output is then (1-1)·wet + 1·loop = digital zero (-200 dB) forever, even with -15 dBFS input present.
+- If only the first 1 s was silent, every loop cycle had a 1 s digital-zero gap.
+
+So "capturing silence is honest" reproduced the very bug the fix was for, and was dropped. What changed, still only in `LoopCapture.h/.cpp`:
+
+- **`audibleHistorySamples` replaces `validHistorySamples`.** It counts samples since the most recent sound onset, saturating at capacity.
+  - A wet sample is sound when max(|L|, |R|) > `signalGateLinear` = 0.001 (-60 dBFS). Measured wet levels are about -2 to -7 dBFS, so real material clears it by 53–58 dB. -60 dB is also the RT60 "gone" point, so a decaying tail counts until it is inaudible.
+  - `consecutiveSilentSamples` is the current unbroken run of sub-gate samples. Once it is longer than `silenceResetSamples` (250 ms, converted at prepare), the counter resets to 0 and stays 0 until the next sound sample. Shorter runs (zero crossings, rests, brief pauses) keep counting, but only after an onset: leading silence never counts.
+  - Both are zeroed by `reset()`/`prepare()`. The silent-run counter saturates at `silenceResetSamples + 1`.
+- **One readiness predicate**, `hasEnoughAudibleHistory()` (`audibleHistorySamples >= requestedLoopLengthSamples()`), now used by both the immediate and the pending paths. Before, the check was written out twice.
+- A captured loop therefore never contains a sub-gate run longer than 250 ms. Pending, cancel and deferred-ramp semantics are unchanged. Since the audible count can never exceed the samples written, the "never capture unwritten zeros" guarantee still holds.
+- Stale "rising-edge capture" comments in `LoopCapture.h` now describe all three trigger paths: the exact edge, the armed rise, and the deferred landing.
+
+Four more tests, written first and run RED against the samples-only counter:
+
+| Test | Samples-only (RED) | Wait for sound (GREEN) |
+|---|---|---|
+| Launch with no sound, 500 ms @ 44.1 kHz, 1 s silence: capture index / engaged level | 22049 (inside the silence) / -200 dB | 66150 (silence end + N) / 0.00 dB |
+| Launch with no sound, 3225.8 ms @ 48 kHz, 480-sample blocks, 4 s silence | 154837 / -200 dB | 346838 / 0.00 dB |
+| Same: passthrough error while waiting; engage delta vs steady | 0.000000; n/a | 0.000000; 0.031348 vs 0.031340 (44.1k), 0.031395 vs 0.031395 (48k) |
+| Partial silence (1 s silence, 1.5 s loop @ 48 kHz): min 10 ms-window RMS over two loop cycles vs tone | -200 dB (gap every cycle) | -0.12 dB |
+| Short pauses (100 ms gaps every 200 ms): capture index, continuous vs gapped | 22049 vs 22049 | 22050 vs 22050 |
+| Long pause (1 s tone, 400 ms gap, then raise): pending right after the rise / capture index / longest sub-gate run in loop | no / 61740 (immediate) / 17641 | yes / 83790 (gap end + N) / 1 |
+
+The short-pause test passes on both: the samples-only counter never resets, so it can't fail there. It guards against a gate that resets too eagerly.
+
+All 11 earlier `LoopCaptureTests` pass with unchanged assertions and identical logged numbers. One comment in the restart test now notes that its deferred capture lands at index N rather than N-1, because the sine's first sample, sin(0) = 0, is sub-gate. Its assertions only cover indices below N-1, so they still hold. The default-settings fingerprint is still `be7b4e1487c0ce8b`.
+
+### Still open
+
+- Ear test: launch with Loop Mix up and the source stopped, then start the source. The loop should engage ~N + 50 ms later carrying the source. Also check a near-zero dial return.
+- Known, bounded edge: if an old loop exists when a capture goes pending (Loop Length lengthened past the audible history, or a park-and-raise within N samples of an onset after more than 250 ms of silence), the switch to passthrough, and back if cancelled, is a step of at most -34 dB of the loop-vs-wet difference.
+- Known behavior: with the source stopped, a raised Loop Mix stays pending and passes the silent wet through, dropping any old loop at the -34 dB fire level. That is intended: a silent loop is never what the user wants.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

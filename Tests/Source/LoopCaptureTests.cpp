@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../../Source/DSP/LoopCapture.h"
+#include <limits>
 
 // Stage 1 test-runner target -- unit tests for the new, standalone, unwired
 // LoopCapture class (captures a window of recent stereo audio and repeats it
@@ -33,6 +34,56 @@ public:
     static bool isInBlendZone (int position, int loopLengthSamples, int crossfadeSamples) noexcept
     {
         return crossfadeSamples > 0 && position >= loopLengthSamples - crossfadeSamples;
+    }
+
+    // Steady sine source for the 2026-10-10 re-arm/deferred-capture tests
+    // below -- same phase-accumulator shape as the nextSineSample lambdas
+    // in the older tests, just reusable across several tests.
+    struct SineSource
+    {
+        SineSource (double sampleRateIn, double frequencyHz, float amplitudeIn)
+            : increment (juce::MathConstants<double>::twoPi * frequencyHz / sampleRateIn), amplitude (amplitudeIn) {}
+
+        float next() noexcept
+        {
+            const float sample = amplitude * (float) std::sin (phase);
+            phase += increment;
+            if (phase >= juce::MathConstants<double>::twoPi)
+                phase -= juce::MathConstants<double>::twoPi;
+            return sample;
+        }
+
+        double phase = 0.0;
+        double increment;
+        float amplitude;
+    };
+
+    // Hann-windowed Goertzel power at `hz` over x[start, start + n) -- same
+    // estimator as ShimmerReverbEngineTests.cpp's goertzelPower(), returned
+    // in dB (arbitrary but fixed reference) so tone-A vs tone-B content of a
+    // captured loop can be compared and logged directly.
+    static double goertzelDb (const std::vector<float>& x, int start, int n, double hz, double sampleRate)
+    {
+        const double coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * hz / sampleRate);
+        double s1 = 0.0, s2 = 0.0;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const double w = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1));
+            const double s0 = w * (double) x[(size_t) (start + i)] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        return 10.0 * std::log10 (s1 * s1 + s2 * s2 - coeff * s1 * s2 + 1.0e-20);
+    }
+
+    static float rms (const std::vector<float>& x, int start, int n)
+    {
+        double sum = 0.0;
+        for (int i = start; i < start + n; ++i)
+            sum += (double) x[(size_t) i] * (double) x[(size_t) i];
+        return (float) std::sqrt (sum / (double) juce::jmax (1, n));
     }
 
     void runTest() override
@@ -476,6 +527,570 @@ public:
 
             expectEquals (loopCapture.getCurrentLoopLengthSamples(), expectedSamples,
                           "Max-length capture was truncated to fewer samples than requested");
+        }
+
+        // -------------------------------------------------------------------
+        // 2026-10-10 by-ear report: "at Loop Mix = 1 the loop is sometimes
+        // silent; turning Loop Mix to 0 and back fixes it, but not always".
+        // Three root causes, one test each below (plus a jitter guard for the
+        // fix itself) -- see LoopCapture.h's "Re-arm and deferred capture"
+        // section for the full trail.
+        // -------------------------------------------------------------------
+
+        beginTest ("Restart with Loop Mix already up defers capture until real history exists (no silent loop)");
+        {
+            // Root cause 1: prepare()/reset() zero the rolling history, and
+            // the smoothed/previous amounts both restart at 0.0f -- so a Loop
+            // Mix restored > 0 (plugin state at Standalone launch, an audio
+            // device restart, a sample-rate change) forms a "rising edge" on
+            // the very first sample and used to capture an ALL-ZERO history:
+            // a silent loop for as long as Loop Mix stayed up.
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 500.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            const int rampSamples = juce::roundToInt (0.05 * sampleRate); // must match LoopCapture::loopFreezeRampSeconds
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.setLoopLengthMs (loopLengthMs);
+            loopCapture.setLoopFreezeAmount (1.0f); // BEFORE any audio -- the restored-state case
+
+            SineSource sine (sampleRate, 440.0, 0.5f);
+
+            const int totalSamples = loopLengthSamples + rampSamples + (int) (0.5 * sampleRate);
+            std::vector<float> inputs, outputs;
+            inputs.reserve ((size_t) totalSamples);
+            outputs.reserve ((size_t) totalSamples);
+
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float s = sine.next();
+                inputs.push_back (s);
+                outputs.push_back (loopCapture.process (s, s).first);
+
+                if (i == loopLengthSamples / 2)
+                    expect (loopCapture.isCapturePending(), "Capture should be PENDING while history is shorter than the loop");
+            }
+
+            // (a) Pending window: the deferred capture lands on the sample
+            // whose write completes loopLengthSamples of audible history --
+            // index loopLengthSamples since the "wait for sound" gate (the
+            // sine's own first sample, sin(0) = 0.0f, is sub-gate and
+            // precedes the onset), index loopLengthSamples - 1 before it.
+            // Every sample before index loopLengthSamples - 1 must be the
+            // untouched live wet signal (assertion unchanged by the gate).
+            float maxPassthroughError = 0.0f;
+            for (int i = 0; i < loopLengthSamples - 1; ++i)
+                maxPassthroughError = juce::jmax (maxPassthroughError, std::abs (outputs[(size_t) i] - inputs[(size_t) i]));
+
+            // (b) Deferred engage is click-free: same "transition delta vs.
+            // steady-state delta" bounded-multiple metric as the engage
+            // test above, with the steady baseline taken from the (live,
+            // passthrough) pending window itself.
+            float maxSteadyDelta = 0.0f;
+            for (int i = 1; i < loopLengthSamples / 2; ++i)
+                maxSteadyDelta = juce::jmax (maxSteadyDelta, std::abs (inputs[(size_t) i] - inputs[(size_t) (i - 1)]));
+
+            float maxEngageDelta = 0.0f;
+            const int engageStart = loopLengthSamples - 2;
+            for (int i = engageStart; i < engageStart + 4000; ++i)
+                maxEngageDelta = juce::jmax (maxEngageDelta, std::abs (outputs[(size_t) i] - outputs[(size_t) (i - 1)]));
+
+            // (c) Fully engaged loop carries the tone at a level comparable
+            // to the input (a 25ms-crossfaded loop of a steady sine).
+            const int measureStart = loopLengthSamples + rampSamples + 2000;
+            const int measureLength = totalSamples - measureStart;
+            const float inputRms = rms (inputs, measureStart, measureLength);
+            const float outputRms = rms (outputs, measureStart, measureLength);
+            const float levelRatioDb = juce::Decibels::gainToDecibels (outputRms / inputRms, -200.0f);
+
+            logMessage ("Restart path: maxPassthroughError=" + juce::String (maxPassthroughError, 6)
+                            + ", maxSteadyDelta=" + juce::String (maxSteadyDelta, 6)
+                            + ", maxEngageDelta=" + juce::String (maxEngageDelta, 6)
+                            + ", engaged level vs input=" + juce::String (levelRatioDb, 2) + " dB"
+                            + ", captureCount=" + juce::String (loopCapture.getCaptureCount()));
+
+            expect (maxPassthroughError <= 1.0e-6f,
+                    "Pending window was not the live wet signal (max error " + juce::String (maxPassthroughError, 6) + ")");
+            expect (maxEngageDelta <= 3.0f * maxSteadyDelta,
+                    "Deferred engage delta (" + juce::String (maxEngageDelta, 6) + ") was more than 3x the steady "
+                        "delta (" + juce::String (maxSteadyDelta, 6) + ") -- deferred engage is not click-free");
+            expect (levelRatioDb > -3.0f && levelRatioDb < 3.0f,
+                    "Engaged loop level " + juce::String (levelRatioDb, 2) + " dB vs input -- loop is silent/wrong");
+            expectEquals (loopCapture.getCaptureCount(), 1, "Expected exactly one (deferred) capture");
+        }
+
+        beginTest ("Near-zero dial re-arms capture (Loop Mix parked at 0.005 then raised captures fresh content)");
+        {
+            // Root cause 2: the dial doesn't land exactly on 0. The old
+            // trigger (previous == 0.0f exactly) never re-armed, so the old
+            // loop kept playing after a "down and back up".
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 300.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            constexpr double toneAHz = 300.0;
+            constexpr double toneBHz = 1200.0;
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.reset();
+            loopCapture.setLoopLengthMs (loopLengthMs);
+
+            SineSource toneA (sampleRate, toneAHz, 0.5f);
+            SineSource toneB (sampleRate, toneBHz, 0.5f);
+
+            // 1. Engage at 1 with tone A (real history first).
+            loopCapture.setLoopFreezeAmount (0.0f);
+            for (int i = 0; i < loopLengthSamples + 4000; ++i)
+                { const float s = toneA.next(); loopCapture.process (s, s); }
+            loopCapture.setLoopFreezeAmount (1.0f);
+            for (int i = 0; i < (int) (0.5 * sampleRate); ++i)
+                { const float s = toneA.next(); loopCapture.process (s, s); }
+
+            const int capturesAfterA = loopCapture.getCaptureCount();
+
+            // 2. Park at 0.005 (NOT exactly 0), hold 150ms, then switch the
+            // input to tone B for longer than the loop length.
+            loopCapture.setLoopFreezeAmount (0.005f);
+            for (int i = 0; i < (int) (0.15 * sampleRate); ++i)
+                { const float s = toneA.next(); loopCapture.process (s, s); }
+            for (int i = 0; i < loopLengthSamples + 4000; ++i)
+                { const float s = toneB.next(); loopCapture.process (s, s); }
+
+            // 3. Raise back to 1; the engaged loop must be tone B.
+            loopCapture.setLoopFreezeAmount (1.0f);
+            std::vector<float> outputs;
+            const int recordSamples = (int) (0.5 * sampleRate);
+            outputs.reserve ((size_t) recordSamples);
+            for (int i = 0; i < recordSamples; ++i)
+            {
+                const float s = toneB.next(); // live input irrelevant at a=1; only the LOOP content is measured
+                outputs.push_back (loopCapture.process (s, s).first);
+            }
+
+            const int measureStart = 4410; // past the 50ms engage ramp
+            const int measureLength = 8192;
+            const double powerA = goertzelDb (outputs, measureStart, measureLength, toneAHz, sampleRate);
+            const double powerB = goertzelDb (outputs, measureStart, measureLength, toneBHz, sampleRate);
+
+            logMessage ("Near-zero re-arm: toneA=" + juce::String (powerA, 2) + " dB, toneB=" + juce::String (powerB, 2)
+                            + " dB, B-A=" + juce::String (powerB - powerA, 2) + " dB, captures " + juce::String (capturesAfterA)
+                            + " -> " + juce::String (loopCapture.getCaptureCount()));
+
+            expect (powerB - powerA > 20.0,
+                    "Loop after re-raise still holds tone A (B-A = " + juce::String (powerB - powerA, 2) + " dB)");
+            expectEquals (loopCapture.getCaptureCount(), capturesAfterA + 1, "Re-raise from 0.005 should capture exactly once");
+        }
+
+        beginTest ("Jitter guard: a dial wobbling near 0 does not spam captures");
+        {
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 200.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            constexpr int blockSize = 512; // setLoopFreezeAmount() is called once per host block in the real engine
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.reset();
+            loopCapture.setLoopLengthMs (loopLengthMs);
+
+            juce::Random random (424242);
+            auto noise = [&random]() { return random.nextFloat() - 0.5f; };
+
+            loopCapture.setLoopFreezeAmount (0.0f);
+            for (int i = 0; i < loopLengthSamples + 4000; ++i)
+                loopCapture.process (noise(), noise());
+            loopCapture.setLoopFreezeAmount (1.0f);
+            for (int i = 0; i < (int) (0.3 * sampleRate); ++i)
+                loopCapture.process (noise(), noise());
+
+            // Park near 0 (never exactly 0).
+            loopCapture.setLoopFreezeAmount (0.005f);
+            for (int i = 0; i < (int) (0.2 * sampleRate); ++i)
+                loopCapture.process (noise(), noise());
+
+            const int capturesWhenParked = loopCapture.getCaptureCount();
+
+            // 2s of per-block wobble strictly below the 0.01 re-arm threshold,
+            // then 2s straddling it (0.004..0.016) -- dial noise around the
+            // threshold itself, the case a single-threshold design would spam.
+            auto wobble = [&] (float low, float high)
+            {
+                for (int block = 0; block < (int) (2.0 * sampleRate) / blockSize; ++block)
+                {
+                    loopCapture.setLoopFreezeAmount (low + (high - low) * random.nextFloat());
+                    for (int i = 0; i < blockSize; ++i)
+                        loopCapture.process (noise(), noise());
+                }
+            };
+
+            wobble (0.001f, 0.009f);
+            const int capturesAfterBelowWobble = loopCapture.getCaptureCount();
+            wobble (0.004f, 0.016f);
+            const int capturesAfterStraddleWobble = loopCapture.getCaptureCount();
+
+            // A real raise afterwards captures exactly once (not once per
+            // ramp sample, not repeatedly while it climbs).
+            loopCapture.setLoopFreezeAmount (1.0f);
+            for (int i = 0; i < (int) (0.3 * sampleRate); ++i)
+                loopCapture.process (noise(), noise());
+            const int capturesAfterRaise = loopCapture.getCaptureCount();
+
+            logMessage ("Jitter guard: captures parked=" + juce::String (capturesWhenParked)
+                            + ", after below-threshold wobble=" + juce::String (capturesAfterBelowWobble)
+                            + ", after straddling wobble=" + juce::String (capturesAfterStraddleWobble)
+                            + ", after raise=" + juce::String (capturesAfterRaise));
+
+            expectEquals (capturesAfterBelowWobble, capturesWhenParked, "Wobble below the re-arm threshold captured");
+            expectEquals (capturesAfterStraddleWobble, capturesWhenParked, "Wobble straddling the re-arm threshold captured");
+            expectEquals (capturesAfterRaise, capturesWhenParked + 1, "Raise after the wobble should capture exactly once");
+        }
+
+        beginTest ("Pending capture is cancelled if Loop Mix drops back before enough history exists");
+        {
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 500.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.reset();
+            loopCapture.setLoopLengthMs (loopLengthMs);
+
+            SineSource sine (sampleRate, 440.0, 0.5f);
+            float maxPassthroughError = 0.0f;
+
+            auto run = [&] (int numSamples)
+            {
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    const float s = sine.next();
+                    const auto out = loopCapture.process (s, s);
+                    maxPassthroughError = juce::jmax (maxPassthroughError, std::abs (out.first - s), std::abs (out.second - s));
+                }
+            };
+
+            // Raise right after reset, 100ms -- well short of 500ms history.
+            loopCapture.setLoopFreezeAmount (1.0f);
+            run ((int) (0.1 * sampleRate));
+            const bool pendingWhileRaised = loopCapture.isCapturePending();
+
+            // Drop back to 0 before enough history exists, then keep running
+            // well past the point where history WOULD have sufficed.
+            loopCapture.setLoopFreezeAmount (0.0f);
+            run ((int) (0.2 * sampleRate));
+            const bool pendingAfterDrop = loopCapture.isCapturePending();
+            run (loopLengthSamples * 2);
+
+            logMessage ("Pending cancel: pendingWhileRaised=" + juce::String ((int) pendingWhileRaised)
+                            + ", pendingAfterDrop=" + juce::String ((int) pendingAfterDrop)
+                            + ", captureCount=" + juce::String (loopCapture.getCaptureCount())
+                            + ", maxPassthroughError=" + juce::String (maxPassthroughError, 6));
+
+            expect (pendingWhileRaised, "Capture should be pending while raised with too little history");
+            expect (! pendingAfterDrop, "Pending capture was not cancelled after Loop Mix dropped back");
+            expectEquals (loopCapture.getCaptureCount(), 0, "A capture happened despite the cancel");
+            expectEquals (loopCapture.getCurrentLoopLengthSamples(), 0, "A loop exists despite the cancel");
+            expect (maxPassthroughError <= 1.0e-6f,
+                    "Output was not the unchanged live wet signal (max error " + juce::String (maxPassthroughError, 6) + ")");
+        }
+
+        // -------------------------------------------------------------------
+        // 2026-10-10 follow-up, "wait for sound": a diagnostic replay of the
+        // user's actual launch state (Mix 1, Loop Mix 1, Loop Length
+        // 3225.8ms, 48kHz, 480-sample blocks) showed the deferred capture
+        // above counted SAMPLES, not SOUND -- if the source app wasn't
+        // playing yet during the first N samples after prepare(), the
+        // capture fired anyway on pure silence, and at Loop Mix 1 the
+        // output was (1-1)*wet + 1*loop = digital zero (-200dB) forever,
+        // even with -15dBFS input present. A partially silent first N gave
+        // a digital-zero gap in every loop cycle instead. These four tests
+        // pin the fix (an audible-history counter gated at -60dBFS, reset
+        // only by a sub-gate run longer than 250ms) -- see LoopCapture.h's
+        // "Wait for sound" section.
+        // -------------------------------------------------------------------
+
+        beginTest ("Launch with no sound: capture waits for real sound, not just elapsed samples");
+        {
+            struct LaunchCase { double sampleRate; float loopLengthMs; double silenceSeconds; int blockSize; double toneHz; };
+
+            // Short case, plus the user's exact launch geometry (3225.8ms
+            // loop at 48kHz, 480-sample blocks, setLoopFreezeAmount() once
+            // per block like the real engine).
+            const LaunchCase cases[] = { { 44100.0, 500.0f, 1.0, 512, 440.0 },
+                                         { 48000.0, 3225.8f, 4.0, 480, 480.0 } };
+
+            for (const auto& c : cases)
+            {
+                juce::dsp::ProcessSpec spec { c.sampleRate, (juce::uint32) c.blockSize, (juce::uint32) 2 };
+
+                const int loopLengthSamples = juce::roundToInt (c.loopLengthMs * 0.001 * c.sampleRate);
+                const int rampSamples = juce::roundToInt (0.05 * c.sampleRate); // must match LoopCapture::loopFreezeRampSeconds
+                const int silenceSamples = (int) (c.silenceSeconds * c.sampleRate);
+
+                LoopCapture loopCapture;
+                loopCapture.prepare (spec);
+                loopCapture.setLoopLengthMs (c.loopLengthMs);
+                loopCapture.setLoopFreezeAmount (1.0f); // BEFORE any audio -- the restored-state launch
+
+                SineSource sine (c.sampleRate, c.toneHz, 0.5f);
+
+                const int totalSamples = silenceSamples + loopLengthSamples + rampSamples + (int) (1.0 * c.sampleRate);
+                std::vector<float> inputs, outputs;
+                inputs.reserve ((size_t) totalSamples);
+                outputs.reserve ((size_t) totalSamples);
+                int captureIndex = -1;
+
+                for (int i = 0; i < totalSamples; ++i)
+                {
+                    if (i % c.blockSize == 0)
+                        loopCapture.setLoopFreezeAmount (1.0f);
+
+                    const float s = i < silenceSamples ? 0.0f : sine.next();
+                    inputs.push_back (s);
+                    outputs.push_back (loopCapture.process (s, s).first);
+
+                    if (captureIndex < 0 && loopCapture.getCaptureCount() > 0)
+                        captureIndex = i;
+                }
+
+                const juce::String tag = juce::String (c.loopLengthMs, 1) + "ms@" + juce::String ((int) c.sampleRate);
+
+                // (a) Passthrough while waiting: every sample before the
+                // capture is the untouched live wet signal (silence, then
+                // the tone).
+                const int passthroughEnd = captureIndex < 0 ? totalSamples : captureIndex;
+                float maxPassthroughError = 0.0f;
+                for (int i = 0; i < passthroughEnd; ++i)
+                    maxPassthroughError = juce::jmax (maxPassthroughError, std::abs (outputs[(size_t) i] - inputs[(size_t) i]));
+
+                // (b) Click-free deferred engage: same "transition delta vs.
+                // steady-state delta" bounded-multiple metric as the restart
+                // test above, steady baseline from the live tone before capture.
+                float maxSteadyDelta = 0.0f;
+                for (int i = silenceSamples + 1; i < silenceSamples + loopLengthSamples / 2; ++i)
+                    maxSteadyDelta = juce::jmax (maxSteadyDelta, std::abs (inputs[(size_t) i] - inputs[(size_t) (i - 1)]));
+
+                float maxEngageDelta = 0.0f;
+                const int engageStart = juce::jmax (1, (captureIndex < 0 ? silenceSamples : captureIndex) - 1);
+                for (int i = engageStart; i < juce::jmin (totalSamples, engageStart + 4000); ++i)
+                    maxEngageDelta = juce::jmax (maxEngageDelta, std::abs (outputs[(size_t) i] - outputs[(size_t) (i - 1)]));
+
+                // (c) The engaged loop carries the tone at a level comparable
+                // to the input, measured after N + ramp + margin of tone.
+                const int measureStart = silenceSamples + loopLengthSamples + rampSamples + 2000;
+                const int measureLength = totalSamples - measureStart;
+                const float inputRms = rms (inputs, measureStart, measureLength);
+                const float outputRms = rms (outputs, measureStart, measureLength);
+                const float levelRatioDb = juce::Decibels::gainToDecibels (outputRms / inputRms, -200.0f);
+
+                logMessage ("Launch with no sound [" + tag + "]: captureIndex=" + juce::String (captureIndex)
+                                + " (silence ends at " + juce::String (silenceSamples) + ", N=" + juce::String (loopLengthSamples) + ")"
+                                + ", maxPassthroughError=" + juce::String (maxPassthroughError, 6)
+                                + ", maxSteadyDelta=" + juce::String (maxSteadyDelta, 6)
+                                + ", maxEngageDelta=" + juce::String (maxEngageDelta, 6)
+                                + ", engaged level vs input=" + juce::String (levelRatioDb, 2) + " dB");
+
+                expect (captureIndex >= silenceSamples + loopLengthSamples - 1,
+                        "[" + tag + "] Capture fired at " + juce::String (captureIndex) + ", before N samples of sound existed");
+                expect (maxPassthroughError <= 1.0e-6f,
+                        "[" + tag + "] Waiting window was not the live wet signal (max error " + juce::String (maxPassthroughError, 6) + ")");
+                expect (maxEngageDelta <= 3.0f * maxSteadyDelta,
+                        "[" + tag + "] Deferred engage delta (" + juce::String (maxEngageDelta, 6) + ") was more than 3x the steady "
+                            "delta (" + juce::String (maxSteadyDelta, 6) + ") -- deferred engage is not click-free");
+                expect (levelRatioDb > -3.0f && levelRatioDb < 3.0f,
+                        "[" + tag + "] Engaged loop level " + juce::String (levelRatioDb, 2) + " dB vs input -- loop is silent/wrong");
+                expectEquals (loopCapture.getCaptureCount(), 1, "[" + tag + "] Expected exactly one (deferred) capture");
+            }
+        }
+
+        beginTest ("Partial silence at the start: no digital-zero gap inside any loop cycle");
+        {
+            // 1s of silence, then a tone, Loop Mix 1 from the start, with a
+            // 1.5s loop -- so a samples-only wait would capture 1s of silence
+            // + 0.5s of tone and gap every cycle. 480Hz at 48kHz is exactly
+            // 100 samples per period and N - X = 72000 - 1200 = 70800 is a
+            // whole number of periods, so the seam crossfade blends the tone
+            // with itself in phase -- any short-window dip measured below can
+            // only be captured silence, never seam cancellation.
+            constexpr double sampleRate = 48000.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 480, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 1500.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            const int rampSamples = juce::roundToInt (0.05 * sampleRate);
+            const int silenceSamples = (int) (1.0 * sampleRate);
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.setLoopLengthMs (loopLengthMs);
+            loopCapture.setLoopFreezeAmount (1.0f);
+
+            SineSource sine (sampleRate, 480.0, 0.5f);
+
+            const int totalSamples = silenceSamples + 2 * loopLengthSamples + rampSamples + 2 * loopLengthSamples + 4000;
+            std::vector<float> outputs;
+            outputs.reserve ((size_t) totalSamples);
+            int captureIndex = -1;
+
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float s = i < silenceSamples ? 0.0f : sine.next();
+                outputs.push_back (loopCapture.process (s, s).first);
+
+                if (captureIndex < 0 && loopCapture.getCaptureCount() > 0)
+                    captureIndex = i;
+            }
+
+            const float toneRms = 0.5f / std::sqrt (2.0f);
+            const int windowSamples = juce::roundToInt (0.01 * sampleRate); // 10ms, 4.8 tone periods
+            const int analysisStart = (captureIndex < 0 ? 0 : captureIndex) + rampSamples + 1000;
+            const int analysisEnd = juce::jmin (totalSamples - windowSamples, analysisStart + 2 * loopLengthSamples);
+
+            float minWindowRms = std::numeric_limits<float>::max();
+            for (int start = analysisStart; start < analysisEnd; start += windowSamples / 2)
+                minWindowRms = juce::jmin (minWindowRms, rms (outputs, start, windowSamples));
+
+            const float minWindowDb = juce::Decibels::gainToDecibels (minWindowRms / toneRms, -200.0f);
+
+            logMessage ("Partial silence: captureIndex=" + juce::String (captureIndex)
+                            + " (silence ends at " + juce::String (silenceSamples) + ", N=" + juce::String (loopLengthSamples) + ")"
+                            + ", min 10ms-window RMS over two loop cycles vs tone=" + juce::String (minWindowDb, 2) + " dB");
+
+            expect (captureIndex >= 0, "No capture happened at all");
+            expect (minWindowDb > -3.0f,
+                    "A 10ms window inside the engaged loop is " + juce::String (minWindowDb, 2)
+                        + " dB vs the tone -- the loop captured part of the leading silence");
+        }
+
+        beginTest ("Short sub-gate pauses do not reset the audible history (same capture schedule as continuous input)");
+        {
+            // 100ms exact-zero gaps (well under the 250ms silence reset) every
+            // 200ms of tone must not delay the capture at all: a brief pause
+            // or a phrase gap is part of the music, not "nothing playing".
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 500.0f;
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            const int toneRunSamples = (int) (0.2 * sampleRate);
+            const int gapSamples = (int) (0.1 * sampleRate);
+
+            auto captureIndexFor = [&] (bool withGaps)
+            {
+                LoopCapture loopCapture;
+                loopCapture.prepare (spec);
+                loopCapture.setLoopLengthMs (loopLengthMs);
+                loopCapture.setLoopFreezeAmount (1.0f);
+
+                SineSource sine (sampleRate, 440.0, 0.5f);
+
+                for (int i = 0; i < 3 * loopLengthSamples; ++i)
+                {
+                    const bool inGap = withGaps && (i % (toneRunSamples + gapSamples)) >= toneRunSamples;
+                    const float tone = sine.next(); // phase keeps running through the gaps
+                    const float s = inGap ? 0.0f : tone;
+                    loopCapture.process (s, s);
+
+                    if (loopCapture.getCaptureCount() > 0)
+                        return i;
+                }
+
+                return -1;
+            };
+
+            const int continuousIndex = captureIndexFor (false);
+            const int gappedIndex = captureIndexFor (true);
+
+            logMessage ("Short pauses: capture index continuous=" + juce::String (continuousIndex)
+                            + ", with 100ms gaps=" + juce::String (gappedIndex) + " (N=" + juce::String (loopLengthSamples) + ")");
+
+            expect (continuousIndex >= 0, "Continuous input never captured");
+            expectEquals (gappedIndex, continuousIndex, "100ms gaps delayed (or advanced) the capture");
+        }
+
+        beginTest ("Long pause resets the audible history: capture waits N samples after the gap and never captures it");
+        {
+            constexpr double sampleRate = 44100.0;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) 2 };
+
+            constexpr float loopLengthMs = 500.0f;
+            constexpr float signalGateLinearConstant = 0.001f; // must match LoopCapture::signalGateLinear
+            const int loopLengthSamples = juce::roundToInt (loopLengthMs * 0.001 * sampleRate);
+            const int toneSamples = (int) (1.0 * sampleRate);
+            const int gapSamples = (int) (0.4 * sampleRate); // > 250ms silence reset, < N
+
+            LoopCapture loopCapture;
+            loopCapture.prepare (spec);
+            loopCapture.setLoopLengthMs (loopLengthMs);
+            loopCapture.setLoopFreezeAmount (0.0f);
+
+            SineSource sine (sampleRate, 440.0, 0.5f);
+
+            for (int i = 0; i < toneSamples; ++i)
+                { const float s = sine.next(); loopCapture.process (s, s); }
+            for (int i = 0; i < gapSamples; ++i)
+                loopCapture.process (0.0f, 0.0f);
+
+            // Loop Mix rises exactly as the tone resumes.
+            loopCapture.setLoopFreezeAmount (1.0f);
+
+            const int gapEnd = toneSamples + gapSamples;
+            int captureIndex = -1;
+            float maxPassthroughError = 0.0f;
+            bool pendingRightAfterRise = false;
+
+            for (int i = gapEnd; i < gapEnd + 2 * loopLengthSamples; ++i)
+            {
+                const float s = sine.next();
+                const auto out = loopCapture.process (s, s);
+
+                if (i == gapEnd)
+                    pendingRightAfterRise = loopCapture.isCapturePending();
+
+                if (captureIndex < 0 && loopCapture.getCaptureCount() > 0)
+                    captureIndex = i;
+
+                if (captureIndex < 0)
+                    maxPassthroughError = juce::jmax (maxPassthroughError, std::abs (out.first - s));
+            }
+
+            // Longest sub-gate run inside the captured loop: a sine's zero
+            // crossings give isolated single samples at most; a captured
+            // piece of the 400ms gap would be thousands.
+            int longestSubGateRun = 0;
+            int run = 0;
+            for (int k = 0; k < loopCapture.getCurrentLoopLengthSamples(); ++k)
+            {
+                const float level = juce::jmax (std::abs (loopCapture.peekCapturedLoopSample (0, k)),
+                                                std::abs (loopCapture.peekCapturedLoopSample (1, k)));
+                run = level > signalGateLinearConstant ? 0 : run + 1;
+                longestSubGateRun = juce::jmax (longestSubGateRun, run);
+            }
+
+            logMessage ("Long pause: captureIndex=" + juce::String (captureIndex) + " (gap ends at " + juce::String (gapEnd)
+                            + ", N=" + juce::String (loopLengthSamples) + ")"
+                            + ", pendingRightAfterRise=" + juce::String ((int) pendingRightAfterRise)
+                            + ", longest sub-gate run in loop=" + juce::String (longestSubGateRun)
+                            + ", maxPassthroughError=" + juce::String (maxPassthroughError, 6));
+
+            expect (pendingRightAfterRise, "Rise right after a long gap should go PENDING, not capture the gap");
+            expect (captureIndex >= gapEnd + loopLengthSamples - 1 && captureIndex <= gapEnd + loopLengthSamples + 1,
+                    "Capture landed at " + juce::String (captureIndex) + ", expected ~" + juce::String (gapEnd + loopLengthSamples)
+                        + " (N samples of sound after the gap)");
+            expect (longestSubGateRun < 8,
+                    "Captured loop contains a " + juce::String (longestSubGateRun) + "-sample sub-gate run -- it captured the gap");
+            expect (maxPassthroughError <= 1.0e-6f,
+                    "Waiting window was not the live wet signal (max error " + juce::String (maxPassthroughError, 6) + ")");
+            expectEquals (loopCapture.getCaptureCount(), 1, "Expected exactly one (deferred) capture");
         }
     }
 };

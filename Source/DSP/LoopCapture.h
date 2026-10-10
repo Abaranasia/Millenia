@@ -26,16 +26,21 @@
 // Two mono ring buffers (rollingLeft/rollingRight) are written unconditionally
 // on every process() call, regardless of loopFreezeAmount -- so whatever is
 // in them at any instant is exactly the most recent maxLoopLengthMs of
-// history, always available to capture from. On a RISING EDGE of
-// loopFreezeAmount (0.0f -> >0.0f, checked every call), a bounded, allocation-
-// free circular copy pulls the most recent currentLoopLengthSamples out of
-// those rolling buffers into a second pair of captured-loop buffers, which
-// then play back on repeat for as long as loopFreezeAmount stays > 0.
+// history, always available to capture from. A capture event runs a bounded,
+// allocation-free circular copy that pulls the most recent
+// currentLoopLengthSamples out of those rolling buffers into a second pair
+// of captured-loop buffers, which then play back on repeat for as long as
+// loopFreezeAmount stays > 0. Since 2026-10-10 there are three trigger
+// paths: (1) the original exact 0.0f -> >0.0f edge of loopFreezeAmount,
+// (2) an armed rise above retriggerThreshold after the dial parked near
+// zero, and (3) the deferred landing of a capture that fired via (1) or (2)
+// before enough AUDIBLE history existed -- see "Re-arm and deferred
+// capture" and "Wait for sound" below.
 //
 // The loop LENGTH is a two-stage value on purpose: setLoopLengthMs() only
 // ever updates a PENDING millisecond value; the actual
 // currentLoopLengthSamples (and the captured content itself) only changes at
-// the next rising-edge capture event. This is the same "no live resize
+// the next capture event (any of the three trigger paths above). This is the same "no live resize
 // mid-flight" real-time-safety discipline this project's
 // .claude/skills/juce-plugin-dev conventions require for anything that would
 // otherwise need to resize or reinterpret a buffer while it's actively being
@@ -76,6 +81,99 @@
 // again after the first pass. This is what makes the loop genuinely
 // periodic at (N - X) samples -- not merely "smoothed but still drifting" --
 // while still being smooth (no discontinuity) at the wrap itself.
+//
+// ---------------------------------------------------------------------------
+// Re-arm and deferred capture (fixed 2026-10-10)
+// ---------------------------------------------------------------------------
+// By-ear report, 2026-10-10: "at Loop Mix = 1 the loop is sometimes silent
+// (only the dry part of the main Mix, or total silence at Mix = 1); turning
+// Loop Mix to 0 and back up fixes it, but not always". The loop records the
+// WET OUTPUT, so Freeze/Infinite tails were captured fine -- they were not
+// the cause. The original trigger was an EXACT rising edge
+// (previousLoopFreezeAmount == 0.0f && loopFreezeAmount > 0.0f), which had
+// three root causes behind it:
+//   1. Restart capture of an empty history. prepare()/reset() zero the
+//      rolling history and restart the smoothed/previous amounts at 0.0f,
+//      so a Loop Mix already > 0 (restored plugin state at Standalone
+//      launch, an audio-device restart, a sample-rate change) formed a
+//      "rising edge" on the very first sample and captured an ALL-ZERO
+//      history: a silent loop for as long as Loop Mix stayed up.
+//   2. The dial doesn't land exactly on 0. A slider stopping at e.g. 0.003
+//      never made previousLoopFreezeAmount exactly 0.0f, so capture never
+//      re-armed and the old (possibly silent) loop kept playing.
+//   3. A quick down-and-up faster than the 50ms ramp never reaches 0, so
+//      there was no edge either.
+//
+// Fix A -- re-arm with hysteresis. Capture re-ARMS once the RAMPED amount
+// AND its target are both <= rearmThreshold (0.01, i.e. the old loop is
+// blended at <= -40dB: the user has genuinely parked the dial near zero,
+// not just swept through it). An armed capture then FIRES once the ramped
+// amount rises above retriggerThreshold (0.02, -34dB) -- deliberately a
+// separate, higher threshold rather than "rises above rearmThreshold
+// again": with a single threshold, a dial (or automation lane) dithering
+// around 0.01 would re-arm and re-fire on every crossing, re-capturing and
+// rewinding the loop each time. The 0.01-wide hysteresis band means a new
+// capture needs a real move of the dial, never just jitter, and a capture
+// fired inside the band is at <= 2% blend anyway. Firing disarms; parking
+// near zero again is the only way to re-arm. Coming from EXACTLY 0.0f the
+// original edge rule is kept verbatim as its own OR term, so the classic
+// engage captures on the same sample as before (the first sample > 0) --
+// every pre-2026-10-10 LoopCaptureTests case passes unchanged.
+// Cause 3 (a quick touch faster than the ramp) is intentionally left as
+// "keeps the old loop": the ramped amount never fell below -40dB, so the
+// loop never actually faded out and replacing it would be the surprise.
+//
+// Fix B -- deferred capture. A capture that fires before enough history
+// exists (see "Wait for sound" below for what counts as history) goes
+// PENDING instead of capturing it; while pending the output is the live
+// wet signal (effective loop blend 0). The sample whose write completes the
+// required history performs the capture (N recomputed from
+// pendingLoopLengthMs at that moment, same as a normal capture), then snaps
+// the smoothed amount to 0.0f and re-sets its target -- re-running the exact
+// same 50ms engage ramp a normal capture uses, so the deferred engage is
+// click-free by the same mechanism. Parking the dial back near zero (the
+// same condition that re-arms) cancels a pending capture.
+//
+// ---------------------------------------------------------------------------
+// Wait for sound (2026-10-10 follow-up -- reverses an earlier decision)
+// ---------------------------------------------------------------------------
+// Fix B as first written counted SAMPLES written since prepare()/reset()
+// (validHistorySamples) and deliberately did NOT special-case silence: "a
+// real but silent history (nothing playing yet) is captured as silence,
+// which is honest". That decision is reversed. A diagnostic replay of the
+// user's actual launch state (Mix 1, Loop Mix 1, Loop Length 3225.8ms,
+// 48kHz, 480-sample blocks) showed it reproduced the very bug Fix B was
+// meant to cure: the source app is rarely playing during the first ~3.2s
+// after a Standalone launch/device restart, so the deferred capture fired
+// anyway on pure silence, and at Loop Mix 1 the output was (1-1)*wet +
+// 1*loop = digital zero (-200dB) for as long as Loop Mix stayed up -- even
+// with -15dBFS input present. With only the first 1s silent, every loop
+// cycle had a 1s digital-zero gap instead. "Honest" silence is never what a
+// user raising Loop Mix wants repeated.
+//
+// The fix replaces validHistorySamples with audibleHistorySamples: the
+// number of samples since the most recent SOUND ONSET, which the single
+// predicate hasEnoughAudibleHistory() compares against N for every capture
+// path (immediate or pending -- one shared check, so they can never
+// disagree). Per sample, after the rolling-history write:
+//   - "Sound" = max(|wetLeft|, |wetRight|) > signalGateLinear (-60dBFS).
+//     A sound sample clears consecutiveSilentSamples and increments
+//     audibleHistorySamples (saturating at maxCapacitySamples).
+//   - A sub-gate sample increments consecutiveSilentSamples. Once that run
+//     is LONGER than silenceResetSamples (250ms), audibleHistorySamples
+//     resets to 0 and stays 0 until the next sound sample (the new onset).
+//     A shorter run -- a zero crossing, a brief pause, a gap between notes
+//     -- is part of the music, so it keeps counting, but only after an
+//     onset: leading silence after prepare()/reset() never counts.
+// So a capture can only happen once the last N samples are all post-onset,
+// i.e. the captured window contains no sub-gate run longer than
+// silenceResetSamples. Pending/cancel/deferred-ramp semantics are exactly
+// Fix B's. audibleHistorySamples <= samples written since reset() by
+// construction, so the original "never capture unwritten zeros" guarantee
+// still holds. While nothing is playing, a raised Loop Mix just stays
+// pending and passes the live (silent) wet through -- nothing is lost, and
+// the loop engages via the same click-free deferred ramp N samples after
+// the source actually starts.
 class LoopCapture
 {
 public:
@@ -90,7 +188,11 @@ public:
     // Clears both buffer sets to silence, and resets currentLoopLengthSamples
     // to 0 and previousLoopFreezeAmount to 0.0f (so the very next
     // loopFreezeAmount > 0.0f call is seen as a fresh rising edge, not a
-    // continuation of whatever was frozen before reset()). Does NOT reset
+    // continuation of whatever was frozen before reset()). Also zeroes
+    // audibleHistorySamples and consecutiveSilentSamples, so a capture fired
+    // right after reset() is deferred until N samples of real sound exist
+    // (2026-10-10 fix, see the class comment's "Re-arm and deferred capture"
+    // and "Wait for sound" sections). Does NOT reset
     // the pending loop length set via setLoopLengthMs() -- same convention as
     // DattorroTank::reset() leaving decayGain/dampingCoefficient untouched:
     // reset() clears transient DSP state, not a caller-configured setting.
@@ -98,8 +200,8 @@ public:
 
     // Stores a PENDING loop length in milliseconds only -- does NOT change
     // currentLoopLengthSamples or resize/reinterpret any buffer. Takes effect
-    // only at the next rising-edge capture event (see the class comment
-    // above). Clamped to [minLoopLengthMs, maxLoopLengthMs] here (unlike,
+    // only at the next capture event -- exact edge, armed rise, or deferred
+    // landing (see the class comment above). Clamped to [minLoopLengthMs, maxLoopLengthMs] here (unlike,
     // say, DattorroTank::setDecay()'s deliberately-unclamped convention):
     // there, an out-of-APVTS-range value is only an audio/tuning concern the
     // parameter layer is responsible for; here, an unclamped value would
@@ -135,17 +237,21 @@ public:
 
     // Writes wetLeft/wetRight into the rolling history buffers unconditionally
     // (see the class comment above), advances the internal loopFreezeAmount
-    // ramp by one sample (see setLoopFreezeAmount()), checks for a rising
-    // edge and captures a fresh loop if one just occurred, reads (and
+    // ramp by one sample (see setLoopFreezeAmount()), runs the re-arm/
+    // trigger/deferred-capture logic (see the class comment's "Re-arm and
+    // deferred capture" section) and captures a fresh loop if due, reads (and
     // crossfades, if applicable) the current loop-playback sample, and
     // returns the loopFreezeAmount-weighted blend of the live and looped
     // signal: { (1-loopFreezeAmount)*wetLeft + loopFreezeAmount*loopLeft,
-    // (1-loopFreezeAmount)*wetRight + loopFreezeAmount*loopRight }. If no
-    // loop has ever been captured (currentLoopLengthSamples == 0), the loop
-    // signal is treated as 0.0f -- this is only reachable if the ramp somehow
-    // reads > 0.0f before any rising edge has ever occurred (it starts at
-    // 0.0f in every real usage), handled defensively rather than reading
-    // uninitialized/stale buffer content.
+    // (1-loopFreezeAmount)*wetRight + loopFreezeAmount*loopRight }. If a
+    // capture is PENDING (waiting for enough audible history), or no loop has ever been captured
+    // (currentLoopLengthSamples == 0), the effective blend is 0.0f and the
+    // live wet signal passes through untouched. (Before 2026-10-10 the
+    // no-loop case blended toward a 0.0f loop signal instead, i.e. dipped
+    // the wet by loopFreezeAmount; that was unreachable then, since a
+    // capture always fired on the first sample > 0, but a cancelled
+    // deferred capture now leaves the ramp > 0 with no loop -- see the
+    // class comment.)
     std::pair<float, float> process (float wetLeft, float wetRight) noexcept;
 
     // Test-only introspection -- same "peek" idiom as
@@ -157,6 +263,13 @@ public:
     // applied. Returns 0.0f for an out-of-range index rather than reading
     // past the captured-loop buffers' own fixed capacity.
     float peekCapturedLoopSample (int channel, int index) const noexcept;
+
+    // Test-only introspection (2026-10-10 re-arm/deferred-capture fix):
+    // number of captureLoop() runs since the last prepare()/reset(), and
+    // whether a capture is currently deferred waiting for enough audible
+    // history.
+    int getCaptureCount() const noexcept { return captureCount; }
+    bool isCapturePending() const noexcept { return capturePending; }
 
 private:
     // Starting points, reasoned rather than ear-tuned -- refine after this
@@ -207,6 +320,39 @@ private:
     // unchanged, just now genuinely sample-accurate.
     static constexpr double loopFreezeRampSeconds = 0.05;
 
+    // 2026-10-10 re-arm hysteresis -- see the class comment's "Re-arm and
+    // deferred capture" section. 0.01 = the old loop at -40dB: parked there
+    // (ramp AND target), the loop has effectively faded out, so the next
+    // real raise may replace it. 0.02 (-34dB) is the fire level for an
+    // armed capture; the gap between the two is what keeps dial jitter
+    // around 0.01 from re-capturing repeatedly. MUST stay
+    // retriggerThreshold > rearmThreshold, or the band collapses back to a
+    // single jitter-prone threshold.
+    static constexpr float rearmThreshold = 0.01f;
+    static constexpr float retriggerThreshold = 0.02f;
+    static_assert (retriggerThreshold > rearmThreshold, "Re-arm hysteresis band must be non-empty");
+
+    // 2026-10-10 "wait for sound" gate -- see the class comment's "Wait for
+    // sound" section. 0.001f = -60dBFS. The measured wet levels feeding this
+    // class with a source playing were about -2 to -7dBFS (diagnostic replay
+    // of the user's launch state), so the gate sits ~53-58dB under real
+    // program material: any audible wet clears it by a wide margin, while
+    // digital silence (exactly 0.0f from a stopped source) stays under it.
+    // -60dB is also the RT60 convention -- a reverb tail 60dB down is "gone"
+    // by definition -- so a tail decaying out after the source stops counts
+    // as sound until it is genuinely inaudible, and no longer.
+    static constexpr float signalGateLinear = 0.001f;
+
+    // 250ms (converted to silenceResetSamples in prepare()): a sub-gate run
+    // longer than this means nothing is playing, so the audible history
+    // restarts at the next onset. Long enough that zero crossings, rests
+    // between notes and short phrase gaps (in a reverb's WET signal usually
+    // bridged by the tail anyway) never reset it -- a loop of real music
+    // keeps its natural pauses -- yet short enough that a source stopped for
+    // longer than a beat is not captured as a gap. It is also the longest
+    // sub-gate run a captured loop can ever contain.
+    static constexpr float silenceResetMs = 250.0f;
+
     // Raised-cosine (Hann-shaped) fade-in used at the capture's own wrap
     // seam -- identical shape to PitchShifter::grainWindow()'s ramp-in half
     // (see PitchShifter.cpp), so this class's splice character matches the
@@ -223,7 +369,8 @@ private:
         return 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * t));
     }
 
-    // Performs the actual rising-edge capture: computes N =
+    // Performs the actual capture for any of the three trigger paths (exact
+    // edge, armed rise, deferred landing -- see the class comment): computes N =
     // currentLoopLengthSamples from the pending ms value (clamped, and
     // additionally clamped to the fixed buffer capacity as a last-resort
     // safety net -- see setLoopLengthMs()'s comment), computes X =
@@ -232,9 +379,22 @@ private:
     // captured-loop buffers via bounded index arithmetic only (no resize,
     // ever). Resets the loop read position to 0. This copy's cost is
     // bounded by maxCapacitySamples (a fixed worst case, not unbounded), and
-    // only ever runs on a rising edge -- not every sample -- matching the
-    // "bounded circular copy" requirement this method exists to satisfy.
+    // only ever runs once per capture event -- never every sample -- matching
+    // the "bounded circular copy" requirement this method exists to satisfy.
     void captureLoop() noexcept;
+
+    // N for a capture happening NOW: pendingLoopLengthMs at the live sample
+    // rate, clamped to [1, maxCapacitySamples]. Shared by captureLoop() and
+    // hasEnoughAudibleHistory() so both always agree on N.
+    int requestedLoopLengthSamples() const noexcept;
+
+    // The single capture-readiness predicate (2026-10-10 "wait for sound";
+    // the previous inline check was written out twice in process()): true
+    // once the last requestedLoopLengthSamples() samples are all post-onset
+    // audible history (see the class comment). Used by BOTH the immediate
+    // (exact edge / armed rise) and the pending (deferred landing) paths in
+    // process(), so the two can never drift apart.
+    bool hasEnoughAudibleHistory() const noexcept { return audibleHistorySamples >= requestedLoopLengthSamples(); }
 
     // Reads one channel's captured-loop content at a given read position,
     // applying the seam-splice crossfade (see the class comment above) when
@@ -254,6 +414,11 @@ private:
     // in prepare() -- the fixed upper bound captureLoop() caps against N/2
     // (see activeCrossfadeSamples below) every capture.
     int crossfadeSamplesConstant = 0;
+
+    // silenceResetMs converted to samples at the live sample rate, computed
+    // once in prepare() (see silenceResetMs and the class comment's "Wait for
+    // sound" section).
+    int silenceResetSamples = 0;
 
     // Rolling (unconditionally-written-every-sample) mono history buffers --
     // this is the sole SOURCE captureLoop() ever copies from. Sized to
@@ -284,12 +449,33 @@ private:
     int readPosition = 0;
 
     // Pending value set by setLoopLengthMs(); only takes effect at the next
-    // rising-edge capture (see captureLoop()).
+    // capture event, via any trigger path (see captureLoop()).
     float pendingLoopLengthMs = defaultLoopLengthMs;
 
-    // Last-seen (already-ramped) loopFreezeAmount, used purely to detect a
-    // 0.0f -> >0.0f rising edge on the NEXT process() call.
+    // Last-seen (already-ramped) loopFreezeAmount, used to detect the
+    // original exact 0.0f -> >0.0f rising edge on the NEXT process() call
+    // (kept verbatim as one trigger term -- see the class comment).
     float previousLoopFreezeAmount = 0.0f;
+
+    // 2026-10-10 re-arm/deferred-capture state (see the class comment).
+    // captureArmed: parked near zero since the last capture, so the next
+    // rise above retriggerThreshold captures. capturePending: a capture
+    // fired before enough audible history existed and is waiting for it.
+    // audibleHistorySamples: samples since the most recent sound onset
+    // (sub-gate runs <= silenceResetSamples included; 0 before any onset),
+    // saturating at maxCapacitySamples -- replaced the earlier
+    // validHistorySamples ("samples written since reset"), see "Wait for
+    // sound". consecutiveSilentSamples: length of the current, unbroken run
+    // of sub-gate samples ending at the latest process() call (0 right after
+    // a sound sample), saturating at silenceResetSamples + 1 -- the first
+    // value that resets the audible history -- so endless silence can never
+    // overflow it. captureCount: test-only counter (see getCaptureCount()),
+    // saturating at INT_MAX.
+    bool captureArmed = false;
+    bool capturePending = false;
+    int audibleHistorySamples = 0;
+    int consecutiveSilentSamples = 0;
+    int captureCount = 0;
 
     // Owns the actual per-sample ramp -- see setLoopFreezeAmount()'s comment.
     juce::SmoothedValue<float> smoothedLoopFreezeAmount;
