@@ -80,6 +80,14 @@ void ShimmerReverbEngine::reset()
     formantCorrector.reset();
     loopCapture.reset();
 
+    // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
+    // comment): unityShifter was just cleared above, so mark it idle --
+    // process() then decides afresh, and if Freeze is already engaged it
+    // takes the idle -> active edge on the next block and starts from this
+    // clean state (one redundant clear of an already-clear buffer).
+    unityShifterActive = false;
+    lastUnityFeedback = 0.0f;
+
     // Snap, don't ramp, after a reset -- same convention as
     // DattorroTank::reset()'s Infinite ramp.
     processedFreezeAmount = freezeAmount;
@@ -256,6 +264,29 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
     const float unityWeightDelta = unityWeightTarget - unityWeightStart;
     const float rampStep = numSamples > 0 ? 1.0f / (float) numSamples : 0.0f;
 
+    // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
+    // comment): decided once per block. Active whenever this block's freeze
+    // ramp starts or ends above 0 -- so a ramp from a non-zero start down to
+    // 0 still runs it for that whole block -- or the crossfade weight does
+    // (redundant: unityWeight is always freezeAmount^16 of the same block
+    // edge, but it makes "the weight is exactly 0.0f on every idle sample"
+    // hold by construction instead of by that invariant). The idle -> active
+    // edge clears unityShifter's delay line and grain state first, so it
+    // cannot replay audio frozen in it since its last engagement.
+    // PitchShifter::reset() keeps pitchRatio (0 semitones, set in prepare()),
+    // freezeAmount (the drift depth, set by setFreezeAmount()) and the
+    // configured delay; it only zeroes buffers and rewinds indices/phases
+    // (juce::dsp::DelayLine::reset() is std::fill + AudioBuffer::clear()),
+    // so it is allocation-free and audio-thread safe, and nothing needs
+    // re-applying afterwards. Only the drift LFO's phase restarts at 0 on
+    // each engagement instead of running in step with `shifter`'s.
+    const bool unityNeeded = unityShifterForcedActive
+                             || processedFreezeAmount > 0.0f || freezeAmount > 0.0f
+                             || unityWeightStart > 0.0f || unityWeightTarget > 0.0f;
+    if (unityNeeded && ! unityShifterActive)
+        unityShifter.reset();
+    unityShifterActive = unityNeeded;
+
     for (size_t i = 0; i < numSamples; ++i)
     {
         // Last sample lands exactly on the targets, so no float drift carries
@@ -280,21 +311,27 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         float dryFeedback = tank.peekFeedbackSignal();
         float shiftedFeedback = shifter.processSample (dryFeedback);
 
-        // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()):
-        // unityShifter runs EVERY sample, even at freezeAmount=0.0f where its
-        // output is multiplied by exactly 0.0f below. Its ~80ms internal
-        // delay line (PitchShifter's baseDelaySamples) must already hold real
-        // tank content when the Freeze toggle sweeps unityWeight up in 50ms
-        // -- skipping it while unused would make the unity path come in
-        // silent and dip the loop's level right as it takes over. The cost
-        // is a second PitchShifter's per-sample work at all times: measured
-        // engine processing/audio ratio ~0.037 -> ~0.052 in Release (see the
-        // real-time-factor diagnostic in ShimmerReverbEngineTests.cpp).
-        // Measured caveat (T2's comment): at default settings a cold unity
-        // path did not show up as a dip, since DattorroTank caps the shimmer
-        // path at ~1-2% of the loop by the time unityWeight matters -- kept
-        // anyway as the safe default for any future blend-cap change.
-        const float unityFeedback = unityShifter.processSample (dryFeedback);
+        // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()).
+        // History: unityShifter first ran EVERY sample, even at
+        // freezeAmount=0.0f where its output is weighted by exactly 0.0f, so
+        // its ~80ms delay line (PitchShifter's baseDelaySamples) would already
+        // hold real tank content when the Freeze toggle sweeps unityWeight up
+        // in 50ms. That cost a second PitchShifter's per-sample work at all
+        // times (engine processing/audio ~0.037 -> ~0.052-0.058 in Release).
+        // Since the same day it only runs while unityShifterActive (see the
+        // per-block decision above): at Freeze 0 it is skipped and 0.0f is
+        // blended at a weight of exactly 0.0f, bit-identical to the always-on
+        // output (golden hash test, checked both ways). Trade-off: each
+        // engagement now starts from a cold (just-reset) unity path, silent
+        // for its first ~80ms. Measured harmless at the current blend caps --
+        // DattorroTank holds the shimmer path to ~1-2% of the loop by the
+        // time unityWeight matters (f > 0.9): T1 and T2 (the level-dip
+        // guard) read the same to 0.01dB at 128 and 512-sample blocks, T3's
+        // 880Hz growth -3.94 -> -3.74dB (see
+        // ShimmerReverbEngineFreezeCrossfadeTests). Revisit if
+        // frozenMaxShimmerBlendWeight or the ^16 curve ever changes.
+        const float unityFeedback = unityShifterActive ? unityShifter.processSample (dryFeedback) : 0.0f;
+        lastUnityFeedback = unityFeedback;
 
         // Chipmunk-mitigation, LPC-based formant correction (see
         // FormantEnvelopeCorrector.h and docs/formant-preserving-pitch-shifter-
@@ -384,7 +421,10 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // Same linear freeze crossfade as the primary path, at the same point
         // in the chain (after formant correction, before DC blocking), so
         // sideShift below still compares like with like.
-        quadratureRaw = (1.0f - unityWeightNow) * quadratureRaw + unityWeightNow * unityShifter.getQuadratureOutput();
+        // 0.0f while idle, same reasoning as unityFeedback above -- the stale
+        // getQuadratureOutput() of an idle shifter is never read.
+        const float unityQuadrature = unityShifterActive ? unityShifter.getQuadratureOutput() : 0.0f;
+        quadratureRaw = (1.0f - unityWeightNow) * quadratureRaw + unityWeightNow * unityQuadrature;
 
         // Own DCBlocker instance -- this class holds per-sample state
         // (previousInput/previousOutput) that would corrupt both signals if

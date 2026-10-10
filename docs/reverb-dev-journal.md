@@ -108,6 +108,34 @@ The first T1 draft measured the mid channel over a 1.4 s tail. It could not tell
 - At full freeze the output now collapses to mono: `unityShifter`'s two grain pools are identical at ratio 1.0, so `sideShift` is 0. The old code kept a side channel about 28 dB below the mid, left over from grain offsets of the glided shifter. Worth a listen.
 - At Shimmer Sustain 0, freezing dips the level by about 12–14 dB (10 ms windows) in **both** old and new code. This is pre-existing and unrelated to the crossfade.
 
+## 2026-10-10 — Unity shifter idles at Freeze 0 (CPU)
+
+**Status: code complete, unit-tested, plugin builds. Not yet ear-tested.** Branch `perf/unity-shifter-idle`.
+
+### What was built
+
+- **`Source/DSP/ShimmerReverbEngine.h/.cpp`**: `unityShifter` now runs only while active. `process()` decides once per block: active if the freeze ramp's start (`processedFreezeAmount`) or target (`freezeAmount`) is above 0, or the crossfade weight is (redundant, but it makes "weight exactly 0 while idle" hold by construction). While idle, `processSample()` is not called and 0.0f stands in for its primary and quadrature outputs, which are weighted by exactly 0.0f there.
+- **No ghost audio.** A new `unityShifterActive` member tracks the state. On the idle → active edge `unityShifter.reset()` runs first: an idle shifter's delay line still holds ~80 ms of loop audio from its last engagement. `PitchShifter::reset()` only zeroes buffers and rewinds indices (`juce::dsp::DelayLine::reset()` is `std::fill` + `AudioBuffer::clear()`), so it is audio-thread safe. It keeps `pitchRatio` (0 st), the freeze drift depth and the configured delay, so nothing needs re-applying. Only the drift LFO phase restarts at 0 on each engagement. `ShimmerReverbEngine::reset()` marks the shifter idle.
+- **Test hooks**: `peekUnityShifterOutput()` (raw, unweighted unity output of the last sample) and `forceUnityShifterActiveForTesting()` (restores the always-on behavior for same-build comparisons).
+- **Tests** in `ShimmerReverbEngineFreezeCrossfadeTests`: a CPU assertion, a ghost-audio test, and the golden hash now checked for both the idle and the forced-active engine.
+
+### Verification
+
+| Test | Always-on (before) | Idle skip (after) |
+|---|---|---|
+| T1, intermediate-pitch excess (128 / 512-sample blocks), threshold 8 dB | +3.20 / +4.65 dB | +3.20 / +4.65 dB |
+| T2, worst 10 ms level dip (128 / 512-sample blocks), limit -3 dB | -0.17 / -0.22 dB | -0.17 / -0.22 dB |
+| T3, 880 Hz growth over a 60 s freeze hold, limit +1 dB | -3.94 dB | -3.74 dB |
+| Default-settings output fingerprint | `be7b4e1487c0ce8b` | `be7b4e1487c0ce8b` (idle and forced-active) |
+| Freeze 0 real-time factor, idle / forced-active, best of 5 | 1.006, **FAILS** the 0.9 assertion | 0.69 (0.037 vs 0.053) |
+| Ghost test: tone-A excess over always-on, first 70 ms after a re-engage, limit +3 dB | 0.00 dB (guard, passes trivially) | -186.64 dB (silent cold start). Naive skip without `reset()`: +45.29 dB, **FAILS** |
+
+The cold start was the worry, since T2's earlier comment noted it could not see one. It still cannot: at the current blend caps `DattorroTank` holds the shimmer path to ~1–2% of the loop once the unity weight matters. Over the full 150 ms window the reset path reads +5.55 dB of "tone A". That is leakage from the cold path's abrupt onset of tone B, not stale audio: over 80–150 ms alone it matches always-on to 0.01 dB. That is why the assertion uses only the first 70 ms.
+
+### Still open
+
+- Ear test of a quick re-engage. If `frozenMaxShimmerBlendWeight` or the ^16 curve ever changes, re-check T2 for a cold-start dip.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

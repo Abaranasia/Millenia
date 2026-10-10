@@ -2410,12 +2410,14 @@ public:
     static std::vector<float> runFreezeToggleScenario (bool doRamp, double postSeconds, int& rampStartSample,
                                                        std::vector<float>* leftOut = nullptr,
                                                        std::vector<float>* rightOut = nullptr,
-                                                       int blockSize = defaultBlockSize)
+                                                       int blockSize = defaultBlockSize,
+                                                       bool forceUnityActive = false)
     {
         ShimmerReverbEngine engine;
         juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
         engine.prepare (spec);
         engine.reset();
+        engine.forceUnityShifterActiveForTesting (forceUnityActive);
 
         juce::SmoothedValue<float> smoothedFreeze;
         smoothedFreeze.reset (sampleRate, 0.05); // matches PluginProcessor::prepareToPlay()
@@ -2506,6 +2508,123 @@ public:
         for (int i = 0; i < n; ++i)
             sum += (double) x[(size_t) (start + i)] * (double) x[(size_t) (start + i)];
         return (float) (20.0 * std::log10 (juce::jmax (1.0e-12, std::sqrt (sum / n))));
+    }
+
+    // Ghost-audio scenario (2026-10-10, unity-shifter idle skip, see
+    // ShimmerReverbEngine::unityShifterActive): tone A (440Hz) builds the
+    // tail with Freeze off, Freeze is toggled on and held for
+    // ghostHoldSeconds, toggled off again while the input switches to tone
+    // B (660Hz), tone B plays for ghostToneBSeconds, then Freeze is toggled on
+    // again -- all with the 0.05s toggle smoother at 512-sample blocks, like
+    // PluginProcessor. Returns the raw, UNWEIGHTED unity-path output
+    // (peekUnityShifterOutput()) for the first ghostWindowSeconds after the
+    // re-engage. That window is rendered in 1-sample blocks (smoother
+    // advanced per sample, same ramp) purely so the per-sample peek sees
+    // every sample; the idle -> active decision is per block either way.
+    static constexpr double ghostHoldSeconds = 0.5;
+    static constexpr double ghostToneBSeconds = 4.0;
+    static constexpr double ghostWindowSeconds = 0.15;
+    static constexpr double toneBHz = 660.0;
+
+    static std::vector<float> runUnityGhostScenario (bool forceUnityActive)
+    {
+        constexpr int blockSize = 512;
+        ShimmerReverbEngine engine;
+        juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+        engine.prepare (spec);
+        engine.reset();
+        engine.forceUnityShifterActiveForTesting (forceUnityActive);
+
+        juce::SmoothedValue<float> smoothedFreeze;
+        smoothedFreeze.reset (sampleRate, 0.05);
+        smoothedFreeze.setCurrentAndTargetValue (0.0f);
+
+        const int engageBlock = (int) (prefillSeconds * sampleRate / blockSize);
+        const int disengageBlock = engageBlock + (int) (ghostHoldSeconds * sampleRate / blockSize);
+        const int numBlocks = disengageBlock + (int) (ghostToneBSeconds * sampleRate / blockSize);
+
+        juce::AudioBuffer<float> buffer (numChannels, blockSize);
+        double phase = 0.0;
+        auto nextInputSample = [&phase] (double hz)
+        {
+            const float s = sineAmplitude * (float) std::sin (phase);
+            phase += juce::MathConstants<double>::twoPi * hz / sampleRate;
+            return s;
+        };
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            if (b == engageBlock)
+                smoothedFreeze.setTargetValue (1.0f);
+            if (b == disengageBlock)
+                smoothedFreeze.setTargetValue (0.0f);
+
+            engine.setFreezeAmount (smoothedFreeze.skip (blockSize));
+
+            const double hz = b >= disengageBlock ? toneBHz : sineHz;
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const float s = nextInputSample (hz);
+                for (int ch = 0; ch < numChannels; ++ch)
+                    buffer.setSample (ch, i, s);
+            }
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+        }
+
+        smoothedFreeze.setTargetValue (1.0f);
+        std::vector<float> unityOut ((size_t) (ghostWindowSeconds * sampleRate), 0.0f);
+        juce::AudioBuffer<float> one (numChannels, 1);
+
+        for (auto& out : unityOut)
+        {
+            engine.setFreezeAmount (smoothedFreeze.getNextValue());
+            const float s = nextInputSample (toneBHz);
+            for (int ch = 0; ch < numChannels; ++ch)
+                one.setSample (ch, 0, s);
+
+            juce::dsp::AudioBlock<float> block (one);
+            engine.process (block);
+            out = engine.peekUnityShifterOutput();
+        }
+
+        return unityOut;
+    }
+
+    // Summed Hann-windowed Goertzel power (dB) over x[start, start + n) at a
+    // tone's fundamental and its +12st shimmer octave.
+    static float toneBandPowerDb (const std::vector<float>& x, int start, int n, double hz)
+    {
+        const double p = goertzelPower (x, start, n, hz) + goertzelPower (x, start, n, 2.0 * hz);
+        return (float) (10.0 * std::log10 (juce::jmax (1.0e-18, p)));
+    }
+
+    // Wall-clock processing/audio ratio of a default engine at Freeze 0 over
+    // ~3s of noise at 512-sample blocks.
+    static double measureDefaultRealTimeFactor (bool forceUnityActive)
+    {
+        constexpr int blockSize = 512;
+        ShimmerReverbEngine engine;
+        juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+        engine.prepare (spec);
+        engine.reset();
+        engine.forceUnityShifterActiveForTesting (forceUnityActive);
+        juce::AudioBuffer<float> buffer (numChannels, blockSize);
+        juce::Random random (424242);
+        constexpr int numBlocks = 258; // ~3s
+
+        const double startMs = juce::Time::getMillisecondCounterHiRes();
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+                for (int i = 0; i < blockSize; ++i)
+                    buffer.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+        }
+        const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+        return elapsedMs / (1000.0 * numBlocks * blockSize / sampleRate);
     }
 
     void runTest() override
@@ -2614,8 +2733,11 @@ public:
             // capped the whole shimmer path at ~0.01-0.02 of the loop
             // (frozenMaxShimmerBlendWeight) and unityShifter's own
             // primary/quadrature pair is identical (sideShift == 0). Running
-            // it every sample stays as a cheap defensive choice -- see
-            // ShimmerReverbEngine::process(). Also not run at Shimmer Sustain
+            // it every sample was first kept as a cheap defensive choice; the
+            // same day it became the idle skip (see ShimmerReverbEngine::
+            // unityShifterActive), which makes a cold unity path the NORMAL
+            // case on every engagement -- re-measured with it: -0.17dB (128)
+            // / -0.22dB (512), unchanged to 0.01dB. Also not run at Shimmer Sustain
             // 0: there BOTH designs dip ~-12 to -14dB (vs a -6.5 to -7.3dB
             // pre-ramp swing), a pre-existing level transition from the
             // frozen tank collapsing a 100%-shimmer loop to its plain path,
@@ -2718,23 +2840,35 @@ public:
             // legitimately move it -- confirm the new sound is intended (by
             // ear or by a targeted test) before replacing the value, and record
             // why here.
-            int rampStart = 0;
-            const auto wet = runFreezeToggleScenario (false, 0.5, rampStart);
-            juce::uint64 hash = 1469598103934665603ull;
-            for (float v : wet)
-            {
-                juce::uint32 bits;
-                std::memcpy (&bits, &v, sizeof (bits));
-                hash = (hash ^ bits) * 1099511628211ull;
-            }
-            logMessage ("Default-settings 4.5s sine output FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
-
+            //
+            // 2026-10-10, unity-shifter idle skip: hashed twice -- the shipping
+            // engine (unityShifter idle at Freeze 0) and the same engine with
+            // forceUnityShifterActiveForTesting(true) (the always-on behavior
+            // the golden value was recorded with). Both must match: the idle
+            // path substitutes 0.0f for a unity output that was weighted by
+            // exactly 0.0f anyway.
             constexpr juce::uint64 expectedDefaultHash = 0xbe7b4e1487c0ce8bull;
-            expect (hash == expectedDefaultHash,
-                    "Default (Freeze 0) output fingerprint changed: got "
-                        + juce::String::toHexString ((juce::int64) hash) + ", expected "
-                        + juce::String::toHexString ((juce::int64) expectedDefaultHash)
-                        + " -- the default-path DSP is no longer bit-identical");
+
+            for (bool forceUnityActive : { false, true })
+            {
+                int rampStart = 0;
+                const auto wet = runFreezeToggleScenario (false, 0.5, rampStart, nullptr, nullptr, defaultBlockSize, forceUnityActive);
+                juce::uint64 hash = 1469598103934665603ull;
+                for (float v : wet)
+                {
+                    juce::uint32 bits;
+                    std::memcpy (&bits, &v, sizeof (bits));
+                    hash = (hash ^ bits) * 1099511628211ull;
+                }
+                const juce::String label (forceUnityActive ? "unity shifter forced active" : "unity shifter idle");
+                logMessage ("Default-settings 4.5s sine output FNV-1a fingerprint (" + label + "): " + juce::String::toHexString ((juce::int64) hash));
+
+                expect (hash == expectedDefaultHash,
+                        "Default (Freeze 0) output fingerprint changed (" + label + "): got "
+                            + juce::String::toHexString ((juce::int64) hash) + ", expected "
+                            + juce::String::toHexString ((juce::int64) expectedDefaultHash)
+                            + " -- the default-path DSP is no longer bit-identical");
+            }
         }
 
         beginTest ("DIAGNOSTIC: engine real-time factor at default settings");
@@ -2742,7 +2876,10 @@ public:
             // 2026-10-10, Release, this dev machine: ~0.037 before the second
             // (unity) PitchShifter, ~0.052-0.058 after (~+40-55%) -- still far
             // under the ~0.15 budget juce-plugin-testing sets for this
-            // reverb. Logged only: wall-clock numbers are machine-dependent.
+            // reverb. Back to ~0.037 at Freeze 0 with the unity-shifter idle
+            // skip (same day; 0.053 -> 0.037 in this test). Logged only:
+            // wall-clock numbers are machine-dependent -- the relative
+            // assertion is the next test.
             ShimmerReverbEngine engine;
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) numChannels };
             engine.prepare (spec);
@@ -2764,6 +2901,94 @@ public:
             const double audioMs = 1000.0 * numBlocks * 512 / sampleRate;
             logMessage ("Engine: " + juce::String (audioMs, 0) + "ms audio in " + juce::String (elapsedMs, 1)
                             + "ms -> processing/audio = " + juce::String (elapsedMs / audioMs, 3));
+        }
+
+        beginTest ("Freeze 0 idles the unity shifter: engine real-time factor drops measurably vs the always-on path");
+        {
+            // 2026-10-10, unity-shifter idle skip. Relative, same-build,
+            // same-process comparison against forceUnityShifterActiveForTesting
+            // (true) -- not an absolute wall-clock threshold, which would be
+            // machine-dependent and flaky (juce-plugin-testing's rule).
+            // Interleaved rounds, best (minimum) of each, so a scheduler
+            // hiccup in one run cannot decide the result.
+            // Measured 2026-10-10 (Release, this dev machine, best of 5):
+            //   always-on code (before the skip existed): idle 0.0528 vs
+            //   forced 0.0526 -> 1.006 -- FAILS (RED, as expected);
+            //   idle skip: idle 0.0365-0.0369 vs forced 0.0528-0.0531 ->
+            //   0.692-0.697 -- passes.
+            // 0.9 leaves ~0.2 of headroom for timing noise while still
+            // failing anything that keeps the unity shifter running.
+            constexpr int rounds = 5;
+            double idleBest = std::numeric_limits<double>::max();
+            double forcedBest = std::numeric_limits<double>::max();
+            for (int r = 0; r < rounds; ++r)
+            {
+                forcedBest = juce::jmin (forcedBest, measureDefaultRealTimeFactor (true));
+                idleBest = juce::jmin (idleBest, measureDefaultRealTimeFactor (false));
+            }
+            const double ratio = idleBest / forcedBest;
+            logMessage ("Freeze 0 real-time factor, best of " + juce::String (rounds) + ": unity idle " + juce::String (idleBest, 4)
+                            + ", unity forced active " + juce::String (forcedBest, 4) + " -> idle/forced = " + juce::String (ratio, 3));
+
+            expect (ratio <= 0.9, "Freeze 0 is not measurably cheaper than the always-on unity shifter (idle/forced = "
+                                      + juce::String (ratio, 3) + ") -- unityShifter is still being processed while unused");
+        }
+
+        beginTest ("Re-engaging Freeze does not replay stale unity-shifter audio from the previous engagement (no ghost)");
+        {
+            // 2026-10-10, unity-shifter idle skip: the unity path's ~80ms
+            // delay line is frozen in place while idle, so without
+            // unityShifter.reset() on the idle -> active edge the first ~80ms
+            // after a re-engage would read back tone A from the LAST
+            // engagement, seconds after the input moved on to tone B.
+            // Measured on the raw (unweighted) unity output, i.e. what that
+            // path contributes at full unityWeight (a slow Freeze dial move,
+            // or a future curve change, can reach it while the stale audio is
+            // still playing). Reference: the same scenario with the unity
+            // shifter forced active, whose tone-A content is only the tank's
+            // own genuine residue after the tone-B stretch.
+            //
+            // A GUARD, not a red test: on the old always-on code it passed
+            // trivially (excess 0.00dB -- idle and forced were the same
+            // path). Measured 2026-10-10, first 70ms, tone-A excess over the
+            // always-on reference:
+            //   idle skip WITH reset (this code): -186.64dB (digital silence:
+            //   the cold path has nothing to read yet) -- passes;
+            //   naive idle skip, reset() disabled: +45.29dB -- FAILS (tone-A
+            //   51.93dB vs 6.64dB, tone-B -18.76dB vs 48.27dB: the stale
+            //   region is almost pure tone A).
+            // Over the full 150ms: +5.55dB with reset vs +39.80dB naive; the
+            // +5.55dB is the cold start's onset leakage, not tone A -- over
+            // 80-150ms alone the reset path matches always-on to 0.01dB
+            // (6.86 vs 6.86dB tone A, 48.86 vs 48.87dB tone B).
+            const auto idle = runUnityGhostScenario (false);
+            const auto forced = runUnityGhostScenario (true);
+
+            auto report = [&] (const juce::String& label, int start, int n)
+            {
+                const float idleA = toneBandPowerDb (idle, start, n, sineHz);
+                const float idleB = toneBandPowerDb (idle, start, n, toneBHz);
+                const float forcedA = toneBandPowerDb (forced, start, n, sineHz);
+                const float forcedB = toneBandPowerDb (forced, start, n, toneBHz);
+                logMessage ("Unity output, " + label + " after re-engaging Freeze: tone-A (440+880Hz) " + juce::String (idleA, 2)
+                                + " dB idle-skip vs " + juce::String (forcedA, 2) + " dB always-on (excess " + juce::String (idleA - forcedA, 2)
+                                + " dB); tone-B (660+1320Hz) " + juce::String (idleB, 2) + " vs " + juce::String (forcedB, 2) + " dB");
+                return idleA - forcedA;
+            };
+
+            // Asserted on the first 70ms only: the stale region (the 80ms
+            // base delay at ratio 1.0, minus margin for the 0.4ms drift and
+            // the alignment search). Beyond it the reset path is a cold start
+            // whose abrupt onset of tone B leaks into the tone-A bins, which
+            // is not ghost audio -- logged for the full window too.
+            const float ghostExcessDb = report ("first 70ms", 0, (int) (0.070 * sampleRate));
+            report ("first " + juce::String (ghostWindowSeconds * 1000.0, 0) + "ms", 0, (int) idle.size());
+            const int afterStale = (int) (0.080 * sampleRate);
+            report ("80-" + juce::String (ghostWindowSeconds * 1000.0, 0) + "ms", afterStale, (int) idle.size() - afterStale);
+
+            expect (ghostExcessDb <= 3.0f, "Unity path carried " + juce::String (ghostExcessDb, 2)
+                                               + " dB more tone-A energy than the always-on reference right after re-engaging "
+                                               "Freeze -- stale audio from the previous engagement is being replayed");
         }
     }
 };

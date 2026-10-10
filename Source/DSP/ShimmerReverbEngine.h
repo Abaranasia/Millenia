@@ -241,6 +241,20 @@ public:
     float peekShifterPrimaryOffset() const noexcept { return shifter.getPrimaryLastOffset(); }
     float peekShifterQuadratureOffset() const noexcept { return shifter.getQuadratureLastOffset(); }
 
+    // Test-only introspection, same idiom (2026-10-10, unity-shifter idle
+    // skip): the raw, UNWEIGHTED unityShifter primary output of the last
+    // processed sample (0.0f while the unity path is idle). Lets
+    // ShimmerReverbEngineFreezeCrossfadeTests' ghost-audio test see exactly
+    // what that path would contribute at full unityWeight.
+    float peekUnityShifterOutput() const noexcept { return lastUnityFeedback; }
+
+    // Test-only switch (2026-10-10): true runs unityShifter on every sample
+    // regardless of Freeze -- the pre-idle-skip, always-on behavior -- so a
+    // test can compare the idle skip against it in the same build (CPU cost,
+    // ghost audio, bit-identity at Freeze 0). Never called by
+    // PluginProcessor; default false.
+    void forceUnityShifterActiveForTesting (bool shouldForce) noexcept { unityShifterForcedActive = shouldForce; }
+
 private:
     // Applies pitchShiftSemitones to the main shifter (always the full user
     // value) and formantCorrector, and recomputes unityWeightTarget from
@@ -327,7 +341,33 @@ private:
     // offsets, so sideShift (and with it the Width term) is exactly 0 at
     // full freeze -- the old glided shifter kept a side channel ~28dB below
     // the mid from leftover grain offsets.
+    // Processed only while Freeze is (or is ramping) above 0 since
+    // 2026-10-10 -- see unityShifterActive below; it originally ran every
+    // sample.
     PitchShifter unityShifter;
+
+    // Unity-shifter idle skip (2026-10-10): whether unityShifter was
+    // processed in the last block. process() sets it once per block, true
+    // while that block's freeze ramp start or target (or the crossfade
+    // weight) is above 0; while false, unityShifter is not run at all and
+    // 0.0f stands in for its primary and quadrature outputs (weighted by
+    // exactly 0.0f there, so Freeze 0 stays bit-identical). Measured reason:
+    // running it always cost ~+40-55% engine CPU (processing/audio ~0.037 ->
+    // ~0.052-0.058, Release) for a path that is silent at the default
+    // setting. On the false -> true edge process() calls
+    // unityShifter.reset() first: an idle shifter's delay line still holds
+    // the ~80ms of loop audio from its LAST engagement, and without the
+    // clear a re-engage would replay it (the ghost-audio test in
+    // ShimmerReverbEngineFreezeCrossfadeTests). The accepted cost is a cold
+    // start -- silent for its first ~80ms -- harmless at the current blend
+    // caps (see the comment above unityFeedback in process()). reset()
+    // clears it to false so the next engagement starts clean.
+    bool unityShifterActive = false;
+
+    // Test-only state, see peekUnityShifterOutput()/
+    // forceUnityShifterActiveForTesting().
+    float lastUnityFeedback = 0.0f;
+    bool unityShifterForcedActive = false;
 
     DCBlocker feedbackDcBlocker;
     SafetyLimiter safetyLimiter;
