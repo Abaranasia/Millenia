@@ -7,6 +7,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
 {
     tank.prepare (spec);
     shifter.prepare (spec);
+    unityShifter.prepare (spec);
     feedbackDcBlocker.prepare (spec);
     safetyLimiter.prepare (spec);
     quadratureDcBlocker.prepare (spec);
@@ -14,16 +15,23 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     formantCorrector.prepare (spec);
     loopCapture.prepare (spec);
 
+    // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()): the
+    // unity path is permanently a plain 0-semitone (ratio 1.0) grain delay,
+    // set once here and never changed. Its freeze drift is re-seeded too, so
+    // a re-prepare() while frozen keeps the same dither the main shifter
+    // gets.
+    unityShifter.setPitchShiftSemitones (0.0f);
+    unityShifter.setFreezeAmount (freezeAmount);
+
     // Phase 5: seed the live-settable pitch shift with the same value that
     // used to be a one-time hardcoded constant, so behavior is unchanged
     // until a caller actually calls setPitchShiftSemitones() with something
     // different. Goes through the member (not shifter directly) so a
     // re-prepare() while already frozen (e.g. a host sample-rate change)
-    // re-derives the correct freeze-crossfaded ratio instead of silently
-    // snapping back to the un-crossfaded default -- see
+    // also re-derives the freeze crossfade weight (unityWeight) -- see
     // pitchShiftSemitones' header comment.
     pitchShiftSemitones = defaultPitchShiftSemitones;
-    updateShifterRatio();
+    applyPitchAndFreezeCrossfade();
 
     // "Shimmer Sustain" task (2026-09-06, found by a real test failure):
     // DattorroTank owns its OWN independent maxShimmerBlendWeight member with
@@ -64,21 +72,35 @@ void ShimmerReverbEngine::reset()
 {
     tank.reset();
     shifter.reset();
+    unityShifter.reset();
     feedbackDcBlocker.reset();
     safetyLimiter.reset();
     quadratureDcBlocker.reset();
     freezeLeveler.reset();
     formantCorrector.reset();
     loopCapture.reset();
+
+    // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
+    // comment): unityShifter was just cleared above, so mark it idle --
+    // process() then decides afresh, and if Freeze is already engaged it
+    // takes the idle -> active edge on the next block and starts from this
+    // clean state (one redundant clear of an already-clear buffer).
+    unityShifterActive = false;
+    lastUnityFeedback = 0.0f;
+
+    // Snap, don't ramp, after a reset -- same convention as
+    // DattorroTank::reset()'s Infinite ramp.
+    processedFreezeAmount = freezeAmount;
+    unityWeight = unityWeightTarget;
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
 {
-    // Stored so setFreezeAmount() can recompute the shifter's actual ratio
-    // against the current freeze crossfade without needing this value passed
-    // back in -- see pitchShiftSemitones' header comment.
+    // Stored so applyPitchAndFreezeCrossfade() (shared with prepare()/
+    // setFreezeAmount()) has one source of truth for the main shifter's ratio -- see
+    // pitchShiftSemitones' header comment.
     pitchShiftSemitones = semitones;
-    updateShifterRatio();
+    applyPitchAndFreezeCrossfade();
 }
 
 void ShimmerReverbEngine::setFeedback (float newFeedback)
@@ -129,16 +151,25 @@ void ShimmerReverbEngine::setBypassed (bool shouldBypass)
 void ShimmerReverbEngine::setFreezeAmount (float amount)
 {
     freezeAmount = juce::jlimit (0.0f, 1.0f, amount);
+
+    // Also re-applied per sample inside process() (ramping from the previous
+    // block's value, see processedFreezeAmount's header comment); set here
+    // too so the tank is consistent with the target between blocks.
+    // FreezeLeveler and the shifters' freeze drift stay per-block: neither
+    // measurably contributed to the toggle artifact (disabling the drift
+    // moved T1's 512-sample-block figure by 0.04dB).
     tank.setFreezeAmount (freezeAmount);
     freezeLeveler.setFreezeAmount (freezeAmount);
     shifter.setFreezeAmount (freezeAmount);
+    unityShifter.setFreezeAmount (freezeAmount);
 
-    // Re-derive the shifter's ratio against the just-updated freezeAmount --
-    // PluginProcessor calls setPitchShiftSemitones() then setFreezeAmount()
-    // every block (see pitchShiftSemitones' header comment for why this
-    // crossfade exists at all), so this call is what actually applies each
-    // block's freeze amount rather than lagging one block behind it.
-    updateShifterRatio();
+    // Re-derive the freeze crossfade weight (unityWeight) against the
+    // just-updated freezeAmount -- PluginProcessor calls
+    // setPitchShiftSemitones() then setFreezeAmount() every block (see
+    // pitchShiftSemitones' header comment for why this crossfade exists at
+    // all), so this call is what actually applies each block's freeze amount
+    // rather than lagging one block behind it.
+    applyPitchAndFreezeCrossfade();
 }
 
 void ShimmerReverbEngine::setInfiniteAmount (float newAmount)
@@ -157,45 +188,42 @@ void ShimmerReverbEngine::setLoopLengthMs (float newLoopLengthMs)
     loopCapture.setLoopLengthMs (newLoopLengthMs);
 }
 
-void ShimmerReverbEngine::updateShifterRatio()
+void ShimmerReverbEngine::applyPitchAndFreezeCrossfade()
 {
-    // See pitchShiftCrossfadeCurve's header comment for why this is raised
-    // to a power instead of a plain linear crossfade -- keeps the shift
-    // amount essentially untouched through most of the dial's travel and
-    // only pulls it toward unity near full freeze, while still reaching
-    // EXACTLY 0 semitones (ratio 1.0) at freezeAmount=1.0, same as before.
+    // Freeze = a LEVEL crossfade between two shifters, never a ratio glide
+    // (2026-10-10 -- see freezeUnityCrossfadeCurve's header comment for the
+    // history, including the two 2026-08 curve bugs of the ratio-crossfade
+    // design this replaced). The main shifter always runs at the full user
+    // shift; process() fades its output out and unityShifter's (a 0-semitone
+    // grain delay) in by unityWeight. Nothing ever passes through an
+    // intermediate ratio, so a fast Freeze toggle can no longer produce the
+    // old "chipmunk / DJ-scratch" pitch-bend.
     //
-    // BUG, found and fixed 2026-08-22 (by-ear report: "a pitch variation is
-    // noticeable when moving the freeze dial" -- still present after the
-    // original fix, plus an unrelated-seeming Width loss at high freeze):
-    // this used to be std::pow(1.0f - freezeAmount, pitchShiftCrossfadeCurve)
-    // -- (1-f)^4 -- which is a real arithmetic error, not the curve shape
-    // described above. (1-f)^4 is STEEPEST right at f=0 and FLATTENS out
-    // near f=1: at f=0.5 it evaluates to 0.0625 (94% of the shift already
-    // gone at the HALFWAY point of the dial, not "essentially untouched").
-    // That is the exact opposite of the intended shape, and explains both
-    // symptoms: pitch dropping audibly as soon as the dial leaves 0 (not
-    // concentrated near full freeze), and reduced Width through most of the
-    // range too (Width's sideShift term is the difference between the
-    // primary/quadrature shifted signals -- less actual shift happening
-    // means less spectral difference between them, hence a narrower-sounding
-    // result, independent of anything specific to Width's own code). The
-    // correct shape for "flat near 0, steep drop near 1, exactly 0 at 1" is
-    // 1 - f^4, not (1-f)^4 -- e.g. at f=0.5 this evaluates to 0.9375 (94%
-    // RETAINED, matching what was originally intended/described), still
-    // reaching exactly 0 at f=1.0 (the anti-cascade guarantee is unaffected).
-    const float crossfade = 1.0f - std::pow (freezeAmount, pitchShiftCrossfadeCurve);
-    const float effectiveSemitones = pitchShiftSemitones * crossfade;
-    shifter.setPitchShiftSemitones (effectiveSemitones);
+    // Anti-cascade guarantee unchanged: at freezeAmount=1.0, unityWeight is
+    // exactly 1.0f, so only unshifted content re-enters the near-lossless
+    // frozen loop -- equivalent to the old design's shifter at ratio exactly
+    // 1.0 with the formant corrector in passthrough. Default sound
+    // unchanged: at freezeAmount=0.0f, std::pow(0, 16) is exactly 0.0f, and
+    // process()'s blend reduces to the main path bit-for-bit.
+    //
+    // Computed here, once per setter call (in practice once per block, via
+    // PluginProcessor's smoothedFreeze.skip()), not per sample. This is the
+    // block's TARGET; process() ramps unityWeight to it linearly across the
+    // block (see unityWeightTarget's header comment for why a per-block step
+    // was not enough).
+    unityWeightTarget = std::pow (freezeAmount, freezeUnityCrossfadeCurve);
+
+    shifter.setPitchShiftSemitones (pitchShiftSemitones);
 
     // Chipmunk-mitigation, LPC-based formant correction (see
-    // FormantEnvelopeCorrector.h): keyed to the same EFFECTIVE shift actually
-    // reaching the shifter right now (post freeze crossfade), not the raw
-    // user-facing knob value, so the correction arms/disarms with whatever
-    // shift is really happening -- and stays a bit-identical passthrough at
-    // effectiveSemitones<=0, same convention as every other conditional DSP
-    // stage in this codebase.
-    formantCorrector.setPitchShiftSemitones (effectiveSemitones);
+    // FormantEnvelopeCorrector.h): keyed to the shift actually happening on
+    // the MAIN path, which is now always the full user value (the freeze
+    // crossfade no longer touches the main shifter's ratio). Still a
+    // bit-identical passthrough at semitones<=0, same convention as every
+    // other conditional DSP stage in this codebase. The unity path bypasses
+    // the corrector entirely: a 0-semitone shift has no formant
+    // displacement to correct.
+    formantCorrector.setPitchShiftSemitones (pitchShiftSemitones);
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -222,8 +250,57 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         monoData[i] = monoIn;
     }
 
+    // Freeze per-sample ramps (2026-10-10, see processedFreezeAmount's and
+    // unityWeightTarget's header comments): freezeAmount (for the input mute
+    // and the tank) and the unity crossfade weight both move linearly from
+    // the value the previous block ended on to this block's target, instead
+    // of stepping at the block boundary. When start == target -- always,
+    // outside a Freeze move -- every sample's value is exactly that value
+    // (start + 0.0f * k == start), so constant-freeze behavior, including
+    // freezeAmount=0's default sound, stays bit-identical.
+    const float freezeStart = processedFreezeAmount;
+    const float freezeDelta = freezeAmount - freezeStart;
+    const float unityWeightStart = unityWeight;
+    const float unityWeightDelta = unityWeightTarget - unityWeightStart;
+    const float rampStep = numSamples > 0 ? 1.0f / (float) numSamples : 0.0f;
+
+    // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
+    // comment): decided once per block. Active whenever this block's freeze
+    // ramp starts or ends above 0 -- so a ramp from a non-zero start down to
+    // 0 still runs it for that whole block -- or the crossfade weight does
+    // (redundant: unityWeight is always freezeAmount^16 of the same block
+    // edge, but it makes "the weight is exactly 0.0f on every idle sample"
+    // hold by construction instead of by that invariant). The idle -> active
+    // edge clears unityShifter's delay line and grain state first, so it
+    // cannot replay audio frozen in it since its last engagement.
+    // PitchShifter::reset() keeps pitchRatio (0 semitones, set in prepare()),
+    // freezeAmount (the drift depth, set by setFreezeAmount()) and the
+    // configured delay; it only zeroes buffers and rewinds indices/phases
+    // (juce::dsp::DelayLine::reset() is std::fill + AudioBuffer::clear()),
+    // so it is allocation-free and audio-thread safe, and nothing needs
+    // re-applying afterwards. Only the drift LFO's phase restarts at 0 on
+    // each engagement instead of running in step with `shifter`'s.
+    const bool unityNeeded = unityShifterForcedActive
+                             || processedFreezeAmount > 0.0f || freezeAmount > 0.0f
+                             || unityWeightStart > 0.0f || unityWeightTarget > 0.0f;
+    if (unityNeeded && ! unityShifterActive)
+        unityShifter.reset();
+    unityShifterActive = unityNeeded;
+
     for (size_t i = 0; i < numSamples; ++i)
     {
+        // Last sample lands exactly on the targets, so no float drift carries
+        // into the next block.
+        const bool lastSample = (i + 1 == numSamples);
+        const float rampPosition = rampStep * (float) (i + 1);
+        const float freezeNow = lastSample ? freezeAmount : freezeStart + freezeDelta * rampPosition;
+        const float unityWeightNow = lastSample ? unityWeightTarget : unityWeightStart + unityWeightDelta * rampPosition;
+
+        // Per-sample, not per-block: DattorroTank::processSample() derives
+        // effectiveDecayGain and the shimmer blend cap from freezeAmount on
+        // every sample anyway, so this costs one store.
+        tank.setFreezeAmount (freezeNow);
+
         // Shift the tank's OWN recirculating signal before it re-enters the
         // tank, instead of running a separate parallel feedback path -- this
         // matches shimmer-reverb-architecture.md's documented topology
@@ -233,6 +310,28 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // recirculation.
         float dryFeedback = tank.peekFeedbackSignal();
         float shiftedFeedback = shifter.processSample (dryFeedback);
+
+        // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()).
+        // History: unityShifter first ran EVERY sample, even at
+        // freezeAmount=0.0f where its output is weighted by exactly 0.0f, so
+        // its ~80ms delay line (PitchShifter's baseDelaySamples) would already
+        // hold real tank content when the Freeze toggle sweeps unityWeight up
+        // in 50ms. That cost a second PitchShifter's per-sample work at all
+        // times (engine processing/audio ~0.037 -> ~0.052-0.058 in Release).
+        // Since the same day it only runs while unityShifterActive (see the
+        // per-block decision above): at Freeze 0 it is skipped and 0.0f is
+        // blended at a weight of exactly 0.0f, bit-identical to the always-on
+        // output (golden hash test, checked both ways). Trade-off: each
+        // engagement now starts from a cold (just-reset) unity path, silent
+        // for its first ~80ms. Measured harmless at the current blend caps --
+        // DattorroTank holds the shimmer path to ~1-2% of the loop by the
+        // time unityWeight matters (f > 0.9): T1 and T2 (the level-dip
+        // guard) read the same to 0.01dB at 128 and 512-sample blocks, T3's
+        // 880Hz growth -3.94 -> -3.74dB (see
+        // ShimmerReverbEngineFreezeCrossfadeTests). Revisit if
+        // frozenMaxShimmerBlendWeight or the ^16 curve ever changes.
+        const float unityFeedback = unityShifterActive ? unityShifter.processSample (dryFeedback) : 0.0f;
+        lastUnityFeedback = unityFeedback;
 
         // Chipmunk-mitigation, LPC-based formant correction (see
         // FormantEnvelopeCorrector.h and docs/formant-preserving-pitch-shifter-
@@ -246,6 +345,15 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // shapes exactly the signal that's about to re-enter the tank -- same
         // position in the chain SpectralTiltCompensator occupied.
         shiftedFeedback = formantCorrector.processSample (dryFeedback, shiftedFeedback);
+
+        // Freeze level crossfade, primary path. LINEAR, not equal-power: the
+        // blend's amplitude can never exceed the larger of its two inputs, so
+        // the externalFeedback DattorroTank receives stays exactly as bounded
+        // as with one shifter -- its shimmerWeight + plainWeight == 1
+        // stability argument depends on that. An equal-power blend could
+        // reach ~1.41x on correlated content. Bit-identical at
+        // unityWeightNow == 0.0f: 1.0f * x + 0.0f * y == x for any finite y.
+        shiftedFeedback = (1.0f - unityWeightNow) * shiftedFeedback + unityWeightNow * unityFeedback;
 
         // Phase 4: remove DC/subsonic bias from the recirculating signal
         // before it hits the tanh soft-clip below -- DC removal has to
@@ -289,7 +397,8 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // input must keep layering on top of the never-decaying tail (see
         // setInfiniteAmount()). With Freeze also engaged, this Freeze mute
         // still wins, unchanged.
-        float tankOut = tank.processSample (monoData[i] * (1.0f - freezeAmount), safeFeedback);
+        // freezeNow, not freezeAmount: per-sample ramp, see above the loop.
+        float tankOut = tank.processSample (monoData[i] * (1.0f - freezeNow), safeFeedback);
 
         // Phase 4 stereo decorrelation: everything above this line is
         // unchanged from Phase 3/4's tuned recirculating loop (tank input,
@@ -308,6 +417,14 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // above (dry genuinely is one shared signal between the two grain
         // pools, unlike their actual shifted output).
         quadratureRaw = formantCorrector.processQuadratureSample (quadratureRaw);
+
+        // Same linear freeze crossfade as the primary path, at the same point
+        // in the chain (after formant correction, before DC blocking), so
+        // sideShift below still compares like with like.
+        // 0.0f while idle, same reasoning as unityFeedback above -- the stale
+        // getQuadratureOutput() of an idle shifter is never read.
+        const float unityQuadrature = unityShifterActive ? unityShifter.getQuadratureOutput() : 0.0f;
+        quadratureRaw = (1.0f - unityWeightNow) * quadratureRaw + unityWeightNow * unityQuadrature;
 
         // Own DCBlocker instance -- this class holds per-sample state
         // (previousInput/previousOutput) that would corrupt both signals if
@@ -442,5 +559,11 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
             const float outChannel = dryChannel * (1.0f - effectiveMix) + wetRight * effectiveMix;
             block.setSample ((int) ch, (int) i, outChannel);
         }
+    }
+
+    if (numSamples > 0)
+    {
+        processedFreezeAmount = freezeAmount;
+        unityWeight = unityWeightTarget;
     }
 }
