@@ -2374,3 +2374,398 @@ public:
 };
 
 static ShimmerReverbEngineTests shimmerReverbEngineTests;
+
+//==============================================================================
+// Freeze toggle glide fix (2026-10-10, see docs/shimmer-reverb-implementation-
+// plan.md's Freeze-toggle known issue and ShimmerReverbEngine::
+// applyPitchAndFreezeCrossfade()). Kept as its own test class (same .cpp, so no
+// Projucer resave) purely so it can be run in isolation via Main.cpp's
+// name filter ("FreezeCrossfade") -- ShimmerReverbEngineTests above includes
+// several multi-minute boundedness runs.
+//
+// Shared scenario: steady 440Hz sine into the default engine (+12st, Shimmer
+// Amount 1.0), tail built for prefillSeconds with Freeze off, then Freeze
+// ramped 0 -> 1 exactly the way PluginProcessor does it for the
+// freezeQuickToggle checkbox: a juce::SmoothedValue<float> reset to 0.05s,
+// advanced with skip(blockSize) once per block, its value forwarded through
+// setFreezeAmount() before each process() call.
+class ShimmerReverbEngineFreezeCrossfadeTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineFreezeCrossfadeTests() : juce::UnitTest ("ShimmerReverbEngineFreezeCrossfadeTests", "DSP") {}
+
+    static constexpr double sampleRate = 44100.0;
+    // 128 -> ~17 ramp steps; T1 also runs 512 (a typical host buffer, ~4
+    // steps), where per-block weight steps would click.
+    static constexpr int defaultBlockSize = 128;
+    static constexpr int numChannels = 2;
+    static constexpr double prefillSeconds = 4.0;
+    static constexpr double sineHz = 440.0;
+    static constexpr float sineAmplitude = 0.3f;
+
+    // Returns the mono-summed (0.5 * (L + R)) wet output for the whole run,
+    // plus the raw L/R channels when leftOut/rightOut are given.
+    // rampStartSample is set to the first sample of the block in which the
+    // freeze ramp begins (or would have begun, when doRamp is false).
+    static std::vector<float> runFreezeToggleScenario (bool doRamp, double postSeconds, int& rampStartSample,
+                                                       std::vector<float>* leftOut = nullptr,
+                                                       std::vector<float>* rightOut = nullptr,
+                                                       int blockSize = defaultBlockSize)
+    {
+        ShimmerReverbEngine engine;
+        juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+        engine.prepare (spec);
+        engine.reset();
+
+        juce::SmoothedValue<float> smoothedFreeze;
+        smoothedFreeze.reset (sampleRate, 0.05); // matches PluginProcessor::prepareToPlay()
+        smoothedFreeze.setCurrentAndTargetValue (0.0f);
+
+        const int prefillBlocks = (int) (prefillSeconds * sampleRate / blockSize);
+        const int numBlocks = prefillBlocks + (int) (postSeconds * sampleRate / blockSize);
+        rampStartSample = prefillBlocks * blockSize;
+
+        std::vector<float> wet ((size_t) (numBlocks * blockSize), 0.0f);
+        if (leftOut != nullptr)
+            leftOut->assign (wet.size(), 0.0f);
+        if (rightOut != nullptr)
+            rightOut->assign (wet.size(), 0.0f);
+        juce::AudioBuffer<float> buffer (numChannels, blockSize);
+        const double phaseInc = juce::MathConstants<double>::twoPi * sineHz / sampleRate;
+        double phase = 0.0;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            if (doRamp && b == prefillBlocks)
+                smoothedFreeze.setTargetValue (1.0f);
+
+            engine.setFreezeAmount (smoothedFreeze.skip (blockSize));
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const float s = sineAmplitude * (float) std::sin (phase);
+                phase += phaseInc;
+                for (int ch = 0; ch < numChannels; ++ch)
+                    buffer.setSample (ch, i, s);
+            }
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const auto idx = (size_t) (b * blockSize + i);
+                wet[idx] = 0.5f * (buffer.getSample (0, i) + buffer.getSample (1, i));
+                if (leftOut != nullptr)
+                    (*leftOut)[idx] = buffer.getSample (0, i);
+                if (rightOut != nullptr)
+                    (*rightOut)[idx] = buffer.getSample (1, i);
+            }
+        }
+
+        return wet;
+    }
+
+    // Hann-windowed Goertzel power at `hz` over x[start, start + n).
+    static double goertzelPower (const std::vector<float>& x, int start, int n, double hz)
+    {
+        const double coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * hz / sampleRate);
+        double s1 = 0.0, s2 = 0.0;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const double w = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1));
+            const double s0 = w * (double) x[(size_t) (start + i)] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    }
+
+    // Summed Hann-windowed Goertzel power (dB, arbitrary but fixed reference)
+    // at the INTERMEDIATE pitches a 12st -> 0st ratio glide sweeps every
+    // tank partial through: +3/+6/+9 semitones above both the 440Hz
+    // fundamental and its first shimmer octave (880Hz). A level crossfade
+    // between a +12st and a 0st shifter never synthesizes these; a ratio
+    // glide does. Only ever compared against the same measure on the
+    // no-ramp baseline run, so the reference level cancels out.
+    static float intermediateBandPowerDb (const std::vector<float>& x, int start, int n)
+    {
+        double bandPower = 0.0;
+        for (double base : { sineHz, 2.0 * sineHz })
+            for (int st : { 3, 6, 9 })
+                bandPower += goertzelPower (x, start, n, base * std::pow (2.0, st / 12.0));
+
+        return (float) (10.0 * std::log10 (juce::jmax (1.0e-18, bandPower)));
+    }
+
+    static float rmsDb (const std::vector<float>& x, int start, int n)
+    {
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i)
+            sum += (double) x[(size_t) (start + i)] * (double) x[(size_t) (start + i)];
+        return (float) (20.0 * std::log10 (juce::jmax (1.0e-12, std::sqrt (sum / n))));
+    }
+
+    void runTest() override
+    {
+        beginTest ("T1: a Freeze toggle ramp does not glide the shimmer's pitch through intermediate intervals");
+        {
+            // Measured on the L and R channels separately (what is actually
+            // heard), over short windows covering only the ramp and the
+            // ~40ms after it. Why not the mono sum or the whole frozen tail:
+            // a first version of this test measured the MID channel's
+            // intermediate-pitch energy over 1.4s and could not tell the two
+            // designs apart (excess +9.90dB old vs +9.19dB new) -- at freeze
+            // DattorroTank cuts its shimmer blend to 0.01 (so the in-loop
+            // glide barely reaches the mid) and the frozen tank's own
+            // spectrum differs from the live one regardless of the shifter.
+            // The glide's audible path is the feed-forward Width term
+            // (sideShift = primary - quadrature shifter output, added to L
+            // and subtracted from R), which carries the shifter's output
+            // straight to the speakers, and it is concentrated in the ~5ms
+            // where freezeAmount^16 moves (f = 0.9 -> 1.0 at the end of the
+            // 50ms ramp). A timeline of the old code showed the side channel's
+            // intermediate-pitch energy jumping ~40dB above its steady state
+            // in exactly the windows spanning the ramp's end.
+            //
+            // Run at 128 AND 512-sample blocks: at 512 the first level-
+            // crossfade version still measured +15.75dB, from the per-block
+            // freezeAmount steps in the input mute and DattorroTank (a
+            // zipper, not a glide) -- fixed by ramping those per sample, see
+            // ShimmerReverbEngine::processedFreezeAmount.
+            //
+            // Not run at Shimmer Sustain 0 (shimmer path up to 100% of the
+            // loop): that setting's no-ramp baseline already carries ~25dB
+            // more intermediate-pitch energy from the cascade itself, so the
+            // measure reads ~0dB excess for BOTH designs there -- blind, not
+            // a pass.
+            for (int blockSize : { defaultBlockSize, 512 })
+            {
+                int rampStart = 0;
+                std::vector<float> rampedL, rampedR, baselineL, baselineR;
+                runFreezeToggleScenario (true, 0.5, rampStart, &rampedL, &rampedR, blockSize);
+                int baselineRampStart = 0;
+                runFreezeToggleScenario (false, 0.5, baselineRampStart, &baselineL, &baselineR, blockSize);
+
+                constexpr int windowSize = 2048; // ~46ms, ~21.5Hz bins: 3st steps are >= 83Hz apart here
+                constexpr int hop = 256;
+                const int firstStart = rampStart - windowSize / 2;
+                const int lastStart = rampStart + windowSize / 2; // last window ends ~70ms after the ramp starts
+
+                float worstExcessDb = -200.0f;
+                float worstRampedDb = -200.0f;
+                float worstBaselineDb = -200.0f;
+
+                for (auto* pair : { &rampedL, &rampedR })
+                {
+                    const auto& ramped = *pair;
+                    const auto& baseline = (pair == &rampedL) ? baselineL : baselineR;
+
+                    float rampedWorst = -200.0f;
+                    float baselineWorst = -200.0f;
+                    for (int start = firstStart; start <= lastStart; start += hop)
+                    {
+                        rampedWorst = juce::jmax (rampedWorst, intermediateBandPowerDb (ramped, start, windowSize));
+                        baselineWorst = juce::jmax (baselineWorst, intermediateBandPowerDb (baseline, start, windowSize));
+                    }
+
+                    if (rampedWorst - baselineWorst > worstExcessDb)
+                    {
+                        worstExcessDb = rampedWorst - baselineWorst;
+                        worstRampedDb = rampedWorst;
+                        worstBaselineDb = baselineWorst;
+                    }
+                }
+
+                logMessage ("Block size " + juce::String (blockSize) + ": intermediate-pitch (+3/+6/+9st) energy, worst L/R window around the ramp: ramped="
+                                + juce::String (worstRampedDb, 2) + " dB, no-ramp baseline=" + juce::String (worstBaselineDb, 2)
+                                + " dB -> excess " + juce::String (worstExcessDb, 2) + " dB");
+
+                // Measured 2026-10-10 (RED -> GREEN): old ratio-glide code
+                // +16.76dB (128-sample blocks) / +20.97dB (512) -- FAILS;
+                // level crossfade + per-sample freeze ramps +3.20dB / +4.65dB
+                // -- passes. The residual few dB is ordinary amplitude-
+                // modulation splatter from a 50ms level change, not a pitch
+                // glide. 8dB sits ~3-5dB above the new figures and ~9-13dB
+                // below the old ones.
+                expect (worstExcessDb <= 8.0f, "Block size " + juce::String (blockSize) + ": Freeze ramp injected " + juce::String (worstExcessDb, 2)
+                                                   + " dB of extra intermediate-pitch energy over the no-ramp baseline "
+                                                   "-- the shimmer is gliding in pitch instead of crossfading in level");
+            }
+        }
+
+        beginTest ("T2: wet level stays continuous (no dip) across a Freeze toggle ramp");
+        {
+            // Guards the linear crossfade against a level hole while the main
+            // and unity paths trade places. Measured 2026-10-10, worst 10ms
+            // window vs the 200ms pre-ramp level: old code -0.16dB (128) /
+            // -0.21dB (512), new code -0.17dB / -0.22dB (the pre-ramp
+            // windows themselves already swing -0.19 / -0.21dB). -3dB
+            // threshold per the agreed spec.
+            //
+            // Honest limit: this is a regression guard, not a red test --
+            // the old code never dipped here either. It also could NOT
+            // detect a cold (not-yet-filled) unityShifter: a mutation that
+            // skipped unityShifter.processSample() while its weight was below
+            // 1e-3 produced the same numbers to 0.01dB, because by the time
+            // unityWeight is significant (f > 0.9) DattorroTank has already
+            // capped the whole shimmer path at ~0.01-0.02 of the loop
+            // (frozenMaxShimmerBlendWeight) and unityShifter's own
+            // primary/quadrature pair is identical (sideShift == 0). Running
+            // it every sample stays as a cheap defensive choice -- see
+            // ShimmerReverbEngine::process(). Also not run at Shimmer Sustain
+            // 0: there BOTH designs dip ~-12 to -14dB (vs a -6.5 to -7.3dB
+            // pre-ramp swing), a pre-existing level transition from the
+            // frozen tank collapsing a 100%-shimmer loop to its plain path,
+            // unrelated to this crossfade.
+            for (int blockSize : { defaultBlockSize, 512 })
+            {
+                int rampStart = 0;
+                const auto ramped = runFreezeToggleScenario (true, 1.0, rampStart, nullptr, nullptr, blockSize);
+
+                const int window = (int) (0.010 * sampleRate); // 10ms
+                const int preLen = (int) (0.200 * sampleRate);
+                const float preLevelDb = rmsDb (ramped, rampStart - preLen, preLen);
+
+                float preMinDb = 200.0f;
+                for (int start = rampStart - preLen; start + window <= rampStart; start += window)
+                    preMinDb = juce::jmin (preMinDb, rmsDb (ramped, start, window) - preLevelDb);
+
+                float minDb = 200.0f;
+                const int end = rampStart + (int) (0.5 * sampleRate);
+                for (int start = rampStart; start + window <= end; start += window)
+                    minDb = juce::jmin (minDb, rmsDb (ramped, start, window) - preLevelDb);
+
+                logMessage ("Block size " + juce::String (blockSize) + ": wet RMS across Freeze ramp (10ms windows, relative to 200ms pre-ramp level "
+                                + juce::String (preLevelDb, 2) + " dBFS): pre-ramp min=" + juce::String (preMinDb, 2)
+                                + " dB, ramp + 500ms min=" + juce::String (minDb, 2) + " dB");
+
+                expect (minDb >= -3.0f, "Block size " + juce::String (blockSize) + ": wet level dipped " + juce::String (-minDb, 2)
+                                             + " dB below the pre-ramp level during the Freeze toggle ramp");
+            }
+        }
+
+        beginTest ("T3: at Freeze = 1.0 the held loop does not cascade upward in pitch");
+        {
+            // Anti-cascade guarantee: at freeze=1 nothing pitch-shifted may
+            // keep re-entering the near-lossless loop, or every pass would
+            // move more of the 440Hz drone up to 880Hz (and on up). No
+            // existing test covered this -- the full-engine Freeze tests
+            // only assert boundedness. Invariant used: with the input muted
+            // and decay <= 1, NO partial of the held loop may GROW; only a
+            // shifter still feeding the loop can create new 880Hz energy.
+            //
+            // Why 60s and the 880Hz band: DattorroTank already caps the
+            // shimmer path at frozenMaxShimmerBlendWeight=0.01 of the loop
+            // at full freeze, so even a cascading shifter only feeds ~1% per
+            // pass -- the growth is slow. Measured 2026-10-10 (880Hz band
+            // energy, seconds 58.6-59.4 minus 0.6-1.4 after the ramp):
+            //   level crossfade (this code): -3.9dB  (decays -- passes)
+            //   old ratio crossfade:         -2.1dB  (decays -- passes)
+            //   mutation, unityWeight forced to 0 (main shifter stays at
+            //   +12st in the frozen loop):   +2.8dB  (grows -- FAILS)
+            // An earlier version of this test used a first-difference
+            // brightness proxy over 10s; it could not see that mutation at
+            // all (439.8 -> 440.0Hz either way: the held drone is ~84dB
+            // 440Hz-dominated), so it was replaced.
+            int rampStart = 0;
+            constexpr double holdSeconds = 60.0;
+            const auto held = runFreezeToggleScenario (true, holdSeconds, rampStart);
+
+            constexpr int n = 8192;
+            auto bandDb = [&] (int start, double hz)
+            {
+                double p = 0.0;
+                for (int k = 0; k < 4; ++k) // ~0.74s: 4 x 8192 Hann windows
+                    p += goertzelPower (held, start + k * n, n, hz);
+                return (float) (10.0 * std::log10 (juce::jmax (1.0e-18, p)));
+            };
+
+            const int oneSecond = (int) sampleRate;
+            const int earlyStart = rampStart + 1 * oneSecond - 2 * n;
+            const int lateStart = rampStart + 59 * oneSecond - 2 * n;
+
+            const float early880 = bandDb (earlyStart, 2.0 * sineHz);
+            const float late880 = bandDb (lateStart, 2.0 * sineHz);
+            const float early440 = bandDb (earlyStart, sineHz);
+            const float late440 = bandDb (lateStart, sineHz);
+            const float growthDb = late880 - early880;
+
+            logMessage ("Freeze=1 held loop, 880Hz band: t=1s " + juce::String (early880, 2) + " dB, t=59s "
+                            + juce::String (late880, 2) + " dB (growth " + juce::String (growthDb, 2)
+                            + " dB); 440Hz band: " + juce::String (early440, 2) + " -> " + juce::String (late440, 2) + " dB");
+
+            expect (growthDb <= 1.0f, "880Hz content of the frozen loop GREW by " + juce::String (growthDb, 2)
+                                          + " dB over 58s with the input muted -- pitch-shifted content is still "
+                                          "cascading upward through the loop at freeze=1");
+        }
+
+        beginTest ("default (Freeze 0) output is bit-identical to the pre-crossfade engine");
+        {
+            // Golden FNV-1a hash of the raw float bits of the default engine's
+            // 4.5s sine output at freezeAmount=0 (runFreezeToggleScenario with
+            // the toggle never engaged). 2026-10-10: be7b4e1487c0ce8b with BOTH
+            // the old ratio-glide code and the new level crossfade -- the
+            // evidence that the default sound is bit-identical at Freeze 0.
+            // Promoted from a logged DIAGNOSTIC to an assertion the same day so
+            // a regression in the default path fails the suite. Verified
+            // identical in the Debug AND Release test builds (MSVC, VS2026,
+            // x64), so it is asserted unconditionally, no per-config guard.
+            // Update it ONLY deliberately: an intentional change to the
+            // default-path DSP, or a compiler/toolchain change, can
+            // legitimately move it -- confirm the new sound is intended (by
+            // ear or by a targeted test) before replacing the value, and record
+            // why here.
+            int rampStart = 0;
+            const auto wet = runFreezeToggleScenario (false, 0.5, rampStart);
+            juce::uint64 hash = 1469598103934665603ull;
+            for (float v : wet)
+            {
+                juce::uint32 bits;
+                std::memcpy (&bits, &v, sizeof (bits));
+                hash = (hash ^ bits) * 1099511628211ull;
+            }
+            logMessage ("Default-settings 4.5s sine output FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
+
+            constexpr juce::uint64 expectedDefaultHash = 0xbe7b4e1487c0ce8bull;
+            expect (hash == expectedDefaultHash,
+                    "Default (Freeze 0) output fingerprint changed: got "
+                        + juce::String::toHexString ((juce::int64) hash) + ", expected "
+                        + juce::String::toHexString ((juce::int64) expectedDefaultHash)
+                        + " -- the default-path DSP is no longer bit-identical");
+        }
+
+        beginTest ("DIAGNOSTIC: engine real-time factor at default settings");
+        {
+            // 2026-10-10, Release, this dev machine: ~0.037 before the second
+            // (unity) PitchShifter, ~0.052-0.058 after (~+40-55%) -- still far
+            // under the ~0.15 budget juce-plugin-testing sets for this
+            // reverb. Logged only: wall-clock numbers are machine-dependent.
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            juce::AudioBuffer<float> buffer (numChannels, 512);
+            juce::Random random (424242);
+            constexpr int numBlocks = 860; // ~10s
+
+            const double startMs = juce::Time::getMillisecondCounterHiRes();
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                    for (int i = 0; i < 512; ++i)
+                        buffer.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+            }
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+            const double audioMs = 1000.0 * numBlocks * 512 / sampleRate;
+            logMessage ("Engine: " + juce::String (audioMs, 0) + "ms audio in " + juce::String (elapsedMs, 1)
+                            + "ms -> processing/audio = " + juce::String (elapsedMs / audioMs, 3));
+        }
+    }
+};
+
+static ShimmerReverbEngineFreezeCrossfadeTests shimmerReverbEngineFreezeCrossfadeTests;

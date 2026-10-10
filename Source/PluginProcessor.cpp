@@ -141,11 +141,13 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // unwanted for a toggle -- the user wants a clean swap between "live"
     // and "frozen" output, not an audible pitch-bend transition of any
     // duration, so stretching the transition out just prolongs an
-    // unwanted characteristic. See docs/shimmer-reverb-implementation-
-    // plan.md's Phase 10 section for the real fix this points toward (a
-    // buffer capture-and-loop redesign that crossfades OUTPUT, not the
-    // shifter's own pitch ratio) and Engram topic_key
-    // millenia/freeze-toggle-pitch-artifact for the full investigation.
+    // unwanted characteristic. FIXED 2026-10-10 in the engine, not here:
+    // Freeze is now a LEVEL crossfade from the main shifter to a 0-semitone
+    // unityShifter (see ShimmerReverbEngine::
+    // applyPitchAndFreezeCrossfade()), and the
+    // engine ramps freeze per sample inside each block, so this block-rate
+    // 0.05s ramp no longer steps audibly on large buffers. Engram topic_key
+    // millenia/freeze-toggle-pitch-artifact has the full investigation.
     smoothedFreeze.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
