@@ -577,6 +577,279 @@ public:
                             ? (currentRangeSwing / fullUsefulSwing) * 100.0f : 0.0f, 1)
                             + "% of the brightness swing between the default and the documented-dull reference");
         }
+
+        //==============================================================================
+        // Infinite mode (see docs/shimmer-reverb-implementation-plan.md's
+        // "Infinite mode" section and DattorroTank::setInfiniteAmount()):
+        // unlike Freeze, Infinite keeps feeding fresh input into a tank that
+        // never decays, so new material layers on top of the sustained tail.
+        // T2-T4 below zero shimmerFeedbackGain on purpose: the single-arg
+        // processSample() overload always passes externalFeedback=0.0f, so
+        // the class default (shimmerFeedbackGain=1.0f, i.e. shimmerWeight=0.85)
+        // would leave only a 0.15 plainWeight share of the loop recirculating
+        // -- a tail that dies within a second no matter what Infinite does.
+        // Zeroing it gives plainWeight=1.0, the exact "bare tank, unity decay,
+        // no limiter" configuration the header documents as unstable without
+        // Infinite's modulation + level controller, i.e. the worst case.
+
+        beginTest ("Infinite OFF is bit-identical: an untouched tank matches an explicit setInfiniteAmount(0.0f) sample-for-sample");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int numBlocks = (int) (10.0 * sampleRate / blockSize); // 10s
+
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+
+            DattorroTank untouchedTank;
+            untouchedTank.prepare (spec);
+            untouchedTank.reset();
+
+            DattorroTank explicitOffTank;
+            explicitOffTank.prepare (spec);
+            explicitOffTank.reset();
+            explicitOffTank.setInfiniteAmount (0.0f);
+
+            juce::AudioBuffer<float> untouchedBuffer (numChannels, blockSize);
+            juce::AudioBuffer<float> explicitOffBuffer (numChannels, blockSize);
+            juce::Random random (31415926);
+
+            int numMismatches = 0;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* a = untouchedBuffer.getWritePointer (ch);
+                    auto* e = explicitOffBuffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float sample = random.nextFloat() * 0.6f - 0.3f; // uniform in [-0.3, 0.3]
+                        a[i] = sample;
+                        e[i] = sample;
+                    }
+                }
+
+                juce::dsp::AudioBlock<float> untouchedBlock (untouchedBuffer);
+                juce::dsp::AudioBlock<float> explicitOffBlock (explicitOffBuffer);
+                untouchedTank.process (untouchedBlock);
+                explicitOffTank.process (explicitOffBlock);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* a = untouchedBuffer.getReadPointer (ch);
+                    auto* e = explicitOffBuffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        if (a[i] != e[i])
+                            ++numMismatches;
+                }
+            }
+
+            expectEquals (numMismatches, 0, "setInfiniteAmount(0.0f) changed the output -- Infinite OFF must be bit-identical");
+        }
+
+        beginTest ("Infinite: continuous fresh input stays finite and bounded (peak <= 2.0) over several minutes of sustained input");
+        {
+            // Deliberately a much tighter bound than the 10.0 every other
+            // boundedness test in this file uses: unity decay plus fresh input
+            // grows slowly, and a 10.0 bound would let several minutes of that
+            // growth hide. 2.0 is what the in-loop level controller has to hold.
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr double durationSeconds = 180.0; // 3 minutes, same as the freeze-boundedness test above
+            constexpr int numBlocks = (int) (durationSeconds * sampleRate / blockSize);
+
+            DattorroTank tank;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            tank.prepare (spec);
+            tank.reset();
+            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, see the section comment above
+            tank.setInfiniteAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (27182818);
+
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+            int firstOverBoundBlock = -1;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getWritePointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                        data[i] = random.nextFloat() * 0.6f - 0.3f;
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                tank.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* data = buffer.getReadPointer (ch);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        if (! std::isfinite (data[i]))
+                            ++numNonFinite;
+                        else
+                            maxPeak = juce::jmax (maxPeak, std::abs (data[i]));
+                    }
+                }
+
+                if (firstOverBoundBlock < 0 && maxPeak > 2.0f)
+                    firstOverBoundBlock = b;
+            }
+
+            logMessage ("Infinite tank, 180s continuous noise: peak=" + juce::String (maxPeak, 4)
+                            + (firstOverBoundBlock >= 0 ? ", first exceeded 2.0 at "
+                                   + juce::String (firstOverBoundBlock * blockSize / sampleRate, 1) + "s" : juce::String()));
+
+            expectEquals (numNonFinite, 0, "Infinite tank produced non-finite samples");
+            expect (maxPeak <= 2.0f, "Infinite tank exceeded the 2.0 bound (peak: " + juce::String (maxPeak, 4) + ")");
+        }
+
+        // Shared by the two tail tests below: fills every channel with the
+        // same fixed-seed +-0.3 uniform noise the rest of this file uses.
+        auto fillNoise = [] (juce::AudioBuffer<float>& buffer, juce::Random& random)
+        {
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            {
+                auto* data = buffer.getWritePointer (ch);
+                for (int i = 0; i < buffer.getNumSamples(); ++i)
+                    data[i] = random.nextFloat() * 0.6f - 0.3f;
+            }
+        };
+
+        beginTest ("Infinite: tail does not decay -- last second of 30s silence is within 3dB of seconds 3-4");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+            constexpr int burstBlocks = 2 * blocksPerSecond;
+            constexpr int silenceBlocks = 30 * blocksPerSecond;
+            constexpr int totalBlocks = burstBlocks + silenceBlocks;
+
+            DattorroTank tank;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            tank.prepare (spec);
+            tank.reset();
+            tank.setShimmerFeedbackGain (0.0f);
+            tank.setInfiniteAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (16180339);
+
+            double earlySumSquares = 0.0, lateSumSquares = 0.0;
+            int earlyCount = 0, lateCount = 0;
+
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                if (b < burstBlocks)
+                    fillNoise (buffer, random);
+                else
+                    buffer.clear();
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                tank.process (block);
+
+                const bool inEarlyWindow = b >= 3 * blocksPerSecond && b < 4 * blocksPerSecond;
+                const bool inLateWindow  = b >= totalBlocks - blocksPerSecond;
+
+                if (inEarlyWindow || inLateWindow)
+                {
+                    auto* data = buffer.getReadPointer (0);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const double sq = (double) data[i] * (double) data[i];
+                        if (inEarlyWindow) { earlySumSquares += sq; ++earlyCount; }
+                        else               { lateSumSquares += sq;  ++lateCount; }
+                    }
+                }
+            }
+
+            const float earlyRms = (float) std::sqrt (earlySumSquares / (double) earlyCount);
+            const float lateRms  = (float) std::sqrt (lateSumSquares / (double) lateCount);
+            const float changeDb = (earlyRms > 0.0f && lateRms > 0.0f)
+                                       ? 20.0f * std::log10 (lateRms / earlyRms) : -999.0f;
+
+            logMessage ("Infinite tail: RMS seconds 3-4=" + juce::String (earlyRms, 5) + ", last second (31-32)="
+                            + juce::String (lateRms, 5) + ", change=" + juce::String (changeDb, 2) + "dB");
+
+            expect (std::isfinite (earlyRms) && std::isfinite (lateRms), "Non-finite RMS");
+            expect (earlyRms > 1.0e-3f, "Infinite tail was already near-silent at seconds 3-4 (RMS " + juce::String (earlyRms, 6) + ")");
+            expect (std::abs (changeDb) <= 3.0f, "Infinite tail drifted by " + juce::String (changeDb, 2)
+                                                     + "dB over 28s (bound: +-3dB)");
+        }
+
+        beginTest ("Infinite: new input layers on top of the sustained tail instead of being muted");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            constexpr int numChannels = 2;
+            constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
+
+            // 0-2s burst, 2-10s silence (tail sustains), 10-11s second burst,
+            // 11-12s silence. Sustained RMS measured 9-10s, "after" RMS 11-12s
+            // -- both windows are silence-input, so the only way the second
+            // can be louder is if the second burst actually entered the loop.
+            constexpr int firstBurstEnd = 2 * blocksPerSecond;
+            constexpr int secondBurstStart = 10 * blocksPerSecond;
+            constexpr int secondBurstEnd = 11 * blocksPerSecond;
+            constexpr int totalBlocks = 12 * blocksPerSecond;
+
+            DattorroTank tank;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            tank.prepare (spec);
+            tank.reset();
+            tank.setShimmerFeedbackGain (0.0f);
+            tank.setInfiniteAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (14142135);
+
+            double beforeSumSquares = 0.0, afterSumSquares = 0.0;
+            int beforeCount = 0, afterCount = 0;
+
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                if (b < firstBurstEnd || (b >= secondBurstStart && b < secondBurstEnd))
+                    fillNoise (buffer, random);
+                else
+                    buffer.clear();
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                tank.process (block);
+
+                const bool inBefore = b >= secondBurstStart - blocksPerSecond && b < secondBurstStart;
+                const bool inAfter  = b >= secondBurstEnd;
+
+                if (inBefore || inAfter)
+                {
+                    auto* data = buffer.getReadPointer (0);
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const double sq = (double) data[i] * (double) data[i];
+                        if (inBefore) { beforeSumSquares += sq; ++beforeCount; }
+                        else          { afterSumSquares += sq;  ++afterCount; }
+                    }
+                }
+            }
+
+            const float beforeRms = (float) std::sqrt (beforeSumSquares / (double) beforeCount);
+            const float afterRms  = (float) std::sqrt (afterSumSquares / (double) afterCount);
+
+            logMessage ("Infinite layering: sustained RMS before second burst (9-10s)=" + juce::String (beforeRms, 5)
+                            + ", RMS just after it (11-12s)=" + juce::String (afterRms, 5)
+                            + " (" + juce::String (20.0f * std::log10 (juce::jmax (afterRms, 1.0e-9f) / juce::jmax (beforeRms, 1.0e-9f)), 2) + "dB)");
+
+            expect (std::isfinite (beforeRms) && std::isfinite (afterRms), "Non-finite RMS");
+            expect (afterRms > beforeRms, "Second burst did not raise the sustained level (before "
+                                              + juce::String (beforeRms, 5) + ", after " + juce::String (afterRms, 5)
+                                              + ") -- Infinite must not mute fresh input");
+        }
     }
 };
 

@@ -115,6 +115,24 @@ public:
     // the decay-pinning half of the freeze mechanism.
     void setFreezeAmount (float newFreezeAmount);
 
+    // Infinite mode (see docs/shimmer-reverb-implementation-plan.md's
+    // "Infinite mode" section): 0..1 target for a tail that never decays
+    // while fresh input keeps layering on top -- unlike Freeze, nothing here
+    // (or in ShimmerReverbEngine) mutes the input. Unlike setFreezeAmount(),
+    // this arrives RAW (PluginProcessor forwards the bool parameter as a
+    // hard 0/1) and is ramped sample-accurately inside this class over
+    // infiniteRampSeconds, same "DSP owns its own ramp" pattern as
+    // LoopCapture::setLoopFreezeAmount(). Not clamped here (same convention
+    // as every other setter in this class); ShimmerReverbEngine clamps.
+    // Drives three coordinated mechanisms in processSample(), every one of
+    // them gated so infinite == 0.0f is bit-identical to the pre-Infinite
+    // tank (DattorroTankTests.cpp's "Infinite OFF is bit-identical" test):
+    //   a. decay pin: effectiveDecayGain crossfades toward infiniteDecayGain
+    //      (exactly 1.0, i.e. no loss per pass).
+    //   b. allpass1 read-delay modulation in both branches -- see modDepthMs.
+    //   c. an in-loop level controller on the cross-feed -- see levelCeiling.
+    void setInfiniteAmount (float newInfiniteAmount);
+
     // Read-only, non-destructive peek at the tank's own recirculating
     // signal (branch B's output from the last processSample() call) without
     // consuming or mutating anything. Callable any time after
@@ -136,23 +154,49 @@ private:
     // ScratchSchroederTank::processAllpass, but with a per-stage feedback
     // gain field since the diffuser and tank stages here each use different
     // gains (rather than one shared constant).
-    struct AllpassStage
+    template <typename DelayType>
+    struct AllpassStageOf
     {
-        DelayLineType delayLine;
+        DelayType delayLine;
         float feedback = 0.0f;
     };
+
+    using AllpassStage = AllpassStageOf<DelayLineType>;
+
+    // Infinite mode (see modDepthMs): each branch's allpass1 is the one
+    // stage whose read delay gets modulated, and it uses first-order Thiran
+    // (allpass) interpolation instead of Lagrange3rd -- Dattorro's own paper
+    // recommends allpass interpolation for exactly these modulated tank
+    // allpasses. Measured reason (DattorroTankTests.cpp's "Infinite: tail
+    // does not decay" test, 2s burst then 30s silence, RMS of the last
+    // second vs seconds 3-4): with Lagrange3rd every fractional read is a
+    // mild lowpass (at a 0.5-sample fraction it nulls Nyquist entirely), so
+    // a loop that otherwise loses nothing per pass bled high end on every
+    // recirculation: -3.01dB at modDepthMs=0.5, and still -2.61dB even at
+    // a 0.01ms (~0.44-sample) depth, vs -0.27dB with modulation off --
+    // right at the test's 3dB bound regardless of depth. Thiran's magnitude
+    // response is exactly flat, so the modulation only moves phase. At an
+    // integer delay (Infinite off) JUCE's Thiran read returns
+    // value2 + 0*(...) -- the same buffer sample Lagrange3rd's frac==1 read
+    // returns -- so the default sound is unchanged (verified bit-for-bit
+    // against the pre-Infinite tank during development, see the plan doc).
+    // The rate here (<= ~0.0022 samples of delay change per sample) is far
+    // below the "fast modulation" regime JUCE's Thiran docs warn about.
+    using ModulatedDelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran>;
+    using ModulatedAllpassStage = AllpassStageOf<ModulatedDelayLineType>;
 
     // One cross-feeding tank branch: allpass -> delay -> damping -> allpass -> delay.
     struct TankBranch
     {
-        AllpassStage allpass1;
+        ModulatedAllpassStage allpass1;
         DelayLineType delay1;
         float dampState = 0.0f;
         AllpassStage allpass2;
         DelayLineType delay2;
     };
 
-    float processAllpass (float input, AllpassStage& stage);
+    template <typename Stage>
+    float processAllpass (float input, Stage& stage);
     float processDelay (float input, DelayLineType& delay);
     float processBranch (float input, TankBranch& branch);
 
@@ -376,6 +420,94 @@ private:
     // stability test for the actual measured numbers).
     static constexpr float frozenDecayGain = 0.999f;
 
+    //==============================================================================
+    // Infinite mode (see setInfiniteAmount()). Every piece below is scaled
+    // by the ramped infinite amount and collapses to an exact no-op at 0.0f,
+    // so the default sound stays bit-identical (not merely "close").
+
+    // Ramp time for the raw 0/1 toggle, sample-accurate regardless of host
+    // block size (same reasoning as LoopCapture::loopFreezeRampSeconds; long
+    // enough here that the decay/modulation/level changes glide instead of
+    // stepping).
+    static constexpr double infiniteRampSeconds = 0.2;
+
+    // (a) Unlike frozenDecayGain's deliberate 0.999f, Infinite pins decay to
+    // EXACTLY 1.0: frozenDecayGain's "strict contraction" argument does not
+    // apply here, because energy is bounded by the level controller (c)
+    // instead of by the decay gain, and anything below 1.0 would make the
+    // tail fade, which is exactly what Infinite must not do.
+    static constexpr float infiniteDecayGain = 1.0f;
+
+    // (b) The bare tank at near-unity decay with plainWeight ~1.0 is
+    // empirically unstable on long runs (peak > 10 within ~1 minute, see
+    // frozenMaxShimmerBlendWeight's comment) -- the suspected cause is an
+    // unbroken, perfectly static resonance: with fixed integer delays the
+    // figure-eight loop's modes sit at exactly the same frequencies every
+    // pass, so any energy that lands on one keeps reinforcing in phase.
+    // Dattorro's original design modulates the tank allpasses for exactly
+    // this reason (his paper calls for ~16 samples' excursion at 29.8 kHz,
+    // i.e. ~0.5 ms), which smears those modes so no single one can build up
+    // coherently. Applied to allpass1 of BOTH branches with incommensurate
+    // rates and a 90-degree phase offset so the two branches never detune
+    // in lockstep. The delay lines are Lagrange3rd, so the fractional,
+    // per-sample-changing read delay is interpolated smoothly.
+    static constexpr float modDepthMs = 0.5f;
+    static constexpr float modRateHzA = 0.5f;
+    static constexpr float modRateHzB = 0.7f;
+    static constexpr float modPhaseOffsetB = juce::MathConstants<float>::halfPi; // 90 degrees
+
+    // (c) Unity decay plus continuous fresh input is a pure integrator of
+    // energy -- every new sample adds to a loop that never loses anything,
+    // so the level grows without limit (the 10.0-bound tests elsewhere in
+    // this file would only catch it minutes late). An envelope follower on
+    // |feedbackFromB| (fast-ish attack, slow release, so it reacts to a
+    // loud new input but does not pump on the tail's own peaks) drives a
+    // target gain min(1, levelCeiling / env), itself one-pole smoothed over
+    // levelGainSmoothingSeconds, which multiplies BOTH cross-feed terms.
+    // Below the ceiling the gain is exactly 1.0 (truly infinite tail);
+    // above it the loop becomes a gentle leveler instead of an integrator.
+    // Not the in-loop SafetyLimiter (memoryless soft-clip, which would add
+    // distortion every pass at this sustained level); this is a slow
+    // automatic gain control, transparent to the waveform.
+    //
+    // Tuned 2026-10-02 against the Infinite tests (T2 = DattorroTankTests'
+    // 180s continuous-noise bound, plainWeight=1.0; T3 = 2s burst then 30s
+    // silence, last second vs seconds 3-4; T4 = second burst raises the
+    // sustained level; T5 = ShimmerReverbEngineTests' 180s full-engine
+    // bound; all at 44.1kHz, 512-sample blocks, +-0.3 uniform noise; both
+    // T2 and T5 must stay <= 2.0). Format: ceiling/attack/release/gain-tau,
+    // modDepthMs -> T2 peak (first 10s, after 10s) | T3 | T4 | T5 peak.
+    // With the allpass1 lines still on Lagrange3rd interpolation:
+    //   0.5/0.05/0.5/0.1,  0.5   -> 2.677, 3.143 | -3.01dB | +2.62dB  (FAIL T2, T3 at the bound)
+    //   0.5/0.01/0.5/0.02, 0.5   -> 2.120, 2.429 | -3.01dB | +2.62dB  (faster controller: T3 unchanged)
+    //   0.5/0.05/0.5/0.1,  0.0   -> 2.662, 2.863 | -0.27dB | +1.77dB  (no modulation: T3 fine -> loss is the interpolation)
+    //   0.5/0.05/0.5/0.1,  0.25  -> 2.485, 3.236 | -2.92dB | +2.54dB
+    //   0.5/0.05/0.5/0.1,  0.1   -> 2.784, 3.062 | -2.85dB | +2.58dB
+    //   0.5/0.05/0.5/0.1,  0.05  -> 2.784, 3.098 | -2.93dB | +2.58dB
+    //   0.5/0.05/0.5/0.1,  0.02  -> 2.490, 3.012 | -2.63dB | +2.50dB
+    //   0.5/0.05/0.5/0.1,  0.01  -> 2.375, 3.152 | -2.61dB | +2.42dB
+    //   0.3/0.05/0.5/0.1,  0.5   -> 1.675, 2.166 | -3.10dB | +2.96dB
+    //   0.3/0.01/0.5/0.02, 0.5   -> 1.307, 1.832 | -3.06dB | +3.16dB
+    //   0.25/0.01/0.5/0.02, 0.5  -> 1.174, 1.616 | -3.10dB | +3.43dB
+    // i.e. no depth or time constant got T3 off the 3dB bound -- fixed
+    // structurally instead by switching allpass1 to Thiran (see
+    // ModulatedDelayLineType). After that switch:
+    //   0.5/0.05/0.5/0.1,  0.5   -> 2.343, 3.037 | -0.23dB | +1.74dB | T5 2.689  (FAIL T2, T5)
+    //   0.3/0.05/0.5/0.1,  0.5   -> 1.591, 1.884 | -0.32dB | +1.90dB | T5 1.831  (passes, ~6-9% margin)
+    //   0.3/0.01/0.5/0.02, 0.5   -> 1.324, 1.576 | -0.23dB | +1.01dB
+    //   0.25/0.01/0.5/0.02, 0.5  -> 1.214, 1.405 | -0.22dB | +1.42dB
+    //   0.25/0.05/0.5/0.1, 0.5   -> 1.409, 1.677 | -0.30dB | +2.34dB | T5 1.644  (CHOSEN)
+    //   0.2/0.05/0.5/0.1,  0.5   -> 1.299, 1.457 | -0.29dB | +2.70dB | T5 1.378
+    // 0.25 keeps the specified time constants and depth, gives ~16-18%
+    // margin under 2.0 on both long tests, and is only ~2dB quieter than
+    // 0.2 would have been; 0.2 was the safer-but-quieter alternative.
+    // Peak-to-ceiling ratio is ~6.5x because levelCeiling bounds the mean
+    // |feedbackFromB|, while the output sums seven taps on top of that.
+    static constexpr float levelCeiling = 0.25f;
+    static constexpr float levelAttackSeconds = 0.05f;
+    static constexpr float levelReleaseSeconds = 0.5f;
+    static constexpr float levelGainSmoothingSeconds = 0.1f;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -413,6 +545,22 @@ private:
     // effectiveDecayGain equals the live decayGain exactly, i.e. no
     // behavior change until a caller actually engages Freeze.
     float freezeAmount = 0.0f;
+
+    // Infinite mode state (see setInfiniteAmount() and the infinite*/mod*/
+    // level* constants above). All reset in prepare()/reset().
+    juce::SmoothedValue<float> smoothedInfiniteAmount;
+    float allpass1BaseDelayA = 0.0f;         // fixed, unmodulated allpass1 delays in samples
+    float allpass1BaseDelayB = 0.0f;
+    float modDepthSamples = 0.0f;
+    float modPhaseA = 0.0f;                  // radians; B starts at modPhaseOffsetB
+    float modPhaseB = 0.0f;
+    float modPhaseIncrementA = 0.0f;
+    float modPhaseIncrementB = 0.0f;
+    float levelEnvelope = 0.0f;
+    float levelGain = 1.0f;
+    float levelAttackCoeff = 0.0f;
+    float levelReleaseCoeff = 0.0f;
+    float levelGainCoeff = 0.0f;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the

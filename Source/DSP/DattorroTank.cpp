@@ -30,21 +30,49 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     outputTapAAllpass2Samples = msToSamples (outputTapAAllpass2Ms);
     outputTapADelay2Samples   = msToSamples (outputTapADelay2Ms);
 
+    // Infinite mode (see setInfiniteAmount() and the header's infinite*/
+    // mod*/level* constants). prepareBranch() above already gave both
+    // allpass1 lines enough headroom for +modDepthSamples; their configured
+    // (unmodulated) delay is captured here straight from the line itself so
+    // processSample()'s "base + 0.0f" at infinite == 0 re-applies exactly the
+    // same value setDelay() was given -- bit-identical by construction.
+    allpass1BaseDelayA = branchA.allpass1.delayLine.getDelay();
+    allpass1BaseDelayB = branchB.allpass1.delayLine.getDelay();
+    modDepthSamples = msToSamples (modDepthMs);
+    modPhaseIncrementA = juce::MathConstants<float>::twoPi * modRateHzA / (float) spec.sampleRate;
+    modPhaseIncrementB = juce::MathConstants<float>::twoPi * modRateHzB / (float) spec.sampleRate;
+
+    auto onePoleCoeff = [&spec] (float seconds) { return (float) std::exp (-1.0 / ((double) seconds * spec.sampleRate)); };
+    levelAttackCoeff  = onePoleCoeff (levelAttackSeconds);
+    levelReleaseCoeff = onePoleCoeff (levelReleaseSeconds);
+    levelGainCoeff    = onePoleCoeff (levelGainSmoothingSeconds);
+
+    // reset(sampleRate, ramp) snaps the current value to the existing
+    // target, so a caller's setInfiniteAmount() survives a re-prepare (e.g.
+    // a host sample-rate change) -- ShimmerReverbEngine::prepare() re-seeds
+    // it anyway, mirroring its shimmerSustain re-seed.
+    smoothedInfiniteAmount.reset (spec.sampleRate, infiniteRampSeconds);
+
     reset();
 }
 
 void DattorroTank::prepareBranch (TankBranch& branch, const juce::dsp::ProcessSpec& monoSpec,
                                    float allpass1Ms, float delay1Ms, float allpass2Ms, float delay2Ms)
 {
-    auto sizeDelay = [&monoSpec] (DelayLineType& delay, float delayMs)
+    auto sizeDelay = [&monoSpec] (auto& delay, float delayMs, int extraHeadroomSamples = 0)
     {
         auto delayInSamples = juce::roundToInt (delayMs * 0.001 * monoSpec.sampleRate);
-        delay.setMaximumDelayInSamples (delayInSamples + 1);
+        delay.setMaximumDelayInSamples (delayInSamples + 1 + extraHeadroomSamples);
         delay.prepare (monoSpec);
         delay.setDelay ((float) delayInSamples);
     };
 
-    sizeDelay (branch.allpass1.delayLine, allpass1Ms);
+    // Infinite mode modulates allpass1's read delay by up to +modDepthMs
+    // (see processSample()), so its maximum must cover delay + depth. A
+    // larger buffer does not change what any read returns (reads are
+    // relative to the write pointer), so the default sound is unaffected.
+    const int modHeadroomSamples = (int) std::ceil (modDepthMs * 0.001 * monoSpec.sampleRate) + 1;
+    sizeDelay (branch.allpass1.delayLine, allpass1Ms, modHeadroomSamples);
     branch.allpass1.feedback = branchAllpass1Feedback;
 
     sizeDelay (branch.delay1, delay1Ms);
@@ -64,6 +92,15 @@ void DattorroTank::reset()
     resetBranch (branchB);
 
     feedbackFromB = 0.0f;
+
+    // Infinite mode state: snap the ramp to its target (keeps a caller's
+    // setting, drops any in-flight ramp), restart both LFOs at their fixed
+    // phases, and clear the level controller back to unity gain.
+    smoothedInfiniteAmount.setCurrentAndTargetValue (smoothedInfiniteAmount.getTargetValue());
+    modPhaseA = 0.0f;
+    modPhaseB = modPhaseOffsetB;
+    levelEnvelope = 0.0f;
+    levelGain = 1.0f;
 }
 
 void DattorroTank::resetBranch (TankBranch& branch)
@@ -100,7 +137,13 @@ void DattorroTank::setFreezeAmount (float newFreezeAmount)
     freezeAmount = newFreezeAmount;
 }
 
-float DattorroTank::processAllpass (float input, AllpassStage& stage)
+void DattorroTank::setInfiniteAmount (float newInfiniteAmount)
+{
+    smoothedInfiniteAmount.setTargetValue (newInfiniteAmount);
+}
+
+template <typename Stage>
+float DattorroTank::processAllpass (float input, Stage& stage)
 {
     // Correct one-multiply Schroeder allpass (Julius O. Smith's "Schroeder
     // Allpass Sections" form): w[n] = x[n] + g*w[n-M]; y[n] = -g*w[n] + w[n-M].
@@ -199,7 +242,39 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // decayGain<=0.85 stability work assumed strictly <1.0 and never
     // exercised this near-unity case, hence the dedicated freeze stability
     // test in DattorroTankTests.cpp.
-    const float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
+    float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
+
+    // Infinite mode (see setInfiniteAmount() and the header's infinite*
+    // constants). One ramp value per sample drives all three mechanisms.
+    // Every one is written so infinite == 0.0f is an exact no-op:
+    // x + 0.0f*(...) == x, 1.0f + 0.0f*(...) == 1.0f, and a*1.0f == a are all
+    // exact in IEEE float, so the arithmetic below reproduces the
+    // pre-Infinite values bit-for-bit (verified by DattorroTankTests.cpp's
+    // "Infinite OFF is bit-identical" test, not just argued).
+    const float infiniteAmount = smoothedInfiniteAmount.getNextValue();
+
+    // (a) decay pin toward exactly 1.0, applied on top of Freeze's own pin.
+    effectiveDecayGain = effectiveDecayGain + infiniteAmount * (infiniteDecayGain - effectiveDecayGain);
+
+    // (c) level controller gain, from the follower state updated at the end
+    // of the previous sample (see below).
+    const float levelGainEffective = 1.0f + infiniteAmount * (levelGain - 1.0f);
+    const float crossFeedGain = effectiveDecayGain * levelGainEffective;
+
+    // (b) allpass1 read-delay modulation. The offset is only computed when
+    // Infinite is actually ramped in, so at 0.0f each line gets back
+    // exactly the base delay prepare() configured (base + 0.0f == base).
+    float modOffsetA = 0.0f, modOffsetB = 0.0f;
+
+    if (infiniteAmount > 0.0f)
+    {
+        const float depth = infiniteAmount * modDepthSamples;
+        modOffsetA = depth * std::sin (modPhaseA);
+        modOffsetB = depth * std::sin (modPhaseB);
+    }
+
+    branchA.allpass1.delayLine.setDelay (allpass1BaseDelayA + modOffsetA);
+    branchB.allpass1.delayLine.setDelay (allpass1BaseDelayB + modOffsetB);
 
     // Freeze, second mechanism (see frozenMaxShimmerBlendWeight's header
     // comment for the full measured history): crossfades the shimmerWeight
@@ -211,13 +286,34 @@ float DattorroTank::processSample (float input, float externalFeedback)
                                                       + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
     const float shimmerWeight = shimmerFeedbackGain * effectiveMaxShimmerBlendWeight;
     const float plainWeight = 1.0f - shimmerWeight;
-    float inputToA = diffused + effectiveDecayGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
+    float inputToA = diffused + crossFeedGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);
 
-    float inputToB = diffused + effectiveDecayGain * tankA_out;
+    float inputToB = diffused + crossFeedGain * tankA_out;
     float tankB_out = processBranch (inputToB, branchB);
 
     feedbackFromB = tankB_out;
+
+    // (c) Infinite's level controller, updated after feedbackFromB is
+    // latched so next sample's crossFeedGain sees it. Runs unconditionally
+    // (cheap, and keeps the follower warm so engaging Infinite on an
+    // already-loud tail reacts at once), but only reaches the output through
+    // levelGainEffective above, which is exactly 1.0f at infinite == 0.0f.
+    {
+        const float absFeedback = std::abs (feedbackFromB);
+        const float envCoeff = absFeedback > levelEnvelope ? levelAttackCoeff : levelReleaseCoeff;
+        levelEnvelope = envCoeff * levelEnvelope + (1.0f - envCoeff) * absFeedback;
+
+        const float targetGain = levelEnvelope > levelCeiling ? levelCeiling / levelEnvelope : 1.0f;
+        levelGain = levelGainCoeff * levelGain + (1.0f - levelGainCoeff) * targetGain;
+    }
+
+    // (b) advance both LFOs, wrapped to keep float phase precision.
+    modPhaseA += modPhaseIncrementA;
+    modPhaseB += modPhaseIncrementB;
+
+    if (modPhaseA >= juce::MathConstants<float>::twoPi) modPhaseA -= juce::MathConstants<float>::twoPi;
+    if (modPhaseB >= juce::MathConstants<float>::twoPi) modPhaseB -= juce::MathConstants<float>::twoPi;
 
     // Real Dattorro output tap formula (see the outputTap* constants in
     // the header): seven roughly-equal-weight taps with alternating

@@ -137,6 +137,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         0.0f));
 
+    // Infinite mode (see ParamIDs::infinite). Default false matches
+    // ShimmerReverbEngine's infiniteAmount default (0.0f), which is
+    // bit-identical to the pre-Infinite sound. Raw 0/1 -- the ramp lives in
+    // DattorroTank (infiniteRampSeconds), not in PluginProcessor.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::infinite, 1 },
+        "Infinite",
+        false));
+
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
     // Source/DSP/LoopCapture.h), retyped 2026-09-26 ("Loop Mix dial" backlog
     // item): continuous blend between the live processing chain and the

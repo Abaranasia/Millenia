@@ -38,6 +38,13 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // reflects the intended default instead of silently diverging from it.
     tank.setMaxShimmerBlendWeight (1.0f - shimmerSustainAmount);
 
+    // Infinite mode: same re-seed reasoning as shimmerSustainAmount above --
+    // push the cached value so the tank reflects it after a re-prepare.
+    // DattorroTank::reset() snaps its ramp to this target rather than
+    // ramping, so a host sample-rate change while Infinite is on does not
+    // replay a 0.2s fade-in.
+    tank.setInfiniteAmount (infiniteAmount);
+
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
     // mix/bypassed/shimmerWidthGain are NOT re-applied here (unlike the
@@ -132,6 +139,12 @@ void ShimmerReverbEngine::setFreezeAmount (float amount)
     // crossfade exists at all), so this call is what actually applies each
     // block's freeze amount rather than lagging one block behind it.
     updateShifterRatio();
+}
+
+void ShimmerReverbEngine::setInfiniteAmount (float newAmount)
+{
+    infiniteAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+    tank.setInfiniteAmount (infiniteAmount);
 }
 
 void ShimmerReverbEngine::setLoopFreezeAmount (float newAmount)
@@ -272,6 +285,10 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // sustaining loop (a slow but real runaway), and muting input alone
         // without pinning decayGain would just silence the plugin as the
         // existing tail decays at its normal, un-frozen rate.
+        // Infinite mode deliberately adds NO input scaling here -- fresh
+        // input must keep layering on top of the never-decaying tail (see
+        // setInfiniteAmount()). With Freeze also engaged, this Freeze mute
+        // still wins, unchanged.
         float tankOut = tank.processSample (monoData[i] * (1.0f - freezeAmount), safeFeedback);
 
         // Phase 4 stereo decorrelation: everything above this line is

@@ -40,6 +40,16 @@ namespace ParamIDs
     // automatable/state-saveable).
     constexpr auto freeze     = "freeze";
 
+    // Infinite mode (see docs/shimmer-reverb-implementation-plan.md's
+    // "Infinite mode" section and DattorroTank::setInfiniteAmount()): the
+    // tail never decays AND fresh input keeps layering on top -- unlike
+    // Freeze above, nothing mutes the input. A separate, independent toggle
+    // from Feedback/Freeze. juce::AudioParameterBool, same reasoning as
+    // freeze's original bool and bypass (audible, must be host-automatable/
+    // state-saveable); the 0/1 jump is ramped sample-accurately inside
+    // DattorroTank, so PluginProcessor reads it raw.
+    constexpr auto infinite   = "infinite";
+
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
     // Source/DSP/LoopCapture.h): a NEW, fully independent feature alongside
     // Freeze above -- captures a window of recent wet output and repeats it

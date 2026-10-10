@@ -56,6 +56,11 @@ private:
     juce::ToggleButton freezeQuickToggle { "Freeze" };
     float freezeValueBeforeQuickToggle = 0.0f;
 
+    // Infinite mode (see ParamIDs::infinite): unlike freezeQuickToggle above,
+    // a real APVTS-attached bool toggle (infiniteAttachment below), same
+    // pattern as bypassButton. Sits in the top bar left of freezeQuickToggle.
+    juce::ToggleButton infiniteToggle { "Infinite" };
+
     juce::TextButton presetNeg12Button { "-12 st" };
     juce::TextButton preset0Button  { "0 st" };
     juce::TextButton preset7Button  { "+7 st" };
@@ -74,6 +79,7 @@ private:
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> freezeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
+    std::unique_ptr<ButtonAttachment> infiniteAttachment;
 
     // Phase 10 Loop Freeze / Loop Mix.
     std::unique_ptr<SliderAttachment> loopLengthAttachment;

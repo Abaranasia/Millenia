@@ -38,6 +38,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
     freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
+    infiniteParam   = apvts.getRawParameterValue (ParamIDs::infinite);
     loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
     loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
 }
@@ -263,6 +264,11 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // inside the tank would click, same reasoning as bypass driving
     // smoothedMix instead of a hard switch (see the comment above).
     shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
+
+    // Infinite mode: read RAW, no smoother here -- DattorroTank ramps the
+    // 0/1 target itself over infiniteRampSeconds, sample-accurately, same
+    // reasoning as Loop Mix below.
+    shimmerReverbEngine.setInfiniteAmount (infiniteParam->load() > 0.5f ? 1.0f : 0.0f);
 
     // Phase 10 Loop Mix: read RAW, no smoother here -- the engage/disengage
     // ramp lives INSIDE LoopCapture itself (2026-09-06 fix, see
