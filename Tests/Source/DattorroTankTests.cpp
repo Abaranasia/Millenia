@@ -850,7 +850,395 @@ public:
                                               + juce::String (beforeRms, 5) + ", after " + juce::String (afterRms, 5)
                                               + ") -- Infinite must not mute fresh input");
         }
+
+        beginTest ("Stereo taps: left output is bit-identical to the pre-stereo (left-only) tap set");
+        {
+            // Golden FNV-1a hash of processSample()'s return value (impulse,
+            // then 3s of +-0.3 noise, then 2s of silence, default settings),
+            // RECORDED by running this exact test against the pre-stereo
+            // tank (commit dbc784c, Debug x64, MSVC VS2026) before the right
+            // tap set was added. Adding output-only right taps must not move
+            // a single bit of the left output. Since slice 2 the run pins
+            // Modulation 0 and the legacy g = 0.7f (see hashLeftOutput()),
+            // so the same value also proves Size/Decay/Modulation are exact
+            // no-ops at those settings.
+            constexpr juce::uint64 expectedLeftHash = 0x475497026ccf0cebull;
+            const auto hash = hashLeftOutput();
+            logMessage ("DattorroTank left-output FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
+            expect (hash == expectedLeftHash, "Left output fingerprint changed: got " + juce::String::toHexString ((juce::int64) hash)
+                                                  + ", expected " + juce::String::toHexString ((juce::int64) expectedLeftHash));
+        }
+
+        beginTest ("Stereo taps: impulse response L != R, normalized L/R correlation over the first 2s below 0.5");
+        {
+            constexpr double sampleRate = 44100.0;
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.reset();
+
+            double sumLL = 0.0, sumRR = 0.0, sumLR = 0.0;
+            int numDifferent = 0;
+            const int numSamples = (int) (2.0 * sampleRate);
+
+            for (int n = 0; n < numSamples; ++n)
+            {
+                const float left = tank.processSample (n == 0 ? 1.0f : 0.0f);
+                const float right = tank.getLastRightOutput();
+                expect (std::isfinite (right), "Right output not finite at sample " + juce::String (n));
+                sumLL += (double) left * left;
+                sumRR += (double) right * right;
+                sumLR += (double) left * right;
+                if (left != right)
+                    ++numDifferent;
+            }
+
+            const double correlation = sumLR / std::sqrt (juce::jmax (1.0e-30, sumLL * sumRR));
+            logMessage ("Tank impulse response: normalized L/R correlation over 2s = " + juce::String (correlation, 6)
+                            + ", L/R RMS ratio = " + juce::String (std::sqrt (sumLL / juce::jmax (1.0e-30, sumRR)), 3));
+
+            expect (numDifferent > numSamples / 2, "L and R are mostly identical (" + juce::String (numDifferent) + " samples differ)");
+            expect (sumRR > 1.0e-3 * sumLL, "Right output is near-silent");
+            expect (std::abs (correlation) < 0.5, "L/R correlation too high: " + juce::String (correlation, 4));
+        }
+    }
+
+    static juce::uint64 hashLeftOutput()
+    {
+        constexpr double sampleRate = 44100.0;
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+
+        // Slice 2 (docs/reverb-space-research.md section 9): the tank's
+        // defaults now mirror the new APVTS defaults (Decay 7.0 s -> g
+        // 0.6993, Modulation 0.3), which move the output by design. The
+        // golden hash was recorded at the old fixed g = 0.7f with no
+        // modulation, so pin exactly that: Modulation 0 and the RT60 that
+        // maps back to 0.7f bit-for-bit at Size 1 (asserted in
+        // DattorroTankSpaceTests).
+        tank.setModulation (0.0f);
+        tank.setDecaySeconds (DattorroTank::decaySecondsForGain (0.7f, 1.0f));
+        tank.reset();
+
+        juce::Random random (271828);
+        juce::uint64 hash = 1469598103934665603ull;
+        const int numSamples = (int) (5.0 * sampleRate);
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float input = 0.0f;
+            if (n == 0)
+                input = 1.0f;
+            else if (n < (int) (3.0 * sampleRate))
+                input = random.nextFloat() * 0.6f - 0.3f;
+
+            const float left = tank.processSample (input);
+            juce::uint32 bits;
+            std::memcpy (&bits, &left, sizeof (bits));
+            hash = (hash ^ bits) * 1099511628211ull;
+        }
+
+        return hash;
     }
 };
 
 static DattorroTankTests dattorroTankTests;
+
+// Slice 2 of docs/reverb-space-research.md (section 9): Decay as RT60
+// seconds, Size, and always-on Modulation, on the bare tank.
+class DattorroTankSpaceTests : public juce::UnitTest
+{
+public:
+    DattorroTankSpaceTests() : juce::UnitTest ("DattorroTankSpaceTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("decaySecondsForGain (0.7f, 1) maps back to exactly 0.7f (golden-hash runs depend on it)");
+        {
+            const float legacySeconds = DattorroTank::decaySecondsForGain (0.7f, 1.0f);
+            logMessage ("RT60 reproducing g = 0.7f at Size 1: " + juce::String (legacySeconds, 6) + " s; default 7.0 s gives g = "
+                            + juce::String (DattorroTank::decayGainFor (7.0f, 1.0f), 6));
+            expect (DattorroTank::decayGainFor (legacySeconds, 1.0f) == 0.7f, "Legacy RT60 does not map back to exactly 0.7f");
+            expect (std::abs (DattorroTank::decayGainFor (7.0f, 1.0f) - 0.7f) < 0.002f, "Default 7 s should land near the old g = 0.7");
+        }
+
+        beginTest ("RT60 mapping: bare tank decay at Size 1 and 2, RT60 2 s and 5 s, within 15%");
+        {
+            for (float size : { 1.0f, 2.0f })
+            {
+                for (float rt60 : { 2.0f, 5.0f })
+                {
+                    const double measured = measureRt60 (size, rt60);
+                    logMessage ("Size " + juce::String (size, 1) + ", RT60 " + juce::String (rt60, 1) + " s -> measured "
+                                    + juce::String (measured, 3) + " s (" + juce::String (100.0 * (measured / rt60 - 1.0), 1) + "%)");
+                    expect (std::abs (measured / rt60 - 1.0) <= 0.15,
+                            "Measured RT60 " + juce::String (measured, 3) + " s, expected " + juce::String (rt60, 1)
+                                + " s +-15% at Size " + juce::String (size, 1));
+                }
+            }
+        }
+
+        beginTest ("RT60 independent of Size: Size 0.5 vs 2 within 15% at RT60 4 s (below every Size's ceiling)");
+        {
+            const double small = measureRt60 (0.5f, 4.0f);
+            const double large = measureRt60 (2.0f, 4.0f);
+            logMessage ("RT60 4 s: Size 0.5 -> " + juce::String (small, 3) + " s, Size 2 -> " + juce::String (large, 3)
+                            + " s (ratio " + juce::String (large / small, 3) + ")");
+            expect (std::abs (large / small - 1.0) <= 0.15, "RT60 moved with Size: " + juce::String (small, 3) + " vs " + juce::String (large, 3));
+        }
+
+        beginTest ("Decay ceiling: g never exceeds 0.85 for any Decay/Size, statically or while Size glides");
+        {
+            float maxGain = 0.0f;
+            for (int d = 0; d <= 60; ++d)
+            {
+                const float rt60 = DattorroTank::minDecaySeconds
+                                   * std::pow (DattorroTank::maxDecaySeconds / DattorroTank::minDecaySeconds, (float) d / 60.0f);
+                for (int s = 0; s <= 30; ++s)
+                {
+                    const float size = DattorroTank::minSize + (DattorroTank::maxSize - DattorroTank::minSize) * (float) s / 30.0f;
+                    maxGain = juce::jmax (maxGain, DattorroTank::decayGainFor (rt60, size));
+                }
+            }
+            maxGain = juce::jmax (maxGain, DattorroTank::decayGainFor (1.0e6f, 0.5f));
+            expect (maxGain <= DattorroTank::maxDecayGain, "Static sweep: g reached " + juce::String (maxGain, 6));
+            expect (DattorroTank::decayGainFor (DattorroTank::maxDecaySeconds, 1.0f) == DattorroTank::maxDecayGain,
+                    "20 s at Size 1 is above the ceiling and must clamp to exactly 0.85");
+
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setDecaySeconds (DattorroTank::maxDecaySeconds);
+            tank.reset();
+            float runtimeMax = 0.0f;
+            for (int n = 0; n < (int) (4.0 * sampleRate); ++n)
+            {
+                if (n % (int) (0.5 * sampleRate) == 0)
+                    tank.setSize ((n / (int) (0.5 * sampleRate)) % 2 == 0 ? DattorroTank::minSize : DattorroTank::maxSize);
+                tank.processSample (0.0f);
+                runtimeMax = juce::jmax (runtimeMax, tank.getCurrentDecayGain());
+            }
+            logMessage ("Ceiling: static sweep max g = " + juce::String (maxGain, 6) + ", runtime max g during Size glides = " + juce::String (runtimeMax, 6));
+            expect (runtimeMax <= DattorroTank::maxDecayGain, "Runtime g reached " + juce::String (runtimeMax, 6));
+        }
+
+        beginTest ("Size scales the space: first output-tap arrival doubles from Size 1 to Size 2");
+        {
+            const int onset1 = firstOutputSample (1.0f);
+            const int onset2 = firstOutputSample (2.0f);
+            const double ratio = (double) onset2 / (double) juce::jmax (1, onset1);
+            logMessage ("First tap arrival: Size 1 -> sample " + juce::String (onset1) + " (" + juce::String (1000.0 * onset1 / sampleRate, 2)
+                            + " ms), Size 2 -> sample " + juce::String (onset2) + " (" + juce::String (1000.0 * onset2 / sampleRate, 2)
+                            + " ms), ratio " + juce::String (ratio, 4));
+            expect (onset1 > 0 && onset2 > 0, "No onset found");
+            expect (std::abs (ratio - 2.0) < 0.05, "Onset ratio " + juce::String (ratio, 4) + ", expected ~2");
+        }
+
+        beginTest ("Size automation (0.5 <-> 2 every 0.35 s, Modulation 1, Decay at ceiling) stays finite and bounded");
+        {
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
+            tank.setModulation (1.0f);
+            tank.setDecaySeconds (ceilingDecaySeconds()); // g = 0.85 at every Size
+            tank.reset();
+
+            juce::Random random (31415);
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+            const int toggleEvery = (int) (0.35 * sampleRate);
+            for (int n = 0; n < (int) (20.0 * sampleRate); ++n)
+            {
+                if (n % toggleEvery == 0)
+                    tank.setSize ((n / toggleEvery) % 2 == 0 ? DattorroTank::maxSize : DattorroTank::minSize);
+                const float left = tank.processSample (random.nextFloat() * 0.6f - 0.3f);
+                const float right = tank.getLastRightOutput();
+                if (! std::isfinite (left) || ! std::isfinite (right))
+                    ++numNonFinite;
+                else
+                    maxPeak = juce::jmax (maxPeak, std::abs (left), std::abs (right));
+            }
+            logMessage ("Size automation sweep, 20 s noise: peak " + juce::String (maxPeak, 4));
+            expectEquals (numNonFinite, 0, "Non-finite output during Size automation");
+            expect (maxPeak <= 10.0f, "Size automation exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
+        }
+
+        beginTest ("Size glide 1 -> 2 is click-free: max sample delta during the 300 ms glide stays within 3x steady state");
+        {
+            // Measures what the Thiran-interpolated allpass1 lines do at the
+            // fastest delay change Size can produce (see sizeRampSeconds in
+            // DattorroTank.h). A 220 Hz tone builds a steady tail at Size 1,
+            // then Size jumps to 2 (smoothed over 300 ms). A pitch glide
+            // raises the sample-to-sample delta only by the glide's
+            // frequency ratio; a Thiran state transient at each integer
+            // crossing would show up as spikes well above that.
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setModulation (0.0f);
+            tank.reset();
+
+            std::vector<float> left, right;
+            const int switchAt = (int) (3.0 * sampleRate);
+            const int total = switchAt + (int) (0.4 * sampleRate);
+            const double phaseIncrement = juce::MathConstants<double>::twoPi * 220.0 / sampleRate;
+            for (int n = 0; n < total; ++n)
+            {
+                if (n == switchAt)
+                    tank.setSize (2.0f);
+                left.push_back (tank.processSample (0.3f * (float) std::sin (phaseIncrement * n)));
+                right.push_back (tank.getLastRightOutput());
+            }
+
+            auto maxDelta = [&] (int from, int to)
+            {
+                float m = 0.0f;
+                for (int i = from; i < to; ++i)
+                    m = juce::jmax (m, std::abs (left[(size_t) i] - left[(size_t) i - 1]), std::abs (right[(size_t) i] - right[(size_t) i - 1]));
+                return m;
+            };
+
+            const float steady = maxDelta (switchAt - (int) (0.5 * sampleRate), switchAt);
+            const float glide = maxDelta (switchAt, switchAt + (int) (0.3 * sampleRate));
+            logMessage ("Size glide 1 -> 2: max steady delta " + juce::String (steady, 6) + ", max glide delta " + juce::String (glide, 6)
+                            + ", ratio " + juce::String (glide / juce::jmax (1.0e-9f, steady), 3));
+            expect (steady > 0.0f, "No steady tail");
+            expect (glide <= 3.0f * steady, "Size glide delta " + juce::String (glide, 6) + " exceeds 3x steady " + juce::String (steady, 6));
+        }
+
+        beginTest ("Freeze at Size 2 + Modulation 1 + Decay at ceiling stays finite and bounded over 3 minutes of sustained input");
+        {
+            // Same scenario as DattorroTankTests' 3-minute freeze test, at the
+            // longest lines, deepest modulation and the 0.85 decay ceiling
+            // (which Freeze then overrides toward 0.999f exactly as before).
+            constexpr int blockSize = 512;
+            constexpr int numBlocks = (int) (180.0 * sampleRate / blockSize);
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            tank.setSize (2.0f);
+            tank.setModulation (1.0f);
+            tank.setDecaySeconds (ceilingDecaySeconds());
+            tank.reset();
+            tank.setFreezeAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::Random random (24681357);
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                        buffer.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                tank.process (block);
+
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float v = buffer.getSample (ch, i);
+                        if (! std::isfinite (v)) ++numNonFinite;
+                        else maxPeak = juce::jmax (maxPeak, std::abs (v));
+                    }
+            }
+
+            logMessage ("Frozen tank, Size 2 + Modulation 1, 180 s noise: peak " + juce::String (maxPeak, 4));
+            expectEquals (numNonFinite, 0, "Non-finite frozen output");
+            expect (maxPeak <= 10.0f, "Frozen output exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
+        }
+
+        beginTest ("Modulation > 0 actually changes the output");
+        {
+            auto runImpulse = [] (float modulation)
+            {
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, 512, 2 });
+                tank.setModulation (modulation);
+                tank.reset();
+                std::vector<float> out;
+                for (int n = 0; n < (int) (2.0 * sampleRate); ++n)
+                    out.push_back (tank.processSample (n == 0 ? 1.0f : 0.0f));
+                return out;
+            };
+            const auto off = runImpulse (0.0f);
+            const auto on = runImpulse (1.0f);
+            int differing = 0;
+            for (size_t i = 0; i < off.size(); ++i)
+                differing += off[i] != on[i] ? 1 : 0;
+            expect (differing > 0, "Modulation 1 did not change the output");
+        }
+    }
+
+private:
+    static constexpr double sampleRate = 44100.0;
+
+    // An RT60 long enough that g sits at the 0.85 ceiling at every Size,
+    // Size 2 included (~30.8 s there -- beyond the Decay parameter's 20 s
+    // maximum, which the bare tank does not clamp).
+    static float ceilingDecaySeconds()
+    {
+        return DattorroTank::decaySecondsForGain (DattorroTank::maxDecayGain, DattorroTank::maxSize);
+    }
+
+    // RT60 of the bare tank (no shimmer path, no modulation) from its
+    // impulse response, by Schroeder backward integration: E(t) = sum of
+    // h^2 from t to the end, in dB, with a least-squares line fitted over
+    // -5..-35 dB (a T30-style fit) and extrapolated to -60 dB. The IR runs
+    // 2 * RT60 + 1 s, so truncation sits ~120 dB down and cannot bend the
+    // fitted range. L and R energies are summed.
+    static double measureRt60 (float size, float rt60)
+    {
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
+        tank.setModulation (0.0f);
+        tank.setSize (size);
+        tank.setDecaySeconds (rt60);
+        tank.reset();
+
+        const int numSamples = (int) ((2.0 * rt60 + 1.0) * sampleRate);
+        std::vector<double> energy ((size_t) numSamples);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const double l = tank.processSample (n == 0 ? 1.0f : 0.0f);
+            const double r = tank.getLastRightOutput();
+            energy[(size_t) n] = l * l + r * r;
+        }
+
+        for (int n = numSamples - 2; n >= 0; --n)
+            energy[(size_t) n] += energy[(size_t) n + 1];
+
+        const double total = energy[0];
+        double sumT = 0.0, sumY = 0.0, sumTT = 0.0, sumTY = 0.0;
+        int count = 0;
+        for (int n = 0; n < numSamples; n += 16)
+        {
+            const double db = 10.0 * std::log10 (juce::jmax (1.0e-300, energy[(size_t) n] / total));
+            if (db > -5.0 || db < -35.0)
+                continue;
+            const double t = n / sampleRate;
+            sumT += t; sumY += db; sumTT += t * t; sumTY += t * db;
+            ++count;
+        }
+
+        const double slope = (count * sumTY - sumT * sumY) / juce::jmax (1.0e-30, count * sumTT - sumT * sumT);
+        return slope < 0.0 ? -60.0 / slope : 1.0e9;
+    }
+
+    static int firstOutputSample (float size)
+    {
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.setModulation (0.0f);
+        tank.setSize (size);
+        tank.reset();
+        for (int n = 0; n < (int) sampleRate; ++n)
+        {
+            const float left = tank.processSample (n == 0 ? 1.0f : 0.0f);
+            if (std::abs (left) > 1.0e-7f || std::abs (tank.getLastRightOutput()) > 1.0e-7f)
+                return n;
+        }
+        return -1;
+    }
+};
+
+static DattorroTankSpaceTests dattorroTankSpaceTests;

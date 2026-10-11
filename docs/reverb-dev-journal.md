@@ -136,6 +136,159 @@ The cold start was the worry, since T2's earlier comment noted it could not see 
 
 - Ear test of a quick re-engage. If `frozenMaxShimmerBlendWeight` or the ^16 curve ever changes, re-check T2 for a cold-start dip.
 
+## 2026-10-10 — Loop Mix silent loop fixed (re-arm + deferred capture)
+
+**Status: code complete, unit-tested, plugin builds. Not yet ear-tested.** Branch `fix/loop-capture-rearm`.
+
+By-ear report: at Loop Mix = 1 the loop was sometimes silent, leaving only the dry part of the main Mix, or total silence at Mix = 1. Turning Loop Mix to 0 and back up fixed it, "but not always". The loop records the wet output, so Freeze/Infinite tails were captured fine and were not the cause. The capture trigger was an exact rising edge, `previousLoopFreezeAmount == 0.0f && loopFreezeAmount > 0.0f`, and it had three root causes:
+
+1. **Restart capture of an empty history.** `prepare()`/`reset()` zero the history and restart the ramp at 0. With Loop Mix already up (restored state at Standalone launch, a device restart, a sample-rate change), the first sample was an "edge" and captured all zeros: a silent loop for as long as Loop Mix stayed up.
+2. **The dial doesn't land exactly on 0.** At e.g. 0.003 the capture never re-armed, so the old (possibly silent) loop kept playing.
+3. **A quick down-and-up** faster than the 50 ms ramp never reaches 0, so there is no edge.
+
+### What was built
+
+- **`Source/DSP/LoopCapture.h/.cpp`** only. No engine, processor or parameter changes.
+  - **Re-arm with hysteresis.** Capture re-arms when the ramped amount and its target are both <= `rearmThreshold` (0.01, -40 dB of old-loop blend). An armed capture fires when the ramped amount rises above `retriggerThreshold` (0.02, -34 dB); firing disarms. A single threshold would re-capture on every jitter crossing of 0.01. The exact-zero edge is kept verbatim as a separate OR term, so the classic engage captures on the same sample as before.
+  - **Deferred capture.** A capture fired with less history than the requested N goes pending. While pending the output is the live wet signal. On the sample that completes N samples of history, the capture runs (N recomputed from `pendingLoopLengthMs` then) and the smoothed amount snaps to 0 and is re-targeted, so the normal 50 ms engage ramp runs again. Parking near zero cancels a pending capture. "History" first meant `validHistorySamples`, samples written since the last reset, with real-but-silent history deliberately captured as is. That decision was reversed the same day; see "Follow-up: wait for sound" below.
+  - **No-loop passthrough.** With no loop captured, `process()` now returns the wet signal untouched. Before, it blended toward a 0.0f loop, which was unreachable then but is reachable now after a cancelled deferred capture.
+  - Cause 3 is intentionally left as "keeps the old loop": the ramp never fell below -40 dB, so the loop never faded out.
+  - Test hooks: `getCaptureCount()`, `isCapturePending()`. Only ints, bools and floats were added; nothing allocates, locks or throws per sample.
+- **`Tests/Source/LoopCaptureTests.cpp`**: four new tests, written first and run RED against the old code.
+
+### Verification
+
+| Test | Old code (RED) | New code (GREEN) |
+|---|---|---|
+| Restart path: pending-window passthrough error (limit 1e-6) | 0.5 (output dips toward a zero loop) | 0.000000 |
+| Restart path: engaged level vs input (limit ±3 dB) | -200 dB (silent loop) | 0.00 dB |
+| Restart path: deferred engage delta vs steady delta (limit 3x) | n/a (nothing engages) | 0.031348 vs 0.031340 |
+| Near-zero re-arm (park at 0.005, switch to tone B, raise): B − A Goertzel | -153.95 dB (loop still tone A), captures 1 → 1 | +151.66 dB, captures 1 → 2 |
+| Jitter guard: captures after 2 s wobble below 0.01 / straddling 0.004–0.016 / then a raise | 1 / 1 / 1 (raise did not capture) | 1 / 1 / 2 |
+| Pending cancel: captures, passthrough error | 1 capture, 0.5 | 0 captures, 0.000000 |
+| Default-settings output fingerprint | `be7b4e1487c0ce8b` | `be7b4e1487c0ce8b` |
+
+All seven pre-existing `LoopCaptureTests` pass unchanged, with identical logged numbers (seam 0.034192/0.034007, engage 0.018806/0.018814). A mutation that collapses the hysteresis band to a single threshold fails the jitter guard with 16 spurious captures.
+
+### Follow-up: wait for sound (reverses "silence is not special-cased")
+
+A diagnostic replay of the user's actual launch state (Mix 1, Loop Mix 1, Loop Length 3225.8 ms, 48 kHz, 480-sample blocks) showed the deferred capture counted samples, not sound:
+
+- If the source app wasn't playing during the first ~3.2 s after launch, the capture fired anyway on pure silence. At Loop Mix 1 the output is then (1-1)·wet + 1·loop = digital zero (-200 dB) forever, even with -15 dBFS input present.
+- If only the first 1 s was silent, every loop cycle had a 1 s digital-zero gap.
+
+So "capturing silence is honest" reproduced the very bug the fix was for, and was dropped. What changed, still only in `LoopCapture.h/.cpp`:
+
+- **`audibleHistorySamples` replaces `validHistorySamples`.** It counts samples since the most recent sound onset, saturating at capacity.
+  - A wet sample is sound when max(|L|, |R|) > `signalGateLinear` = 0.001 (-60 dBFS). Measured wet levels are about -2 to -7 dBFS, so real material clears it by 53–58 dB. -60 dB is also the RT60 "gone" point, so a decaying tail counts until it is inaudible.
+  - `consecutiveSilentSamples` is the current unbroken run of sub-gate samples. Once it is longer than `silenceResetSamples` (250 ms, converted at prepare), the counter resets to 0 and stays 0 until the next sound sample. Shorter runs (zero crossings, rests, brief pauses) keep counting, but only after an onset: leading silence never counts.
+  - Both are zeroed by `reset()`/`prepare()`. The silent-run counter saturates at `silenceResetSamples + 1`.
+- **One readiness predicate**, `hasEnoughAudibleHistory()` (`audibleHistorySamples >= requestedLoopLengthSamples()`), now used by both the immediate and the pending paths. Before, the check was written out twice.
+- A captured loop therefore never contains a sub-gate run longer than 250 ms. Pending, cancel and deferred-ramp semantics are unchanged. Since the audible count can never exceed the samples written, the "never capture unwritten zeros" guarantee still holds.
+- Stale "rising-edge capture" comments in `LoopCapture.h` now describe all three trigger paths: the exact edge, the armed rise, and the deferred landing.
+
+Four more tests, written first and run RED against the samples-only counter:
+
+| Test | Samples-only (RED) | Wait for sound (GREEN) |
+|---|---|---|
+| Launch with no sound, 500 ms @ 44.1 kHz, 1 s silence: capture index / engaged level | 22049 (inside the silence) / -200 dB | 66150 (silence end + N) / 0.00 dB |
+| Launch with no sound, 3225.8 ms @ 48 kHz, 480-sample blocks, 4 s silence | 154837 / -200 dB | 346838 / 0.00 dB |
+| Same: passthrough error while waiting; engage delta vs steady | 0.000000; n/a | 0.000000; 0.031348 vs 0.031340 (44.1k), 0.031395 vs 0.031395 (48k) |
+| Partial silence (1 s silence, 1.5 s loop @ 48 kHz): min 10 ms-window RMS over two loop cycles vs tone | -200 dB (gap every cycle) | -0.12 dB |
+| Short pauses (100 ms gaps every 200 ms): capture index, continuous vs gapped | 22049 vs 22049 | 22050 vs 22050 |
+| Long pause (1 s tone, 400 ms gap, then raise): pending right after the rise / capture index / longest sub-gate run in loop | no / 61740 (immediate) / 17641 | yes / 83790 (gap end + N) / 1 |
+
+The short-pause test passes on both: the samples-only counter never resets, so it can't fail there. It guards against a gate that resets too eagerly.
+
+All 11 earlier `LoopCaptureTests` pass with unchanged assertions and identical logged numbers. One comment in the restart test now notes that its deferred capture lands at index N rather than N-1, because the sine's first sample, sin(0) = 0, is sub-gate. Its assertions only cover indices below N-1, so they still hold. The default-settings fingerprint is still `be7b4e1487c0ce8b`.
+
+### Still open
+
+- Ear test: launch with Loop Mix up and the source stopped, then start the source. The loop should engage ~N + 50 ms later carrying the source. Also check a near-zero dial return.
+- Known, bounded edge: if an old loop exists when a capture goes pending (Loop Length lengthened past the audible history, or a park-and-raise within N samples of an onset after more than 250 ms of silence), the switch to passthrough, and back if cancelled, is a step of at most -34 dB of the loop-vs-wet difference.
+- Known behavior: with the source stopped, a raised Loop Mix stays pending and passes the silent wet through, dropping any old loop at the -34 dB fire level. That is intended: a silent loop is never what the user wants.
+
+## 2026-10-11 — Reverb space, slice 1: stereo tail, pre-delay, wet EQ
+
+Branch `feat/reverb-stereo-space`. Research and plan: [`reverb-space-research.md`](./reverb-space-research.md) sections 7–8.
+
+### What changed
+
+- **Stereo tail.** `DattorroTank` now has Dattorro's right-channel tap set (7 taps, ×0.6) and exposes it via `getLastRightOutput()`. Before this, the wet tail was effectively mono: one left tap sum copied to both channels. The measured L/R correlation of the impulse response is now 0.000013.
+- **Width.** Width is now M/S on the real L/R, range 0–2, default 1. The old shimmer side term keeps its 0.15 gain as `shimmerSideGain`, so width 1 reproduces the old default left channel bit-for-bit.
+- **Pre-delay.** New `preDelay` parameter, 0–250 ms, default 0. It is applied to the tank input before the Freeze mute and smoothed per sample.
+- **Wet EQ.** New `lowCut` (20–1000 Hz) and `highCut` (1–20 kHz) TPT filters, applied after loop capture and before the mix. Both filters always run so their state stays warm; their output is used only off the endpoints, which keeps the default output bit-identical.
+- **Freeze leveler.** Detection stays on `tankOut` (the old signal), not the new stereo mid.
+- **Editor.** Three new knobs (Pre-Delay, Low Cut, High Cut). The window grew to 1020×470.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| Left channel vs pre-change fingerprints (tank, engine) | bit-identical |
+| Pre-delay 100 ms onset shift | 100.000 ms |
+| High cut 2 kHz, energy above 8 kHz | −32.4 dB |
+| Low cut 1 kHz, energy below 200 Hz | −32.8 dB |
+| High cut activation at 96 kHz (transition/steady delta), with reset-on-activation vs warm filters | 32.5× (click) → 0.64× |
+| Full suite, Debug and Release | ALL TESTS PASSED |
+
+The default-settings sine fingerprint changed by design, from `be7b4e1487c0ce8b` to `106b8609081503f9`: it hashes L+R, and R is new.
+
+### Still open
+
+- Ear test: compare width 0/1/2, pre-delay 0 vs 30–60 ms, and both cuts.
+- The width parameter's range changed in place under the same ID. This is acceptable because no presets have shipped.
+- Next slices: always-on modulation, RT60 decay, and a Size control (section 7, items 3–5).
+
+## 2026-10-11 — Reverb space, slice 2: Decay in seconds, Size, Modulation
+
+Branch `feat/reverb-size`. Plan: [`reverb-space-research.md`](./reverb-space-research.md) section 9; deviations are in 9.7.
+
+### What changed
+
+- **Decay (RT60).** A new `decay` parameter (0.3–20 s, log skew, default 7.0 s) replaces `feedback`. The tank derives `g = 10^(−3·L_half·size/RT60)` from it, with `L_half` = 362.70 ms (the mean branch length, since the gain is applied once per branch). g is clamped to 0.85 and recomputed whenever Decay or the smoothed Size changes. Freeze and Infinite override it as before. 7.0 s gives g = 0.6993.
+- **Size.** A new `size` parameter (0.5–2×, default 1). It scales both branches' allpass1/delay1/allpass2/delay2 and all 14 output taps. The input diffusers are not scaled. Lines are allocated for 2× plus modulation headroom in `prepare()`. Size glides per sample over 300 ms (linear), and only `setDelay()` runs while it moves.
+- **Modulation.** A new `modulation` parameter (0–1 → 0–1 ms, default 0.3) on both allpass1 lines, reusing Infinite's Thiran lines and its 0.5/0.7 Hz LFOs. Effective depth is `max(user, infinite × 0.5 ms)`. It is ramped per sample over 50 ms.
+- **Tap restore.** `peekTap()` now restores the configured delay from the branch's stored value instead of `getDelay()`. At fractional delays, `getDelay()` can be off by one ulp.
+- **Editor.** Feedback became Decay (seconds, with a tooltip about the ceiling). Size and Modulation joined the second row. The window size is unchanged.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| Golden hashes at Modulation 0 + `decaySecondsForGain(0.7f)` (7.024514 s) | tank `475497026ccf0ceb`, engine L `918d1cec9419a789`, engine sine `106b8609081503f9`: all unchanged |
+| Bare-tank RT60, Schroeder T30 fit (Size 1: 2 s / 5 s) | 2.248 s (+12.4%) / 5.522 s (+10.4%) |
+| Bare-tank RT60 (Size 2: 2 s / 5 s) | 2.274 s (+13.7%) / 5.611 s (+12.2%) |
+| RT60 4 s at Size 0.5 vs Size 2 | 4.164 s vs 4.522 s (ratio 1.086) |
+| Max g over a Decay × Size sweep, and while Size glides | 0.850000 / 0.850000 |
+| First tap arrival, Size 1 → 2 | 392 → 786 samples (ratio 2.005) |
+| Size glide 1→2 (Thiran), max sample delta glide/steady | 1.046× |
+| Tank Size automation, Modulation 1, g 0.85, 20 s noise | peak 2.08 |
+| Frozen tank at Size 2 + Modulation 1 + g 0.85, 180 s noise | peak 8.85 (bound 10) |
+| Engine Size automation / 180 s stress (Size 2, Modulation 1, Decay 20 s, Freeze from 60 s) | peak 1.89 / 1.96 |
+| Engine decay to silence at those settings | final-second peak 0 at 40 s (3.05e-4 at 20 s) |
+| Full-engine RT60, Decay 2 s / 7 s | 2.07 s / 6.20 s |
+| Real-time factor at defaults (Release) | 0.043 (slice 1: ~0.037) |
+
+The bare tank runs 10–14% long against the nominal value. The cause is allpass energy storage: the energy-weighted delay of an allpass is `M/(1−g²)`, which gives an effective `L_half` of about 413 ms. Correcting for it would move the 7 s default to g ≈ 0.666, so that change is left open.
+
+**PitchShifter offset stability** (block size 1, last 5 s of 10 s, Shimmer Amount 1). Each cell is the mean primary−quadrature offset divergence / the number of primary-offset jumps over 10 samples.
+
+| Tone | Mod 0 | Mod 0.3 | Mod 1.0 |
+|---|---|---|---|
+| 220 Hz | 164.3 / 6 | 185.8 / 7 | 70.0 / 89 |
+| 330 Hz | 27.4 / 16 | 91.9 / 13 | 24.0 / 70 |
+
+At 0.3, the jump count matches Mod 0, but the divergence rises (×1.1 at 220 Hz, ×3.4 at 330 Hz). At 1.0, jumps rise 5–15×.
+
+**Shimmer Sustain vs Modulation.** The tail-decay gap between Sustain 0 and Sustain 1 is 2.4 dB at Modulation 0, about 0 at 0.2–0.3, and −0.6 dB at 1.0. Modulation decorrelates the direct and shifter-delayed loop copies, and the comb loss Sustain relies on goes with that correlation. The Sustain test is now pinned to Modulation 0, and the dependence is logged.
+
+### Still open
+
+- **Resolved, 2026-10-11:** the user compared 0 / 0.1 / 0.3 by ear and chose 0.1 as the Modulation default. 0.3 had removed Sustain's decay effect and raised the shifter's offset divergence. The diagnostics at 0.1 have not been measured yet.
+- Whether to calibrate `L_half` for allpass storage (+14%).
+- The Thiran glide measured as click-free (1.05×). Lagrange reads at fractional Size add a slight per-pass HF loss off Size 1.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

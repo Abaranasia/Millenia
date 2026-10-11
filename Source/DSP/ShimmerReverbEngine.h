@@ -25,10 +25,10 @@ public:
     void prepare (const juce::dsp::ProcessSpec& spec);
     void reset();
 
-    // Mono-handling contract identical to DattorroTank::process(): a
-    // possibly multi-channel input block is averaged to mono internally,
-    // and the tank's own mono output (not the shifter's) is written back to
-    // every output channel -- per shimmer-reverb-concepts.md, what's
+    // Channel contract identical to DattorroTank::process(): a possibly
+    // multi-channel input block is averaged to mono internally, and the
+    // tank's own L/R tap-set outputs (not the shifter's) are written back,
+    // L to channel 0, R to the rest -- per shimmer-reverb-concepts.md, what's
     // monitored is the tank's own reverb tail; the shifter only exists in
     // the recirculating feedback path.
     //
@@ -51,7 +51,7 @@ public:
     // safetyLimiter itself replaces an earlier bare std::tanh(...) stopgap
     // with a real, memoryless soft-knee limiter -- see SafetyLimiter.h for
     // the full design rationale. Because of this, the tank's
-    // own decayGain (DattorroTank::setDecay(), default 0.6f, already inside
+    // own decayGain (DattorroTank::setDecaySeconds() since slice 2; then setDecay(), default 0.6f, inside
     // the architecture doc's documented 0.6-0.85 "feedback gain" range) is
     // now the single knob controlling both how much sustains AND how much
     // of that sustain is pitch-shifted -- there is no longer a separate
@@ -74,9 +74,9 @@ public:
     // previousOutput, cannot be shared with feedbackDcBlocker without
     // corrupting both signals) and reuses the same safetyLimiter (stateless
     // -- only a fixed threshold, so sharing it across both signals is safe).
-    // L is mixed from tankOut + shimmerWidthGain * safeFeedback (the primary
-    // pair, already computed above), R from tankOut + shimmerWidthGain *
-    // the quadrature-safe signal -- decorrelated because L/R draw from
+    // Their difference (sideShift) is added to the wet side channel with
+    // shimmerSideGain (see setWidth()), the primary pair toward L and the
+    // quadrature pair toward R -- decorrelated because L/R draw from
     // different grain-phase pairs reading the identical tank content. Chosen
     // over per-channel tank duplication specifically because it needs no
     // second DattorroTank/delay line and cannot touch the already-tuned
@@ -89,12 +89,23 @@ public:
     // DattorroTank/PitchShifter but that ShimmerReverbEngine never routed
     // to its own public API. Plain setters for empirical tuning by ear /
     // future APVTS parameter callbacks, same convention as
-    // DattorroTank::setDecay()/SafetyLimiter::setThreshold() -- this class
+    // DattorroTank::setDamping()/SafetyLimiter::setThreshold() -- this class
     // still owns no parameter knowledge itself; APVTS/PluginProcessor
     // wiring is a later Phase 5 step, not this one.
     void setPitchShiftSemitones (float semitones);
-    void setFeedback (float newFeedback);
     void setDamping (float newDamping);
+
+    // Slice 2 space controls (docs/reverb-space-research.md section 9),
+    // forwarded to DattorroTank after clamping to its ranges: Decay as RT60
+    // seconds (replaces the old raw-gain setFeedback(); g is derived from
+    // RT60 and the current Size, ceiling 0.85), Size 0.5..2 (tank lines
+    // and output taps, glided per sample over 300 ms inside the tank) and
+    // Modulation 0..1 (0..1 ms allpass1 depth, ramped per sample inside the
+    // tank). Both ramps live in the DSP, so callers pass raw values. The
+    // tank keeps all three across prepare()/reset(), like its other state.
+    void setDecaySeconds (float newDecaySeconds);
+    void setSize (float newSize);
+    void setModulation (float newModulation);
 
     // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
     // comment), clamped to [0, 1] here -- never amplifies above unity, so
@@ -143,11 +154,27 @@ public:
     // not just a subtle long-term tail-shape change.
     void setShimmerSustain (float newAmount);
 
-    // Clamped to [0, 1]. Replaces the old setShimmerWidthGain() name now
-    // that this is genuinely public API rather than an internal-only
-    // setter -- kept as a single setter rather than two names for the same
-    // knob.
+    // M/S width of the wet signal, clamped to [0, 2] (2026-10-11, docs/
+    // reverb-space-research.md section 8.2): 0 = mono, 1 = the tank's
+    // natural Dattorro stereo (default), 2 = side doubled. Scales the
+    // tank's own L/R difference AND the shimmer side term together. Used to
+    // be a 0..1 gain on the shimmer side term alone (default 0.15), which
+    // could not widen the then-mono tail itself.
     void setWidth (float newWidth);
+
+    // Pre-delay before the tank, clamped to [0, maxPreDelayMs]. Smoothed per
+    // sample inside process() (preDelayRampSeconds), so callers forward the
+    // raw parameter value. 0 (default) is bit-identical to no pre-delay.
+    void setPreDelayMs (float newPreDelayMs);
+
+    // Wet EQ on the final wet signal (after loop capture, before the dry/wet
+    // mix), 2nd-order TPT highpass/lowpass per channel. Clamped to
+    // [minLowCutHz, maxLowCutHz] / [minHighCutHz, maxHighCutHz]. Both filters
+    // always run (warm state, see lowCutActive) but their output is only
+    // used away from the open endpoints (20 Hz / 20 kHz), so the defaults
+    // are bit-identical to no EQ. Applied once per block.
+    void setLowCutHz (float newLowCutHz);
+    void setHighCutHz (float newHighCutHz);
 
     // NEW (Phase 5): dry/wet blend. 0 = fully dry (bypassed engine sounds
     // identical to unprocessed input), 1 = fully wet (today's existing
@@ -255,6 +282,18 @@ public:
     // PluginProcessor; default false.
     void forceUnityShifterActiveForTesting (bool shouldForce) noexcept { unityShifterForcedActive = shouldForce; }
 
+    // Test-only introspection, same idiom (2026-10-11, stereo tank): the
+    // last processed sample's raw tank left/right outputs, before Width.
+    // With the tank now stereo, |L - R| at the output also carries the
+    // tank's own side, so a test subtracts width * (tankL - tankR) from the
+    // real output's L - R to isolate the shimmer side term as heard.
+    float peekTankLeft() const noexcept { return lastTankLeft; }
+    float peekTankRight() const noexcept { return lastTankRight; }
+
+    // Test-only: the private shimmerSideGain, so a test can divide the
+    // shimmer side term's known scale back out of an output measurement.
+    static constexpr float getShimmerSideGainForTesting() noexcept { return shimmerSideGain; }
+
 private:
     // Applies pitchShiftSemitones to the main shifter (always the full user
     // value) and formantCorrector, and recomputes unityWeightTarget from
@@ -305,7 +344,23 @@ private:
     // primary/quadrature shifted signals (pure stereo-decorrelation
     // seasoning), so its default is lowered accordingly. Value is a REASONED
     // STARTING POINT pending a by-ear pass, not a final tuned constant.
-    static constexpr float defaultShimmerWidthGain = 0.15f;
+    //
+    // 2026-10-11: no longer the Width parameter. Width became an M/S control
+    // over the now-stereo tank (see setWidth()); this old default is baked
+    // into the shimmer side term instead, so at Width = 1 the shimmer side
+    // contribution equals the old default exactly.
+    static constexpr float shimmerSideGain = 0.15f;
+
+    static constexpr float defaultWidth = 1.0f;
+    static constexpr float maxWidth = 2.0f;
+
+    // Pre-delay and wet EQ ranges -- must match Parameters.cpp.
+    static constexpr float maxPreDelayMs = 250.0f;
+    static constexpr double preDelayRampSeconds = 0.05; // same 50ms as PluginProcessor's smoothers
+    static constexpr float minLowCutHz = 20.0f;
+    static constexpr float maxLowCutHz = 1000.0f;
+    static constexpr float minHighCutHz = 1000.0f;
+    static constexpr float maxHighCutHz = 20000.0f;
 
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
     // wet, not bypassed, so existing tests/behavior are unchanged unless a
@@ -407,7 +462,33 @@ private:
     // stage" convention as freezeLeveler itself.
     LoopCapture loopCapture;
 
-    float shimmerWidthGain = defaultShimmerWidthGain;
+    float width = defaultWidth;
+
+    // Pre-delay (see setPreDelayMs()): mono line on the tank input, ahead of
+    // Freeze's input mute, sized for maxPreDelayMs in prepare(). Linear
+    // interpolation is enough: the read delay only moves while the smoother
+    // glides, never as a steady modulation.
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> preDelayLine;
+    juce::SmoothedValue<float> smoothedPreDelayMs;
+    float preDelaySamplesPerMs = 44.1f;
+
+    // Wet EQ (see setLowCutHz()/setHighCutHz()). *Active is the per-block
+    // "not at the open endpoint" decision, and gates only which signal is
+    // used: both filters run on every sample (at their endpoint cutoff while
+    // inactive), so their state always tracks the wet signal and activation
+    // continues from it. Resetting on activation instead was a click -- a
+    // zero-state TPT lowpass steps the signal down by (1 - G) * x on its
+    // first sample (see process()'s wet EQ comment for the measurement).
+    juce::dsp::StateVariableTPTFilter<float> lowCutFilter, highCutFilter;
+    float lowCutHz = minLowCutHz;
+    float highCutHz = maxHighCutHz;
+    float maxFilterCutoffHz = maxHighCutHz;
+    bool lowCutActive = false;
+    bool highCutActive = false;
+
+    // Test-only state, see peekTankLeft()/peekTankRight().
+    float lastTankLeft = 0.0f;
+    float lastTankRight = 0.0f;
 
     // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
     // -- see setShimmerAmount()'s comment for why process()'s Width term

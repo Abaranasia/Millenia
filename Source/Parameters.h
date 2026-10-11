@@ -13,7 +13,18 @@
 namespace ParamIDs
 {
     constexpr auto pitchShift = "pitchShift";
-    constexpr auto feedback   = "feedback";
+
+    // Slice 2 (docs/reverb-space-research.md section 9): `decay` (RT60 in
+    // seconds) REPLACES the old `feedback` (raw tank gain 0..0.85). The old
+    // ID is removed rather than retyped in place: nothing has shipped, so no
+    // preset or automation depends on it (same pre-release reasoning as the
+    // loopMix rename below), and a gain-flavoured ID would be misleading for
+    // a value in seconds. `size` scales the tank, `modulation` sets the
+    // always-on allpass modulation depth. Ranges/defaults must match
+    // DattorroTank::min/max/default* constants.
+    constexpr auto decay      = "decay";
+    constexpr auto size       = "size";
+    constexpr auto modulation = "modulation";
     constexpr auto shimmerAmount = "shimmerAmount";
 
     // "Shimmer Sustain" task: backs ShimmerReverbEngine::setShimmerSustain()
@@ -76,16 +87,24 @@ namespace ParamIDs
     // setLoopLengthMs() -> LoopCapture::setLoopLengthMs(). Range MUST
     // exactly match LoopCapture::minLoopLengthMs/maxLoopLengthMs (see
     // LoopCapture.h) -- there is no compile-time-shared-constant mechanism
-    // in this codebase, same as e.g. DattorroTank::defaultDecayGain vs. the
-    // feedback parameter's default above, so keep both in sync by hand if
+    // in this codebase, same as e.g. DattorroTank::defaultDecaySeconds vs.
+    // the decay parameter's default above, so keep both in sync by hand if
     // either ever changes.
     constexpr auto loopLength = "loopLength";
+
+    // Slice 1 space controls (docs/reverb-space-research.md section 8):
+    // pre-delay in ms (ShimmerReverbEngine::setPreDelayMs()) and the wet EQ
+    // corners in Hz (setLowCutHz()/setHighCutHz()). Ranges must match the
+    // engine's maxPreDelayMs/min*/max*CutHz constants.
+    constexpr auto preDelay = "preDelay";
+    constexpr auto lowCut   = "lowCut";
+    constexpr auto highCut  = "highCut";
 }
 
 // Builds the full parameter layout backing MilleniaAudioProcessor::apvts.
 // Every default here must match the corresponding ShimmerReverbEngine/
 // DattorroTank/PitchShifter default exactly (see those classes'
-// defaultPitchShiftSemitones/defaultDecayGain/defaultDampingCoefficient/
-// defaultShimmerWidthGain/defaultMix/defaultBypassed) so wiring up APVTS in
+// defaultPitchShiftSemitones/defaultDecaySeconds/defaultDampingCoefficient/
+// defaultWidth/defaultMix/defaultBypassed) so wiring up APVTS in
 // this step is not a silent behavior change.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
