@@ -158,9 +158,10 @@ public:
 
     // Wet EQ on the final wet signal (after loop capture, before the dry/wet
     // mix), 2nd-order TPT highpass/lowpass per channel. Clamped to
-    // [minLowCutHz, maxLowCutHz] / [minHighCutHz, maxHighCutHz]; each filter
-    // is skipped entirely at its open endpoint (20 Hz / 20 kHz), so the
-    // defaults are bit-identical to no EQ. Applied once per block.
+    // [minLowCutHz, maxLowCutHz] / [minHighCutHz, maxHighCutHz]. Both filters
+    // always run (warm state, see lowCutActive) but their output is only
+    // used away from the open endpoints (20 Hz / 20 kHz), so the defaults
+    // are bit-identical to no EQ. Applied once per block.
     void setLowCutHz (float newLowCutHz);
     void setHighCutHz (float newHighCutHz);
 

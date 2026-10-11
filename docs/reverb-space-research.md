@@ -1,13 +1,13 @@
 # Reverb Space Research — Why Millenia Sounds Small
 
-Status: research only, no code changed (2026-10-11).
+Status: research written 2026-10-11. Slice 1 (section 8) is implemented in `e4406f3`. Section 2 describes the design **before** slice 1; see [`reverb-dev-journal.md`](./reverb-dev-journal.md) for what changed.
 Scope: the reverb core (`DattorroTank` + its surroundings in `ShimmerReverbEngine`). Shimmer, formant correction and loop capture are out of scope.
 
 ## 1. Problem
 
 The reverb has sounded "smaller than expected" since day one. It is not a regression. This doc maps the current design, compares it with how algorithmic reverbs are usually built, and ranks the changes most likely to fix it.
 
-## 2. Current design (facts)
+## 2. Design before slice 1 (facts, 2026-10-11)
 
 | Aspect | Current state | Reference |
 |---|---|---|
@@ -162,7 +162,7 @@ The node mapping was checked against our left set: 266 → `B.delay1` (8.9366 ms
 - New parameter `lowCut`: 20–1000 Hz, default 20.
 - New parameter `highCut`: 1–20 kHz, default 20 kHz.
 - Each is a 2nd-order TPT filter per channel on the final wet signal, after loop capture and before the dry/wet mix.
-- A filter is skipped entirely while it sits at its endpoint, which keeps default behaviour bit-identical.
+- Both filters always run so their state stays warm. Their output is used only away from the endpoints, which keeps default behaviour bit-identical. Resetting a filter on activation instead was measured to click (32.5× the steady-state sample delta at 96 kHz).
 
 ### 8.5 Editor
 

@@ -104,8 +104,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 
     // Slice 1 space controls (docs/reverb-space-research.md sections
     // 8.3-8.4). Defaults are the "off" endpoints -- 0 ms pre-delay, 20 Hz
-    // low cut, 20 kHz high cut -- where ShimmerReverbEngine bypasses each
-    // stage exactly, so the default sound is unchanged. The cut frequencies
+    // low cut, 20 kHz high cut -- where ShimmerReverbEngine's output
+    // equals no pre-delay / no EQ exactly, so the default sound is unchanged. The cut frequencies
     // use a skew that puts the range's geometric midpoint at the knob's
     // centre (~141 Hz and ~4.5 kHz), the usual log-like feel for frequency.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
