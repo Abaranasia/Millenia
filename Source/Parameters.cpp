@@ -89,13 +89,42 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 0.3f, 0.0f, 0.3f),
         0.0005f));
 
-    // Backs ShimmerReverbEngine::setWidth() (shimmerWidthGain). Default
-    // matches ShimmerReverbEngine::defaultShimmerWidthGain (0.15f).
+    // Backs ShimmerReverbEngine::setWidth(), an M/S width on the stereo tank
+    // tail since 2026-10-11 (docs/reverb-space-research.md section 8.2):
+    // 0 = mono, 1 = natural Dattorro stereo (default, matches
+    // ShimmerReverbEngine::defaultWidth), 2 = 200%. Was 0..1, default 0.15,
+    // as a gain on the shimmer side term only. Same ID, range widened in
+    // place: nothing has shipped, so no saved preset or automation depends
+    // on the old range (see the loopMix retype for the same reasoning).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::width, 1 },
         "Width",
-        juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.15f));
+        juce::NormalisableRange<float> (0.0f, 2.0f),
+        1.0f));
+
+    // Slice 1 space controls (docs/reverb-space-research.md sections
+    // 8.3-8.4). Defaults are the "off" endpoints -- 0 ms pre-delay, 20 Hz
+    // low cut, 20 kHz high cut -- where ShimmerReverbEngine bypasses each
+    // stage exactly, so the default sound is unchanged. The cut frequencies
+    // use a skew that puts the range's geometric midpoint at the knob's
+    // centre (~141 Hz and ~4.5 kHz), the usual log-like feel for frequency.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::preDelay, 1 },
+        "Pre-Delay",
+        juce::NormalisableRange<float> (0.0f, 250.0f),
+        0.0f));
+
+    {
+        juce::NormalisableRange<float> lowCutRange (20.0f, 1000.0f);
+        lowCutRange.setSkewForCentre (141.4f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::lowCut, 1 }, "Low Cut", lowCutRange, 20.0f));
+
+        juce::NormalisableRange<float> highCutRange (1000.0f, 20000.0f);
+        highCutRange.setSkewForCentre (4472.0f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::highCut, 1 }, "High Cut", highCutRange, 20000.0f));
+    }
 
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below

@@ -41,6 +41,9 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     infiniteParam   = apvts.getRawParameterValue (ParamIDs::infinite);
     loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
     loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
+    preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
+    lowCutParam     = apvts.getRawParameterValue (ParamIDs::lowCut);
+    highCutParam    = apvts.getRawParameterValue (ParamIDs::highCut);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -116,6 +119,10 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // initialisation that you need..
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
+
+    // Seeded before prepare() so the engine's own pre-delay smoother starts
+    // at the host's current value instead of gliding in from 0 ms.
+    shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
 
@@ -131,6 +138,8 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
+    smoothedLowCut.reset (sampleRate, 0.05);
+    smoothedHighCut.reset (sampleRate, 0.05);
 
     // 2026-08-29: tried giving Freeze its own longer ramp (0.3s, then 1.0s)
     // after a by-ear report that the freezeQuickToggle checkbox produced "a
@@ -157,6 +166,8 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
     smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
+    smoothedLowCut.setCurrentAndTargetValue (lowCutParam->load());
+    smoothedHighCut.setCurrentAndTargetValue (highCutParam->load());
 
     // Bypass folds into the mix smoother's seed value too -- see
     // processBlock()'s comment for why bypass drives smoothedMix rather than
@@ -234,6 +245,8 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
     smoothedFreeze.setTargetValue (freezeParam->load());
+    smoothedLowCut.setTargetValue (lowCutParam->load());
+    smoothedHighCut.setTargetValue (highCutParam->load());
 
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
@@ -258,6 +271,13 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
+
+    // Linear smoothers land exactly on their target when the ramp ends, so
+    // the engine's "skip the filter at the open endpoint" check sees exactly
+    // 20 Hz / 20 kHz again once a knob is returned there.
+    shimmerReverbEngine.setLowCutHz (smoothedLowCut.skip ((int) numSamples));
+    shimmerReverbEngine.setHighCutHz (smoothedHighCut.skip ((int) numSamples));
+    shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
 
     // Phase 9: Freeze gets the exact same block-granularity smoothing
     // treatment as every other continuous parameter above -- originally a

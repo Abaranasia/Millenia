@@ -37,7 +37,9 @@ private:
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
     juce::Slider pitchShiftSlider, feedbackSlider, shimmerAmountSlider, shimmerSustainSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
+    juce::Slider preDelaySlider, lowCutSlider, highCutSlider;
     juce::Label  pitchShiftLabel,  feedbackLabel,  shimmerAmountLabel,  shimmerSustainLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
+    juce::Label  preDelayLabel,  lowCutLabel,  highCutLabel;
     juce::ToggleButton bypassButton { "Bypass" };
 
     // 2026-08-22 (recovered by user request, see freezeSlider/freezeAttachment
@@ -84,6 +86,11 @@ private:
     // Phase 10 Loop Freeze / Loop Mix.
     std::unique_ptr<SliderAttachment> loopLengthAttachment;
     std::unique_ptr<SliderAttachment> loopMixAttachment;
+
+    // Slice 1 space controls (docs/reverb-space-research.md section 8.5).
+    std::unique_ptr<SliderAttachment> preDelayAttachment;
+    std::unique_ptr<SliderAttachment> lowCutAttachment;
+    std::unique_ptr<SliderAttachment> highCutAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessorEditor)
 };

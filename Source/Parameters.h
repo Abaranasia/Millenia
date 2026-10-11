@@ -80,12 +80,20 @@ namespace ParamIDs
     // feedback parameter's default above, so keep both in sync by hand if
     // either ever changes.
     constexpr auto loopLength = "loopLength";
+
+    // Slice 1 space controls (docs/reverb-space-research.md section 8):
+    // pre-delay in ms (ShimmerReverbEngine::setPreDelayMs()) and the wet EQ
+    // corners in Hz (setLowCutHz()/setHighCutHz()). Ranges must match the
+    // engine's maxPreDelayMs/min*/max*CutHz constants.
+    constexpr auto preDelay = "preDelay";
+    constexpr auto lowCut   = "lowCut";
+    constexpr auto highCut  = "highCut";
 }
 
 // Builds the full parameter layout backing MilleniaAudioProcessor::apvts.
 // Every default here must match the corresponding ShimmerReverbEngine/
 // DattorroTank/PitchShifter default exactly (see those classes'
 // defaultPitchShiftSemitones/defaultDecayGain/defaultDampingCoefficient/
-// defaultShimmerWidthGain/defaultMix/defaultBypassed) so wiring up APVTS in
+// defaultWidth/defaultMix/defaultBypassed) so wiring up APVTS in
 // this step is not a silent behavior change.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

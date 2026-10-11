@@ -2,6 +2,7 @@
 #include <vector>
 #include <limits>
 #include <algorithm>
+#include <functional>
 #include "../../Source/DSP/ShimmerReverbEngine.h"
 #include "../../Source/DSP/DattorroTank.h"
 
@@ -28,6 +29,31 @@ class ShimmerReverbEngineTests : public juce::UnitTest
 {
 public:
     ShimmerReverbEngineTests() : juce::UnitTest ("ShimmerReverbEngineTests", "DSP") {}
+
+    // The shimmer side term as it actually reached the OUTPUT buffer's last
+    // sample (2026-10-11, stereo tank). With mix 1, freeze 0 (FreezeLeveler
+    // gain exactly 1.0f), loop off and the wet EQ at its endpoints, out ==
+    // wet, and the M/S matrix gives outL - outR = width * (tankL - tankR) +
+    // 2 * width * shimmerSide -- so this returns width * shimmerSide,
+    // measured on the real output rather than read off an internal peek.
+    static double outputShimmerTerm (const juce::AudioBuffer<float>& buffer, const ShimmerReverbEngine& engine, float width)
+    {
+        const int last = buffer.getNumSamples() - 1;
+        const double outSide = (double) buffer.getSample (0, last) - (double) buffer.getSample (1, last);
+        const double tankSide = (double) engine.peekTankLeft() - (double) engine.peekTankRight();
+        return 0.5 * (outSide - (double) width * tankSide);
+    }
+
+    // The limited sideShift recovered from outputShimmerTerm(): process()
+    // builds the output term as width * shimmerSideGain * amount * sustain
+    // * 0.5 * sideShift, so dividing that factor back out turns the output
+    // measurement into the same |sideShift| scale safetyLimiter bounds (~1.0).
+    static double outputSideShift (const juce::AudioBuffer<float>& buffer, const ShimmerReverbEngine& engine,
+                                   float width, float amount, float sustain)
+    {
+        const double scale = (double) width * (double) ShimmerReverbEngine::getShimmerSideGainForTesting() * (double) amount * (double) sustain * 0.5;
+        return outputShimmerTerm (buffer, engine, width) / scale;
+    }
 
     void runTest() override
     {
@@ -596,16 +622,25 @@ public:
             // mono-collapse cases -- Shimmer Sustain=0.0f must independently
             // collapse to mono even when neither of the other two gates is
             // doing it.
+            //
+            // 2026-10-11 (stereo tank, docs/reverb-space-research.md section
+            // 8): the wet signal is no longer mono at any Width > 0 -- the
+            // tank's own L/R tap sets differ -- so "L == R" stopped being the
+            // observable for this gate. The test now measures the shimmer side
+            // term at the OUTPUT -- ((outL - outR) - width * (tankL - tankR))
+            // / 2, see outputShimmerTerm(), per sample, hence 1-sample blocks
+            // -- at the maximum Width, and asserts it is 0 (to float rounding
+            // of the M/S matrix: 1e-6).
             constexpr double sampleRate = 44100.0;
-            constexpr int blockSize = 512;
+            constexpr int blockSize = 1;
             constexpr int numChannels = 2;
-            constexpr int numBlocks = 20;
+            constexpr int numBlocks = 20 * 512;
 
             ShimmerReverbEngine engine;
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             engine.prepare (spec);
             engine.reset();
-            engine.setWidth (1.0f);
+            engine.setWidth (2.0f);
             engine.setShimmerAmount (1.0f);
             engine.setShimmerSustain (0.0f);
 
@@ -624,14 +659,12 @@ public:
                 juce::dsp::AudioBlock<float> block (buffer);
                 engine.process (block);
 
-                auto* left  = buffer.getReadPointer (0);
-                auto* right = buffer.getReadPointer (1);
-
-                for (int i = 0; i < blockSize; ++i)
-                    expectEquals (right[i], left[i], "setShimmerSustain(0.0f) failed to collapse L/R to mono at "
-                                                          "block " + juce::String (b) + ", sample " + juce::String (i)
-                                                          + " (Width=1.0, Shimmer Amount=1.0 -- the Width injection "
-                                                          + "gate must still zero out on its own)");
+                const double shimmerAtOutput = outputShimmerTerm (buffer, engine, 2.0f);
+                if (std::abs (shimmerAtOutput) > 1.0e-6)
+                    expectWithinAbsoluteError (shimmerAtOutput, 0.0, 1.0e-6,
+                                               "setShimmerSustain(0.0f) failed to zero the shimmer side term at the output, "
+                                               "sample " + juce::String (b) + " (Width=2.0, Shimmer Amount=1.0 -- the Width "
+                                               "injection gate must still zero out on its own)");
             }
         }
 
@@ -832,8 +865,17 @@ public:
             // driven by a SUSTAINED TONE (not noise), matching this
             // codebase's own established finding that periodicity is what
             // triggers this class of artifact, not broadband content.
+            //
+            // 2026-10-11 (stereo tank): |wetLeft - wetRight| now also carries
+            // the tank's own L/R difference, so it is no longer a proxy for
+            // sideShift. peakDiff now recovers the limited sideShift from the
+            // OUTPUT buffer (outputSideShift(): subtract the tank's own
+            // width * (tankL - tankR) and divide the width * shimmerSideGain
+            // * amount * sustain * 0.5 scale back out; per sample, hence
+            // 1-sample blocks) -- the same quantity the old proxy measured at
+            // the old Width = 1, still observed where it is audible.
             constexpr double sampleRate = 44100.0;
-            constexpr int blockSize = 512;
+            constexpr int blockSize = 1;
             constexpr int numChannels = 2;
             constexpr float toneFrequencyHz = 220.0f;
 
@@ -881,7 +923,7 @@ public:
                                     + " (shimmerSustain=" + juce::String (shimmerSustainToUse) + ")");
 
                         peakWet  = juce::jmax (peakWet, std::abs (left[i]), std::abs (right[i]));
-                        peakDiff = juce::jmax (peakDiff, std::abs (left[i] - right[i]));
+                        peakDiff = juce::jmax (peakDiff, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)));
                     }
                 }
 
@@ -1171,9 +1213,10 @@ public:
                         sumAbsDiff += absDiff;
                         ++measuredCount;
 
-                        const float left  = buffer.getSample (0, 0);
-                        const float right = buffer.getSample (1, 0);
-                        peakLR = juce::jmax (peakLR, std::abs (left - right));
+                        // peakLR recovers the limited sideShift from the output
+                        // since the 2026-10-11 stereo tank (|L-R| now includes
+                        // the tank side) -- see outputSideShift().
+                        peakLR = juce::jmax (peakLR, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, 1.0f - floorWeight)));
                     }
                 }
 
@@ -1253,7 +1296,6 @@ public:
                     engine.process (block);
 
                     const float left  = buffer.getSample (0, 0);
-                    const float right = buffer.getSample (1, 0);
 
                     if (i >= measureFromSample)
                     {
@@ -1263,15 +1305,16 @@ public:
                         previousLeft = left;
                         havePrevious = true;
 
-                        // |left-right| here IS the post-limiter sideShift
-                        // contribution directly (gate=1.0 at Width=Amount=
-                        // Sustain=1.0, so wetLeft-wetRight == sideShift
-                        // exactly) -- 0.7 is well into safetyLimiter's
-                        // soft-knee compression region (threshold=0.8f,
-                        // asymptote 1.0f), so this measures how much of the
-                        // time the limiter is actively, heavily distorting
-                        // this signal, not just occasionally catching a peak.
-                        if (std::abs (left - right) > 0.7f)
+                        // The post-limiter sideShift, recovered from the output
+                        // (outputSideShift(); before the 2026-10-11 stereo tank
+                        // this was |left-right|, equal to sideShift at the old
+                        // Width=Amount=Sustain=1.0) -- 0.7
+                        // is well into safetyLimiter's soft-knee compression
+                        // region (threshold=0.8f, asymptote 1.0f), so this
+                        // measures how much of the time the limiter is actively,
+                        // heavily distorting this signal, not just occasionally
+                        // catching a peak.
+                        if (std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)) > 0.7)
                             ++saturatedCount;
 
                         ++measuredCount;
@@ -1295,10 +1338,10 @@ public:
             logMessage ("wetLeft sample-to-sample |delta| over final 1s: high Sustain (1.0): max="
                             + juce::String (highClick.maxDelta, 4) + ", mean=" + juce::String (highClick.meanDelta, 6)
                             + ", p99=" + juce::String (highClick.p99Delta, 4)
-                            + ", fraction |L-R|>0.7=" + juce::String (highClick.fractionSaturated * 100.0f, 1) + "%"
+                            + ", fraction |sideShift|>0.7=" + juce::String (highClick.fractionSaturated * 100.0f, 1) + "%"
                             + " -- low Sustain (0.15): max=" + juce::String (lowClick.maxDelta, 4)
                             + ", mean=" + juce::String (lowClick.meanDelta, 6) + ", p99=" + juce::String (lowClick.p99Delta, 4)
-                            + ", fraction |L-R|>0.7=" + juce::String (lowClick.fractionSaturated * 100.0f, 1) + "%");
+                            + ", fraction |sideShift|>0.7=" + juce::String (lowClick.fractionSaturated * 100.0f, 1) + "%");
         }
 
         beginTest ("Shimmer Amount clamps to [0, 1] like the engine's other setters");
@@ -1354,9 +1397,12 @@ public:
             // natural recirculation, completely independent of the shift
             // path), not just "small" -- by cross-checking
             // ShimmerReverbEngine against a bare DattorroTank fed the exact
-            // same input. Width is also zeroed so the engine's wet output
-            // is exactly tankOut with nothing else added (see
-            // ShimmerReverbEngine::process()'s wetLeft/wetRight formula).
+            // same input. 2026-10-11 (stereo tank): Width is now 1.0 (the
+            // natural Dattorro stereo), where the M/S matrix reduces exactly
+            // to L = tankLeft, R = tankRight with the shimmer side term at 0
+            // -- so the engine is checked against BOTH bare-tank outputs. (It
+            // used to zero Width, which made the wet signal exactly the mono
+            // tankOut; Width = 0 is now the L/R average instead.)
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;
@@ -1367,7 +1413,7 @@ public:
             engine.prepare (spec);
             engine.reset();
             engine.setShimmerAmount (0.0f);
-            engine.setWidth (0.0f);
+            engine.setWidth (1.0f);
 
             DattorroTank plainTank;
             plainTank.prepare (spec);
@@ -1406,26 +1452,31 @@ public:
                 engine.process (block);
 
                 auto* plainData = plainReference.getWritePointer (0);
+                auto* plainRightData = plainReference.getWritePointer (1);
                 for (int i = 0; i < blockSize; ++i)
+                {
                     plainData[i] = plainTank.processSample (plainData[i]);
+                    plainRightData[i] = plainTank.getLastRightOutput();
+                }
 
                 auto* engineLeft = buffer.getReadPointer (0);
                 auto* engineRight = buffer.getReadPointer (1);
                 auto* plainOut = plainReference.getReadPointer (0);
+                auto* plainRightOut = plainReference.getReadPointer (1);
 
                 for (int i = 0; i < blockSize; ++i)
                 {
                     expectEquals (engineLeft[i], plainOut[i], "Engine's left channel diverged from the bare "
                                                                    "DattorroTank at shimmerAmount=0.0, block "
                                                                    + juce::String (b) + ", sample " + juce::String (i));
-                    expectEquals (engineRight[i], plainOut[i], "Engine's right channel diverged from the bare "
+                    expectEquals (engineRight[i], plainRightOut[i], "Engine's right channel diverged from the bare "
                                                                     "DattorroTank at shimmerAmount=0.0, block "
                                                                     + juce::String (b) + ", sample " + juce::String (i));
                 }
             }
         }
 
-        beginTest ("Shimmer Amount = 0.0 also silences the Width decorrelation term (L/R identical even at Width=1.0)");
+        beginTest ("Shimmer Amount = 0.0 also silences the Width decorrelation term (shimmer side exactly 0 even at Width=2.0)");
         {
             // Bug found by ear (2026-08-21): turning Shimmer Amount fully
             // down did not silence the shimmer character. Root cause:
@@ -1438,20 +1489,26 @@ public:
             // above ("...behave identically to a bare DattorroTank...")
             // masked this exact bug by always zeroing Width alongside
             // shimmerAmount, so it never exercised this interaction. Width
-            // is deliberately set to its maximum (1.0f) here, not left at
-            // the default, to give the leaking term maximum amplitude to be
-            // caught by if the bug regresses.
+            // is deliberately set to its maximum (2.0f since 2026-10-11)
+            // here, not left at the default, to give the leaking term
+            // maximum amplitude to be caught by if the bug regresses.
+            //
+            // 2026-10-11 (stereo tank): L != R now at any Width > 0 because
+            // the tank's own L/R tap sets differ, so the observable is the
+            // shimmer side term measured at the OUTPUT (outputShimmerTerm(),
+            // per sample, hence 1-sample blocks), which must stay 0 to float
+            // rounding of the M/S matrix (1e-6).
             constexpr double sampleRate = 44100.0;
-            constexpr int blockSize = 512;
+            constexpr int blockSize = 1;
             constexpr int numChannels = 2;
-            constexpr int numBlocks = 200;
+            constexpr int numBlocks = 200 * 512;
 
             ShimmerReverbEngine engine;
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             engine.prepare (spec);
             engine.reset();
             engine.setShimmerAmount (0.0f);
-            engine.setWidth (1.0f);
+            engine.setWidth (2.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (246810);
@@ -1470,17 +1527,12 @@ public:
                 juce::dsp::AudioBlock<float> block (buffer);
                 engine.process (block);
 
-                auto* engineLeft = buffer.getReadPointer (0);
-                auto* engineRight = buffer.getReadPointer (1);
-
-                for (int i = 0; i < blockSize; ++i)
-                {
-                    expectEquals (engineLeft[i], engineRight[i], "At shimmerAmount=0.0, L/R must be identical "
-                                                                       "regardless of Width -- any difference means "
-                                                                       "the shift path is still leaking into the "
-                                                                       "output at block " + juce::String (b)
-                                                                       + ", sample " + juce::String (i));
-                }
+                const double shimmerAtOutput = outputShimmerTerm (buffer, engine, 2.0f);
+                if (std::abs (shimmerAtOutput) > 1.0e-6)
+                    expectWithinAbsoluteError (shimmerAtOutput, 0.0, 1.0e-6,
+                                               "At shimmerAmount=0.0 the shimmer side term at the output must be 0 "
+                                               "regardless of Width -- anything else means the shift path is still "
+                                               "leaking into the output at sample " + juce::String (b));
             }
         }
 
@@ -2847,7 +2899,15 @@ public:
             // the golden value was recorded with). Both must match: the idle
             // path substitutes 0.0f for a unity output that was weighted by
             // exactly 0.0f anyway.
-            constexpr juce::uint64 expectedDefaultHash = 0xbe7b4e1487c0ce8bull;
+            //
+            // 2026-10-11, deliberately replaced be7b4e1487c0ce8b ->
+            // 106b8609081503f9: the stereo tank (Dattorro's right tap set,
+            // Width as M/S, default 1.0) changes the default RIGHT channel,
+            // and this hash is of the mono sum. The left channel is still
+            // bit-identical to the old engine -- asserted separately by
+            // ShimmerReverbEngineSpaceTests' left-channel fingerprint, which
+            // was recorded on the pre-stereo code.
+            constexpr juce::uint64 expectedDefaultHash = 0x106b8609081503f9ull;
 
             for (bool forceUnityActive : { false, true })
             {
@@ -2994,3 +3054,290 @@ public:
 };
 
 static ShimmerReverbEngineFreezeCrossfadeTests shimmerReverbEngineFreezeCrossfadeTests;
+
+// Slice 1 of docs/reverb-space-research.md (section 8): true stereo tank
+// output with Width as an M/S control, pre-delay, and wet EQ.
+class ShimmerReverbEngineSpaceTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineSpaceTests() : juce::UnitTest ("ShimmerReverbEngineSpaceTests", "DSP") {}
+
+    static juce::uint64 fnv1a (const std::vector<float>& x)
+    {
+        juce::uint64 hash = 1469598103934665603ull;
+        for (float v : x)
+        {
+            juce::uint32 bits;
+            std::memcpy (&bits, &v, sizeof (bits));
+            hash = (hash ^ bits) * 1099511628211ull;
+        }
+        return hash;
+    }
+
+    void runTest() override
+    {
+        beginTest ("Width = 1 (new default): left channel is bit-identical to the pre-stereo engine's left channel");
+        {
+            // Golden FNV-1a hash of the LEFT channel of the default engine's
+            // 4.5s sine run (ShimmerReverbEngineFreezeCrossfadeTests::
+            // runFreezeToggleScenario, Freeze never engaged), RECORDED by
+            // running this test against the pre-stereo engine (commit
+            // dbc784c, old Width default 0.15, Debug x64, MSVC VS2026). At
+            // Width = 1 the new M/S matrix reduces to L = tankLeft + 1.0 *
+            // shimmerSide, with shimmerSide carrying the old 0.15 constant --
+            // the old wetLeft expression, so it must hash the same.
+            constexpr juce::uint64 expectedLeftHash = 0x918d1cec9419a789ull;
+            int rampStart = 0;
+            std::vector<float> left, right;
+            ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (false, 0.5, rampStart, &left, &right);
+            const auto hash = fnv1a (left);
+            logMessage ("Default engine left-channel FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
+            expect (hash == expectedLeftHash, "Left-channel fingerprint changed: got " + juce::String::toHexString ((juce::int64) hash)
+                                                  + ", expected " + juce::String::toHexString ((juce::int64) expectedLeftHash));
+        }
+
+        beginTest ("Width = 0 gives an exactly mono wet signal (L == R)");
+        {
+            const auto out = run ([] (ShimmerReverbEngine& e) { e.setWidth (0.0f); }, 3.0);
+            int mismatches = 0;
+            for (size_t i = 0; i < out.left.size(); ++i)
+                if (out.left[i] != out.right[i])
+                    ++mismatches;
+            expectEquals (mismatches, 0, "Width = 0 must collapse the wet signal to mono");
+        }
+
+        beginTest ("Width = 1 with Shimmer Amount = 0 is still stereo: the tank's own L/R tap sets differ");
+        {
+            const auto out = run ([] (ShimmerReverbEngine& e) { e.setWidth (1.0f); e.setShimmerAmount (0.0f); }, 3.0);
+            logMessage ("Width 1, Shimmer Amount 0: side RMS " + juce::String (sideRms (out), 5) + ", mid RMS " + juce::String (midRms (out), 5));
+            expect (sideRms (out) > 0.05 * midRms (out), "Side RMS " + juce::String (sideRms (out), 5) + " vs mid RMS "
+                                                             + juce::String (midRms (out), 5) + " -- tail is still effectively mono");
+        }
+
+        beginTest ("Width = 2 gives a wider side signal than Width = 1, with an unchanged mid");
+        {
+            const auto one = run ([] (ShimmerReverbEngine& e) { e.setWidth (1.0f); }, 3.0);
+            const auto two = run ([] (ShimmerReverbEngine& e) { e.setWidth (2.0f); }, 3.0);
+            logMessage ("Side RMS: width 1 = " + juce::String (sideRms (one), 5) + ", width 2 = " + juce::String (sideRms (two), 5)
+                            + "; mid RMS " + juce::String (midRms (one), 5) + " / " + juce::String (midRms (two), 5));
+            expect (sideRms (two) > 1.9 * sideRms (one), "Width = 2 did not double the side signal");
+            expect (std::abs (midRms (two) - midRms (one)) < 1.0e-3 * midRms (one), "Width changed the mid signal");
+        }
+
+        beginTest ("Pre-delay of 100 ms shifts the wet onset by ~100 ms");
+        {
+            auto onset = [] (float preDelayMs)
+            {
+                const auto out = run ([preDelayMs] (ShimmerReverbEngine& e) { e.setPreDelayMs (preDelayMs); e.reset(); }, 1.0, true);
+                for (size_t i = 0; i < out.left.size(); ++i)
+                    if (std::abs (out.left[i]) > 1.0e-6f || std::abs (out.right[i]) > 1.0e-6f)
+                        return (int) i;
+                return -1;
+            };
+
+            const int onset0 = onset (0.0f);
+            const int onset100 = onset (100.0f);
+            const double shiftMs = 1000.0 * (onset100 - onset0) / sampleRate;
+            logMessage ("Wet onset: pre-delay 0ms -> sample " + juce::String (onset0) + ", 100ms -> sample "
+                            + juce::String (onset100) + " (shift " + juce::String (shiftMs, 3) + " ms)");
+            expect (onset0 >= 0 && onset100 >= 0, "No wet onset found");
+            expect (std::abs (shiftMs - 100.0) < 0.5, "Onset shift " + juce::String (shiftMs, 3) + " ms, expected ~100 ms");
+        }
+
+        beginTest ("High cut at 2 kHz reduces wet energy above 8 kHz by more than 12 dB; Low cut at 1 kHz does the same below 200 Hz");
+        {
+            const auto open = run ([] (ShimmerReverbEngine&) {}, 3.0);
+            const auto highCut = run ([] (ShimmerReverbEngine& e) { e.setHighCutHz (2000.0f); }, 3.0);
+            const auto lowCut = run ([] (ShimmerReverbEngine& e) { e.setLowCutHz (1000.0f); }, 3.0);
+
+            auto bandDb = [] (const Output& out, const std::vector<double>& freqs)
+            {
+                const int n = 32768, start = (int) out.left.size() - n;
+                double p = 0.0;
+                for (double hz : freqs)
+                    p += ShimmerReverbEngineFreezeCrossfadeTests::goertzelPower (out.left, start, n, hz)
+                       + ShimmerReverbEngineFreezeCrossfadeTests::goertzelPower (out.right, start, n, hz);
+                return 10.0 * std::log10 (juce::jmax (1.0e-30, p));
+            };
+
+            const std::vector<double> highBand { 9000.0, 11000.0, 13000.0, 15000.0 };
+            const std::vector<double> lowBand { 80.0, 120.0, 160.0, 200.0 };
+            const double highReduction = bandDb (open, highBand) - bandDb (highCut, highBand);
+            const double lowReduction = bandDb (open, lowBand) - bandDb (lowCut, lowBand);
+            logMessage ("Wet EQ: high cut 2 kHz removes " + juce::String (highReduction, 2) + " dB above 8 kHz; low cut 1 kHz removes "
+                            + juce::String (lowReduction, 2) + " dB below 200 Hz");
+            expect (highReduction > 12.0, "High cut only removed " + juce::String (highReduction, 2) + " dB above 8 kHz");
+            expect (lowReduction > 12.0, "Low cut only removed " + juce::String (lowReduction, 2) + " dB below 200 Hz");
+        }
+
+        beginTest ("Wet EQ at its endpoints is bit-identical to no EQ, including after being moved away and back");
+        {
+            // The EQ sits after the recirculating loop, so an engine whose
+            // filters were active for the first second and then returned to
+            // the endpoints must match an untouched engine bit-for-bit from
+            // that point on -- proves the endpoint skip is exact.
+            const auto untouched = run ([] (ShimmerReverbEngine&) {}, 3.0);
+            const auto moved = run ([] (ShimmerReverbEngine& e) { e.setLowCutHz (500.0f); e.setHighCutHz (3000.0f); }, 3.0, false,
+                                    [] (ShimmerReverbEngine& e) { e.setLowCutHz (20.0f); e.setHighCutHz (20000.0f); });
+            const auto explicitEndpoints = run ([] (ShimmerReverbEngine& e) { e.setLowCutHz (20.0f); e.setHighCutHz (20000.0f); e.setPreDelayMs (0.0f); }, 3.0);
+
+            int mismatchesAfter = 0, mismatchesExplicit = 0, differencesWhileActive = 0;
+            const size_t switchSample = (size_t) (switchBlock * blockSize);
+            for (size_t i = 0; i < untouched.left.size(); ++i)
+            {
+                if (untouched.left[i] != explicitEndpoints.left[i] || untouched.right[i] != explicitEndpoints.right[i])
+                    ++mismatchesExplicit;
+                if (i < switchSample)
+                    differencesWhileActive += (untouched.left[i] != moved.left[i]) ? 1 : 0;
+                else if (untouched.left[i] != moved.left[i] || untouched.right[i] != moved.right[i])
+                    ++mismatchesAfter;
+            }
+
+            expectEquals (mismatchesExplicit, 0, "Explicit endpoint values changed the output");
+            expect (differencesWhileActive > 0, "Filters had no effect while active");
+            expectEquals (mismatchesAfter, 0, "Output after returning to the endpoints differs from an untouched engine");
+        }
+
+        beginTest ("Activating the high cut on a running tail is click-free (96 kHz, 20 kHz -> 19 kHz)");
+        {
+            // A TPT lowpass started from zero state outputs only G * x on its
+            // first sample, a (1 - G) * x step down -- ~56% of the wet signal
+            // at 96 kHz. Same "transition delta vs. steady delta, bounded
+            // multiple" methodology as LoopCaptureTests' engage/disengage
+            // click test: a 220 Hz tone builds a steady tail for ~1.5 s, then
+            // the high cut moves just off its endpoint at a block boundary.
+            constexpr double rate = 96000.0;
+            constexpr int block = 512;
+            const int switchAt = (int) (1.5 * rate / block);
+            const int totalBlocks = switchAt + (int) (0.5 * rate / block);
+
+            ShimmerReverbEngine engine;
+            engine.prepare ({ rate, (juce::uint32) block, 2 });
+            engine.reset();
+
+            juce::AudioBuffer<float> buffer (2, block);
+            std::vector<float> left, right;
+            double phase = 0.0;
+            const double phaseIncrement = juce::MathConstants<double>::twoPi * 220.0 / rate;
+
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                if (b == switchAt)
+                    engine.setHighCutHz (19000.0f);
+
+                for (int i = 0; i < block; ++i)
+                {
+                    const float s = 0.3f * (float) std::sin (phase);
+                    phase += phaseIncrement;
+                    buffer.setSample (0, i, s);
+                    buffer.setSample (1, i, s);
+                }
+
+                juce::dsp::AudioBlock<float> audioBlock (buffer);
+                engine.process (audioBlock);
+
+                for (int i = 0; i < block; ++i)
+                {
+                    left.push_back (buffer.getSample (0, i));
+                    right.push_back (buffer.getSample (1, i));
+                }
+            }
+
+            auto maxDelta = [&] (size_t from, size_t to)
+            {
+                float m = 0.0f;
+                for (size_t i = juce::jmax ((size_t) 1, from); i < to; ++i)
+                    m = juce::jmax (m, std::abs (left[i] - left[i - 1]), std::abs (right[i] - right[i - 1]));
+                return m;
+            };
+
+            const size_t switchSample = (size_t) switchAt * (size_t) block;
+            const float steadyDelta = maxDelta (switchSample - (size_t) (0.5 * rate), switchSample);
+            const float transitionDelta = maxDelta (switchSample, switchSample + (size_t) (0.005 * rate));
+            logMessage ("High cut activation click test: maxSteadyDelta=" + juce::String (steadyDelta, 6)
+                            + ", maxTransitionDelta (first 5 ms)=" + juce::String (transitionDelta, 6)
+                            + ", ratio=" + juce::String (transitionDelta / juce::jmax (1.0e-9f, steadyDelta), 3));
+            expect (steadyDelta > 0.0f, "No steady tail to measure against");
+            expect (transitionDelta <= 3.0f * steadyDelta,
+                    "Transition delta (" + juce::String (transitionDelta, 6) + ") exceeds 3x the steady-state delta ("
+                        + juce::String (steadyDelta, 6) + ") -- activating the high cut clicks");
+        }
+
+        beginTest ("Width/pre-delay/EQ setters clamp to their ranges");
+        {
+            const auto wide = run ([] (ShimmerReverbEngine& e) { e.setWidth (2.0f); }, 1.0);
+            const auto tooWide = run ([] (ShimmerReverbEngine& e) { e.setWidth (5.0f); }, 1.0);
+            expect (wide.left == tooWide.left && wide.right == tooWide.right, "setWidth (5.0f) must clamp to 2.0f");
+
+            const auto out = run ([] (ShimmerReverbEngine& e) { e.setPreDelayMs (10000.0f); e.setHighCutHz (1.0e6f); e.setLowCutHz (-5.0f); }, 1.0);
+            bool allFinite = true;
+            for (size_t i = 0; i < out.left.size(); ++i)
+                allFinite = allFinite && std::isfinite (out.left[i]) && std::isfinite (out.right[i]);
+            expect (allFinite, "Non-finite output with out-of-range setter values");
+        }
+    }
+
+private:
+    static constexpr double sampleRate = 44100.0;
+    static constexpr int blockSize = 512;
+    static constexpr int switchBlock = 86; // ~1s
+
+    struct Output { std::vector<float> left, right; };
+    using EngineFn = std::function<void (ShimmerReverbEngine&)>;
+
+    static double rmsOf (const Output& out, double sign)
+    {
+        double sum = 0.0;
+        for (size_t i = 0; i < out.left.size(); ++i)
+        {
+            const double v = 0.5 * ((double) out.left[i] + sign * (double) out.right[i]);
+            sum += v * v;
+        }
+        return std::sqrt (sum / (double) juce::jmax ((size_t) 1, out.left.size()));
+    }
+
+    static double midRms (const Output& out)  { return rmsOf (out, 1.0); }
+    static double sideRms (const Output& out) { return rmsOf (out, -1.0); }
+
+    // Mono-identical +-0.3 noise (or a single impulse) through a default
+    // engine configured by `setup`; `atSwitch`, when given, runs before
+    // block switchBlock.
+    static Output run (const EngineFn& setup, double seconds, bool impulse = false, const EngineFn& atSwitch = {})
+    {
+        ShimmerReverbEngine engine;
+        engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        engine.reset();
+        setup (engine);
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::Random random (8675309);
+        const int numBlocks = (int) (seconds * sampleRate / blockSize);
+        Output out;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            if (b == switchBlock && atSwitch)
+                atSwitch (engine);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const float s = impulse ? ((b == 0 && i == 0) ? 1.0f : 0.0f) : random.nextFloat() * 0.6f - 0.3f;
+                buffer.setSample (0, i, s);
+                buffer.setSample (1, i, s);
+            }
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                out.left.push_back (buffer.getSample (0, i));
+                out.right.push_back (buffer.getSample (1, i));
+            }
+        }
+
+        return out;
+    }
+};
+
+static ShimmerReverbEngineSpaceTests shimmerReverbEngineSpaceTests;

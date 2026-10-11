@@ -208,6 +208,38 @@ All 11 earlier `LoopCaptureTests` pass with unchanged assertions and identical l
 - Known, bounded edge: if an old loop exists when a capture goes pending (Loop Length lengthened past the audible history, or a park-and-raise within N samples of an onset after more than 250 ms of silence), the switch to passthrough, and back if cancelled, is a step of at most -34 dB of the loop-vs-wet difference.
 - Known behavior: with the source stopped, a raised Loop Mix stays pending and passes the silent wet through, dropping any old loop at the -34 dB fire level. That is intended: a silent loop is never what the user wants.
 
+## 2026-10-11 — Reverb space, slice 1: stereo tail, pre-delay, wet EQ
+
+Branch `feat/reverb-stereo-space`. Research and plan: [`reverb-space-research.md`](./reverb-space-research.md) sections 7–8.
+
+### What changed
+
+- **Stereo tail.** `DattorroTank` now has Dattorro's right-channel tap set (7 taps, ×0.6) and exposes it via `getLastRightOutput()`. Before this, the wet tail was effectively mono: one left tap sum copied to both channels. The measured L/R correlation of the impulse response is now 0.000013.
+- **Width.** Width is now M/S on the real L/R, range 0–2, default 1. The old shimmer side term keeps its 0.15 gain as `shimmerSideGain`, so width 1 reproduces the old default left channel bit-for-bit.
+- **Pre-delay.** New `preDelay` parameter, 0–250 ms, default 0. It is applied to the tank input before the Freeze mute and smoothed per sample.
+- **Wet EQ.** New `lowCut` (20–1000 Hz) and `highCut` (1–20 kHz) TPT filters, applied after loop capture and before the mix. Both filters always run so their state stays warm; their output is used only off the endpoints, which keeps the default output bit-identical.
+- **Freeze leveler.** Detection stays on `tankOut` (the old signal), not the new stereo mid.
+- **Editor.** Three new knobs (Pre-Delay, Low Cut, High Cut). The window grew to 1020×470.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| Left channel vs pre-change fingerprints (tank, engine) | bit-identical |
+| Pre-delay 100 ms onset shift | 100.000 ms |
+| High cut 2 kHz, energy above 8 kHz | −32.4 dB |
+| Low cut 1 kHz, energy below 200 Hz | −32.8 dB |
+| High cut activation at 96 kHz (transition/steady delta), with reset-on-activation vs warm filters | 32.5× (click) → 0.64× |
+| Full suite, Debug and Release | ALL TESTS PASSED |
+
+The default-settings sine fingerprint changed by design, from `be7b4e1487c0ce8b` to `106b8609081503f9`: it hashes L+R, and R is new.
+
+### Still open
+
+- Ear test: compare width 0/1/2, pre-delay 0 vs 30–60 ms, and both cuts.
+- The width parameter's range changed in place under the same ID. This is acceptable because no presets have shipped.
+- Next slices: always-on modulation, RT60 decay, and a Size control (section 7, items 3–5).
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

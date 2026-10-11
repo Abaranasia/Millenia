@@ -55,7 +55,25 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
 
     monoScratch.setSize (1, (int) spec.maximumBlockSize);
 
-    // mix/bypassed/shimmerWidthGain are NOT re-applied here (unlike the
+    // Pre-delay line sized for the maximum once, here; the smoother's
+    // reset() keeps a caller's earlier setPreDelayMs() target (it snaps the
+    // current value to it), same survive-a-re-prepare rule as width/mix.
+    preDelaySamplesPerMs = (float) (spec.sampleRate * 0.001);
+    preDelayLine.setMaximumDelayInSamples ((int) std::ceil (maxPreDelayMs * preDelaySamplesPerMs) + 1);
+    preDelayLine.prepare ({ spec.sampleRate, spec.maximumBlockSize, 1 });
+    smoothedPreDelayMs.reset (spec.sampleRate, preDelayRampSeconds);
+
+    // Wet EQ: always two channels (wetLeft/wetRight), whatever the block's
+    // channel count. Cutoffs above ~0.49 fs would break the TPT prewarp,
+    // so they are capped at that for low sample rates.
+    const juce::dsp::ProcessSpec stereoSpec { spec.sampleRate, spec.maximumBlockSize, 2 };
+    lowCutFilter.setType (juce::dsp::StateVariableTPTFilterType::highpass);
+    highCutFilter.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+    lowCutFilter.prepare (stereoSpec);
+    highCutFilter.prepare (stereoSpec);
+    maxFilterCutoffHz = (float) (0.49 * spec.sampleRate);
+
+    // mix/bypassed/width are NOT re-applied here (unlike the
     // pitch shift line above): they already have correct member-
     // initializer defaults in the header, and re-assigning them on every
     // prepare() call would silently wipe out a caller's prior
@@ -79,6 +97,12 @@ void ShimmerReverbEngine::reset()
     freezeLeveler.reset();
     formantCorrector.reset();
     loopCapture.reset();
+    preDelayLine.reset();
+    smoothedPreDelayMs.setCurrentAndTargetValue (smoothedPreDelayMs.getTargetValue());
+    lowCutFilter.reset();
+    highCutFilter.reset();
+    lowCutActive = false;
+    highCutActive = false;
 
     // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
     // comment): unityShifter was just cleared above, so mark it idle --
@@ -135,7 +159,22 @@ void ShimmerReverbEngine::setShimmerSustain (float newAmount)
 
 void ShimmerReverbEngine::setWidth (float newWidth)
 {
-    shimmerWidthGain = juce::jlimit (0.0f, 1.0f, newWidth);
+    width = juce::jlimit (0.0f, maxWidth, newWidth);
+}
+
+void ShimmerReverbEngine::setPreDelayMs (float newPreDelayMs)
+{
+    smoothedPreDelayMs.setTargetValue (juce::jlimit (0.0f, maxPreDelayMs, newPreDelayMs));
+}
+
+void ShimmerReverbEngine::setLowCutHz (float newLowCutHz)
+{
+    lowCutHz = juce::jlimit (minLowCutHz, maxLowCutHz, newLowCutHz);
+}
+
+void ShimmerReverbEngine::setHighCutHz (float newHighCutHz)
+{
+    highCutHz = juce::jlimit (minHighCutHz, maxHighCutHz, newHighCutHz);
 }
 
 void ShimmerReverbEngine::setMix (float newMix)
@@ -287,6 +326,18 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         unityShifter.reset();
     unityShifterActive = unityNeeded;
 
+    // Wet EQ, decided once per block (see lowCutActive's header comment).
+    // Both filters run on every sample whatever this decides; only their
+    // OUTPUT is gated. While inactive each sits at its own endpoint cutoff
+    // (low cut 20 Hz, high cut min(20 kHz, 0.49 fs)), so on activation its
+    // state already tracks the wet signal and the cutoff just moves on from
+    // there. The output at the open endpoint is unused, which keeps the
+    // default output bit-identical.
+    lowCutActive = lowCutHz > minLowCutHz;
+    highCutActive = highCutHz < maxHighCutHz;
+    lowCutFilter.setCutoffFrequency (juce::jmin (lowCutHz, maxFilterCutoffHz));
+    highCutFilter.setCutoffFrequency (juce::jmin (highCutHz, maxFilterCutoffHz));
+
     for (size_t i = 0; i < numSamples; ++i)
     {
         // Last sample lands exactly on the targets, so no float drift carries
@@ -376,6 +427,17 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // passes through untouched.
         float safeFeedback = safetyLimiter.processSample (dcBlockedFeedback);
 
+        // Pre-delay (2026-10-11, docs/reverb-space-research.md section 8.3):
+        // delays the fresh input BEFORE the Freeze mute below, so a frozen
+        // tail still mutes whatever is in flight in the line. The line runs
+        // (push + pop) every sample so its read/write pointers stay in step
+        // whatever the setting. At 0 ms (default) the raw input is used,
+        // bit-identical to no pre-delay.
+        const float preDelayNowMs = smoothedPreDelayMs.getNextValue();
+        preDelayLine.pushSample (0, monoData[i]);
+        const float preDelayed = preDelayLine.popSample (0, preDelayNowMs * preDelaySamplesPerMs);
+        const float tankInput = preDelayNowMs > 0.0f ? preDelayed : monoData[i];
+
         // The shimmerAmount gain now lives inside DattorroTank itself (see
         // setShimmerFeedbackGain()) -- it scales safeFeedback as an
         // ADDITIVE term layered on top of the tank's own natural
@@ -398,7 +460,8 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // setInfiniteAmount()). With Freeze also engaged, this Freeze mute
         // still wins, unchanged.
         // freezeNow, not freezeAmount: per-sample ramp, see above the loop.
-        float tankOut = tank.processSample (monoData[i] * (1.0f - freezeNow), safeFeedback);
+        float tankOut = tank.processSample (tankInput * (1.0f - freezeNow), safeFeedback);
+        const float tankRight = tank.getLastRightOutput();
 
         // Phase 4 stereo decorrelation: everything above this line is
         // unchanged from Phase 3/4's tuned recirculating loop (tank input,
@@ -447,8 +510,8 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // both channels -- the old formula's common-mode component competed
         // with/masked the properly-diffused shimmer cascade already baked
         // into tankOut (see docs/shimmer-reverb-implementation-plan.md's
-        // Phase 8 "Real gap 2" note). At width=0 this collapses to
-        // wetLeft == wetRight == tankOut exactly, same as before.
+        // Phase 8 "Real gap 2" note). Width = 0 still gives L == R exactly
+        // (see the M/S comment below).
         //
         // Bug fix (found by ear, 2026-08-21): sideShift is derived straight
         // from the shifter's output, which keeps running every sample
@@ -463,9 +526,9 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // setShimmerSustain()'s comment, effect 2): gated by
         // shimmerSustainAmount too, same multiplicative-gate convention
         // shimmerAmount already established here (2026-08-21) -- at
-        // shimmerSustainAmount=0.0f this collapses to wetLeft == wetRight ==
-        // tankOut exactly, same "gate to mono" behavior shimmerAmount=0.0f
-        // and width=0.0f already produce individually.
+        // shimmerSustainAmount=0.0f the shimmer side term is exactly 0, same
+        // gate shimmerAmount=0.0f produces (the tank's own L/R stereo, added
+        // 2026-10-11, is unaffected by either gate).
         // Safety net, 2026-09-06 ("Shimmer Sustain" glitch investigation):
         // safeFeedback/quadratureSafe are each individually bounded by
         // safetyLimiter above, but their DIFFERENCE never was -- normally
@@ -491,8 +554,23 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // operation (typical sideShift magnitude is well under its 0.8f
         // threshold) and only engages during the pathological case.
         float sideShift = safetyLimiter.processSample (safeFeedback - quadratureSafe);
-        float wetLeft = tankOut + shimmerWidthGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
-        float wetRight = tankOut - shimmerWidthGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
+        const float shimmerSide = shimmerSideGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
+        lastTankLeft = tankOut;
+        lastTankRight = tankRight;
+
+        // Width as M/S on the true stereo tail (2026-10-11, docs/reverb-
+        // space-research.md section 8.2):
+        //   mid = 0.5 (L + R), side = 0.5 (L - R) + shimmerSide,
+        //   L = mid + width * side, R = mid - width * side.
+        // Expanded into per-channel gains rather than computed literally, so
+        // the endpoints are exact in float: width 0 gives 0.5/0.5 on both
+        // channels (L == R bit-for-bit), and width 1 gives 1.0/0.0, i.e.
+        // wetLeft = tankOut + shimmerSide -- the old default wetLeft
+        // expression bit-for-bit (shimmerSideGain is the old 0.15 default).
+        const float directGain = 0.5f + 0.5f * width;
+        const float crossGain = 0.5f - 0.5f * width;
+        float wetLeft = (directGain * tankOut + crossGain * tankRight) + width * shimmerSide;
+        float wetRight = (crossGain * tankOut + directGain * tankRight) - width * shimmerSide;
 
         // Phase 9 Freeze follow-up (see FreezeLeveler.h): compensate the
         // wet signal's measured decay under sustained freeze, applied to
@@ -502,7 +580,13 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // gains diverged, which isn't this stage's job. At freezeAmount=0.0f
         // this multiplies by exactly 1.0f (see FreezeLeveler's class
         // comment), so it's a no-op unless Freeze is actually engaged.
-        const float freezeLevelerGain = freezeLeveler.computeGain (0.5f * (wetLeft + wetRight));
+        // Detection is on tankOut (the tank's left output), deliberately:
+        // before the 2026-10-11 stereo tank, 0.5 * (wetLeft + wetRight) was
+        // exactly tankOut (the shimmer side cancels), and docs/reverb-space-
+        // research.md section 8.1 keeps detection on that same signal. The
+        // stereo mid, 0.5 * (tankLeft + tankRight), would silently retune
+        // the leveler to a different envelope.
+        const float freezeLevelerGain = freezeLeveler.computeGain (tankOut);
         wetLeft *= freezeLevelerGain;
         wetRight *= freezeLevelerGain;
 
@@ -521,6 +605,35 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const auto looped = loopCapture.process (wetLeft, wetRight);
         wetLeft = looped.first;
         wetRight = looped.second;
+
+        // Wet EQ (2026-10-11, docs/reverb-space-research.md section 8.4):
+        // last stage of the wet path, after loop capture so a captured loop
+        // is filtered live too, and before the dry/wet mix so the dry signal
+        // is never touched. Both filters always run (see the per-block
+        // decision above the loop); an inactive one passes its input through.
+        //
+        // Click fix (2026-10-11, review): this used to run a filter only while
+        // active and reset() it on activation. A TPT lowpass started from
+        // zero state outputs G * x on its first sample, stepping the wet
+        // signal down by (1 - G) * x -- measured 0.84 peak step vs a 0.026
+        // steady-state per-sample delta (32x) moving the high cut 20 kHz ->
+        // 19 kHz at 96 kHz on a 220 Hz tone tail (ShimmerReverbEngineSpaceTests'
+        // high cut activation click test). Always-running state removes it.
+        const float lowCutLeft = lowCutFilter.processSample (0, wetLeft);
+        const float lowCutRight = lowCutFilter.processSample (1, wetRight);
+        if (lowCutActive)
+        {
+            wetLeft = lowCutLeft;
+            wetRight = lowCutRight;
+        }
+
+        const float highCutLeft = highCutFilter.processSample (0, wetLeft);
+        const float highCutRight = highCutFilter.processSample (1, wetRight);
+        if (highCutActive)
+        {
+            wetLeft = highCutLeft;
+            wetRight = highCutRight;
+        }
 
         // Phase 5: dry/wet mix + bypass. bypassed overrides mix rather than
         // combining with it -- forcing the EFFECTIVE mix to 0.0f (fully

@@ -74,6 +74,15 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (loopLengthSlider, loopLengthLabel, "Loop Length");
     configureRotary (loopMixSlider, loopMixLabel, "Loop Mix");
 
+    // Slice 1 space controls (docs/reverb-space-research.md section 8.5), on
+    // a second knob row (see resized()).
+    configureRotary (preDelaySlider, preDelayLabel, "Pre-Delay");
+    configureRotary (lowCutSlider,   lowCutLabel,   "Low Cut");
+    configureRotary (highCutSlider,  highCutLabel,  "High Cut");
+    preDelaySlider.setTextValueSuffix (" ms");
+    lowCutSlider.setTextValueSuffix (" Hz");
+    highCutSlider.setTextValueSuffix (" Hz");
+
     addAndMakeVisible (bypassButton);
     addAndMakeVisible (freezeQuickToggle);
     addAndMakeVisible (infiniteToggle);
@@ -125,6 +134,9 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     infiniteAttachment   = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::infinite,   infiniteToggle);
     loopLengthAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopLength, loopLengthSlider);
     loopMixAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopMix,    loopMixSlider);
+    preDelayAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::preDelay,   preDelaySlider);
+    lowCutAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::lowCut,     lowCutSlider);
+    highCutAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::highCut,    highCutSlider);
 
     // Phase 6's own goal is a functional editor, not final-polish (see plan
     // doc) -- fixed-size, non-resizable is a deliberate choice for this
@@ -135,8 +147,10 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // (Phase 10) to fit the new Loop Length knob at the same per-knob width
     // the other 7 already use, then 820 -> 920 ("Shimmer Sustain" task) to
     // fit this 9th knob, then 920 -> 1020 ("Loop Mix" dial) for the 10th, at
-    // the same per-knob width every prior knob already uses.
-    setSize (1020, 320);
+    // the same per-knob width every prior knob already uses. 320 -> 470
+    // (2026-10-11) for a second knob row holding Pre-Delay/Low Cut/High Cut,
+    // instead of widening to 13 knobs in one row.
+    setSize (1020, 470);
 }
 
 MilleniaAudioProcessorEditor::~MilleniaAudioProcessorEditor()
@@ -173,6 +187,14 @@ void MilleniaAudioProcessorEditor::resized()
     infiniteToggle.setBounds (topArea.removeFromRight (80));
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
+
+    // Second knob row (space controls) at the bottom: label headroom plus
+    // the knob itself, left-aligned at the first row's per-knob width.
+    auto spaceRow = bounds.removeFromBottom (130);
+    bounds.removeFromBottom (20); // headroom for the second row's labels
+    const int knobWidth = bounds.getWidth() / 10;
+    for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider })
+        slider->setBounds (spaceRow.removeFromLeft (knobWidth));
 
     auto presetArea = bounds.removeFromBottom (28);
 

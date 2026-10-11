@@ -850,6 +850,81 @@ public:
                                               + juce::String (beforeRms, 5) + ", after " + juce::String (afterRms, 5)
                                               + ") -- Infinite must not mute fresh input");
         }
+
+        beginTest ("Stereo taps: left output is bit-identical to the pre-stereo (left-only) tap set");
+        {
+            // Golden FNV-1a hash of processSample()'s return value (impulse,
+            // then 3s of +-0.3 noise, then 2s of silence, default settings),
+            // RECORDED by running this exact test against the pre-stereo
+            // tank (commit dbc784c, Debug x64, MSVC VS2026) before the right
+            // tap set was added. Adding output-only right taps must not move
+            // a single bit of the left output.
+            constexpr juce::uint64 expectedLeftHash = 0x475497026ccf0cebull;
+            const auto hash = hashLeftOutput();
+            logMessage ("DattorroTank left-output FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
+            expect (hash == expectedLeftHash, "Left output fingerprint changed: got " + juce::String::toHexString ((juce::int64) hash)
+                                                  + ", expected " + juce::String::toHexString ((juce::int64) expectedLeftHash));
+        }
+
+        beginTest ("Stereo taps: impulse response L != R, normalized L/R correlation over the first 2s below 0.5");
+        {
+            constexpr double sampleRate = 44100.0;
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.reset();
+
+            double sumLL = 0.0, sumRR = 0.0, sumLR = 0.0;
+            int numDifferent = 0;
+            const int numSamples = (int) (2.0 * sampleRate);
+
+            for (int n = 0; n < numSamples; ++n)
+            {
+                const float left = tank.processSample (n == 0 ? 1.0f : 0.0f);
+                const float right = tank.getLastRightOutput();
+                expect (std::isfinite (right), "Right output not finite at sample " + juce::String (n));
+                sumLL += (double) left * left;
+                sumRR += (double) right * right;
+                sumLR += (double) left * right;
+                if (left != right)
+                    ++numDifferent;
+            }
+
+            const double correlation = sumLR / std::sqrt (juce::jmax (1.0e-30, sumLL * sumRR));
+            logMessage ("Tank impulse response: normalized L/R correlation over 2s = " + juce::String (correlation, 6)
+                            + ", L/R RMS ratio = " + juce::String (std::sqrt (sumLL / juce::jmax (1.0e-30, sumRR)), 3));
+
+            expect (numDifferent > numSamples / 2, "L and R are mostly identical (" + juce::String (numDifferent) + " samples differ)");
+            expect (sumRR > 1.0e-3 * sumLL, "Right output is near-silent");
+            expect (std::abs (correlation) < 0.5, "L/R correlation too high: " + juce::String (correlation, 4));
+        }
+    }
+
+    static juce::uint64 hashLeftOutput()
+    {
+        constexpr double sampleRate = 44100.0;
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.reset();
+
+        juce::Random random (271828);
+        juce::uint64 hash = 1469598103934665603ull;
+        const int numSamples = (int) (5.0 * sampleRate);
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float input = 0.0f;
+            if (n == 0)
+                input = 1.0f;
+            else if (n < (int) (3.0 * sampleRate))
+                input = random.nextFloat() * 0.6f - 0.3f;
+
+            const float left = tank.processSample (input);
+            juce::uint32 bits;
+            std::memcpy (&bits, &left, sizeof (bits));
+            hash = (hash ^ bits) * 1099511628211ull;
+        }
+
+        return hash;
     }
 };
 

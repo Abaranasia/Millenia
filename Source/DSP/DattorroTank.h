@@ -15,8 +15,9 @@
 // points as plain setters, not parameters itself — parameter routing lives
 // in Phase 5 (see docs/shimmer-reverb-implementation-plan.md).
 //
-// Mono-only, like Phase 1's ScratchSchroederTank: true stereo decorrelation
-// is deferred to Phase 4. Delay lengths below are Dattorro's published
+// Mono tank (one set of delay lines), stereo output: Dattorro's separate
+// left and right tap sets read the same tank (see outputTapRight*Ms).
+// Delay lengths below are Dattorro's published
 // values converted from the paper's reference sample rate of 29761 Hz to
 // milliseconds (ms = samples / 29761 * 1000); prepare() converts ms to
 // actual samples at the live sample rate, same as ScratchSchroederTank.
@@ -45,9 +46,9 @@ public:
     void prepare (const juce::dsp::ProcessSpec& spec);
     void reset();
 
-    // Mono tank: if given a stereo (or multi-channel) block, the input
-    // channels are averaged to mono internally and the same mono result is
-    // written back to every output channel.
+    // Mono-in, stereo-out tank: the input channels are averaged to mono
+    // internally; channel 0 gets the left tap set's output, every other
+    // channel the right tap set's (see getLastRightOutput()).
     void process (juce::dsp::AudioBlock<float>& block);
 
     // Per-sample form of the same tank math as process(), for callers (e.g.
@@ -142,6 +143,12 @@ public:
     // parallel feedback path (see docs/shimmer-reverb-implementation-plan.md
     // Phase 3/4 correction note).
     float peekFeedbackSignal() const noexcept { return feedbackFromB; }
+
+    // Right-channel output of the last processSample() call (Dattorro's
+    // right tap set, see outputTapRight*Ms). processSample() itself keeps
+    // returning the LEFT output, so mono callers are unchanged; stereo
+    // callers read this right after it. Output-only, like the left taps.
+    float getLastRightOutput() const noexcept { return lastRightOutput; }
 
 private:
     // Lagrange3rd (not Linear, unlike Phase 1's scratch tank) is required
@@ -514,9 +521,8 @@ private:
     // dominate the output, which is exactly why it kept sounding like
     // discrete echoes no matter how much decay/damping/extra-tap tuning was
     // applied. This is the paper's actual mono-equivalent output mix
-    // (adapted from its published left-channel formula; the right-channel
-    // formula is a mirrored tap set not needed until Phase 4's stereo
-    // work), verified against a reference port whose delay lengths and
+    // (its published left-channel formula; the right-channel set follows
+    // below), verified against a reference port whose delay lengths and
     // diffusion/decay coefficients already match this class exactly (see
     // louiscouka.com/code/datorro-reverb-implementation): seven taps of
     // roughly equal weight with alternating signs, summed and scaled by
@@ -532,6 +538,21 @@ private:
     static constexpr float outputTapAAllpass2Ms = 6.2827f;   // dl[2] tap +187, negative sign
     static constexpr float outputTapADelay2Ms   = 35.8180f;  // dl[3] tap +1066, negative sign
     static constexpr float outputScale = 0.6f;
+
+    // Dattorro's right-channel tap set (2026-10-11, docs/reverb-space-
+    // research.md section 8.1): the paper's mirror of the left set above,
+    // reading the opposite branch's nodes, converted the same way (paper
+    // samples @ 29761 Hz -> ms) and scaled by the same outputScale. Without
+    // it the tail was mono (L == R), the main "sounds small" cause found by
+    // that research. Signs follow the paper; every offset fits inside its
+    // line (e.g. 121.87 ms < branchADelay1Ms).
+    static constexpr float outputTapRightADelay1aMs  = 11.8612f;  // node 24_30 +353
+    static constexpr float outputTapRightADelay1bMs  = 121.8709f; // node 24_30 +3627
+    static constexpr float outputTapRightAAllpass2Ms = 41.2620f;  // node 31_33 -1228
+    static constexpr float outputTapRightADelay2Ms   = 89.8155f;  // node 33_39 +2673
+    static constexpr float outputTapRightBDelay1Ms   = 70.9318f;  // node 48_54 -2111
+    static constexpr float outputTapRightBAllpass2Ms = 11.2563f;  // node 55_59 -335
+    static constexpr float outputTapRightBDelay2Ms   = 4.0657f;   // node 59_63 -121
 
     std::array<AllpassStage, numDiffuserStages> diffuserStages;
     TankBranch branchA, branchB;
@@ -582,6 +603,16 @@ private:
     float outputTapADelay1Samples = 0.0f;
     float outputTapAAllpass2Samples = 0.0f;
     float outputTapADelay2Samples = 0.0f;
+    float outputTapRightADelay1aSamples = 0.0f;
+    float outputTapRightADelay1bSamples = 0.0f;
+    float outputTapRightAAllpass2Samples = 0.0f;
+    float outputTapRightADelay2Samples = 0.0f;
+    float outputTapRightBDelay1Samples = 0.0f;
+    float outputTapRightBAllpass2Samples = 0.0f;
+    float outputTapRightBDelay2Samples = 0.0f;
+
+    // See getLastRightOutput().
+    float lastRightOutput = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DattorroTank)
 };

@@ -5,8 +5,8 @@ DattorroTank::~DattorroTank() = default;
 
 void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
 {
-    // Every delay line/filter here is mono, same as ScratchSchroederTank —
-    // true stereo decorrelation is deferred to Phase 4.
+    // Every delay line/filter here is mono, same as ScratchSchroederTank --
+    // stereo comes only from the two output tap sets reading this one tank.
     juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
 
     for (int i = 0; i < numDiffuserStages; ++i)
@@ -29,6 +29,13 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     outputTapADelay1Samples   = msToSamples (outputTapADelay1Ms);
     outputTapAAllpass2Samples = msToSamples (outputTapAAllpass2Ms);
     outputTapADelay2Samples   = msToSamples (outputTapADelay2Ms);
+    outputTapRightADelay1aSamples  = msToSamples (outputTapRightADelay1aMs);
+    outputTapRightADelay1bSamples  = msToSamples (outputTapRightADelay1bMs);
+    outputTapRightAAllpass2Samples = msToSamples (outputTapRightAAllpass2Ms);
+    outputTapRightADelay2Samples   = msToSamples (outputTapRightADelay2Ms);
+    outputTapRightBDelay1Samples   = msToSamples (outputTapRightBDelay1Ms);
+    outputTapRightBAllpass2Samples = msToSamples (outputTapRightBAllpass2Ms);
+    outputTapRightBDelay2Samples   = msToSamples (outputTapRightBDelay2Ms);
 
     // Infinite mode (see setInfiniteAmount() and the header's infinite*/
     // mod*/level* constants). prepareBranch() above already gave both
@@ -92,6 +99,7 @@ void DattorroTank::reset()
     resetBranch (branchB);
 
     feedbackFromB = 0.0f;
+    lastRightOutput = 0.0f;
 
     // Infinite mode state: snap the ramp to its target (keeps a caller's
     // setting, drops any in-flight ramp), restart both LFOs at their fixed
@@ -332,6 +340,22 @@ float DattorroTank::processSample (float input, float externalFeedback)
         - peekTap (branchA.delay2, outputTapADelay2Samples)
     );
 
+    // Dattorro's right-channel tap set (see the outputTapRight* constants):
+    // read exactly like the left set above, same lines' mirror nodes, same
+    // outputScale, same output-only position -- so no gain stage applies to
+    // one channel and not the other (Infinite's level controller acts on the
+    // shared cross-feed, upstream of both tap sets). Computed after the left
+    // sum so the left output's arithmetic is untouched (bit-identical).
+    lastRightOutput = outputScale * (
+          peekTap (branchA.delay1, outputTapRightADelay1aSamples)
+        + peekTap (branchA.delay1, outputTapRightADelay1bSamples)
+        - peekTap (branchA.allpass2.delayLine, outputTapRightAAllpass2Samples)
+        + peekTap (branchA.delay2, outputTapRightADelay2Samples)
+        - peekTap (branchB.delay1, outputTapRightBDelay1Samples)
+        - peekTap (branchB.allpass2.delayLine, outputTapRightBAllpass2Samples)
+        - peekTap (branchB.delay2, outputTapRightBDelay2Samples)
+    );
+
     return tankOut;
 }
 
@@ -352,7 +376,8 @@ void DattorroTank::process (juce::dsp::AudioBlock<float>& block)
 
         float tankOut = processSample (monoIn);
 
+        // Channel 0 gets the left tap set, every other channel the right.
         for (size_t ch = 0; ch < numChannels; ++ch)
-            block.setSample ((int) ch, (int) i, tankOut);
+            block.setSample ((int) ch, (int) i, ch == 0 ? tankOut : lastRightOutput);
     }
 }
