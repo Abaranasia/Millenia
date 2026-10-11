@@ -133,7 +133,7 @@ public:
     static constexpr float minSize = 0.5f;
     static constexpr float maxSize = 2.0f;
     static constexpr float defaultSize = 1.0f;
-    static constexpr float defaultModulation = 0.3f;
+    static constexpr float defaultModulation = 0.1f; // by ear, see Parameters.cpp
 
     // Stability ceiling on g, unchanged from Phase 4 (the old Feedback
     // parameter's 0.85 maximum, validated with the shifter in the loop).

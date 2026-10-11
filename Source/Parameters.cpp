@@ -1,4 +1,5 @@
 #include "Parameters.h"
+#include "DSP/DattorroTank.h"
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
@@ -43,13 +44,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     }
 
     // Modulation: 0..1 -> 0..1 ms of allpass1 delay modulation in the tank
-    // (DattorroTank::setModulation()). Default 0.3 (0.3 ms) breaks up
-    // static metallic modes; 0 is bit-identical to the unmodulated tank.
+    // (DattorroTank::setModulation()); 0 is bit-identical to the
+    // unmodulated tank. Default 0.1 (0.1 ms), chosen by ear 2026-10-11 over
+    // 0.3: at 0.3 Shimmer Sustain's tail-decay effect vanished (2.4 dB gap
+    // -> ~0) and PitchShifter offset divergence rose (up to x3.4 at 330 Hz),
+    // see docs/reverb-dev-journal.md slice 2.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::modulation, 1 },
         "Modulation",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.3f));
+        DattorroTank::defaultModulation));
 
     // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
     // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal

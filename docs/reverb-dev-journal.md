@@ -285,9 +285,8 @@ At 0.3, the jump count matches Mod 0, but the divergence rises (×1.1 at 220 Hz,
 
 ### Still open
 
-- Default Modulation: 0.3 was kept as specified. At that setting Sustain's decay effect is gone (its Width gating still works), and the shifter's offset divergence rises. The alternatives are a lower default (around 0.1) or modulating only some lines.
+- **Resolved, 2026-10-11:** the user compared 0 / 0.1 / 0.3 by ear and chose 0.1 as the Modulation default. 0.3 had removed Sustain's decay effect and raised the shifter's offset divergence. The diagnostics at 0.1 have not been measured yet.
 - Whether to calibrate `L_half` for allpass storage (+14%).
-- Ear test: Size sweeps, Decay 1–20 s at several Sizes, and Modulation 0 / 0.3 / 1.
 - The Thiran glide measured as click-free (1.05×). Lagrange reads at fractional Size add a slight per-pass HF loss off Size 1.
 
 ## References
