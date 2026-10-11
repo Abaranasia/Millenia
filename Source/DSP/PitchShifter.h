@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <array>
+#include <vector>
 
 // SOLA-style (Synchronous OverLap-Add) finite-lifetime grain-pool pitch
 // shifter (Phase 3; rewritten from a persistent multi-voice crossfade design
@@ -162,6 +163,17 @@ private:
     {
         bool active = false;
         int age = 0; // samples elapsed since this grain's own launch; grain expires when age >= grainLengthSamplesInt
+
+        // Per-grain WSOLA phase-alignment adjustment added on top of the
+        // class-wide baseDelaySamples, found once at this grain's launch by
+        // findAlignmentOffset(). Fixes the "sounds metallic/robotic" bug:
+        // the diagnostic FFT test in PitchShifterTests.cpp measured a
+        // spurious spectral sideband at the grain hop rate (~55.5Hz at
+        // 44.1kHz) at -92dB (0st, noise floor), -28.3dB (+7st), and -20.0dB
+        // (+12st, ~10% amplitude) below the fundamental -- caused by grains
+        // always relaunching at the fixed nominal baseDelaySamples with no
+        // regard for the phase of the signal they're crossfading against.
+        float baseDelayOffset = 0.0f;
     };
 
     // Fraction of a grain's lifetime spent ramping in (at launch) and out
@@ -244,6 +256,41 @@ private:
     // constant.
     float grainWindow (int elapsed) const noexcept;
 
+    // WSOLA-style phase-alignment search (fixes the "sounds metallic/robotic"
+    // artifact -- see class-level comment). Finds the outgoing (oldest active)
+    // grain in `grains`, extrapolates its future trajectory from the shared
+    // delay line, and searches candidate launch offsets around TWO small
+    // anchor windows -- [previousOffset +- alignmentSearchRadiusSamples] (the
+    // caller's running per-pool offset estimate, for cheap continuous-drift
+    // tracking) AND [0 +- alignmentSearchRadiusSamples] (the fixed nominal
+    // origin, re-checked every single call) -- for the one candidate whose
+    // own extrapolated trajectory has the highest normalized cross-
+    // correlation with the outgoing grain's, over a window of
+    // alignmentReferenceBuffer.size() samples (== crossfadeSamplesInt, the
+    // actual overlap length -- directly targets what's audible at the
+    // splice). Returns previousOffset unchanged if there is no active grain
+    // yet to align against (e.g. the very first grain launched right after
+    // reset()), and otherwise returns the new running offset -- the caller
+    // must both store this back for the next launch AND use it as this
+    // grain's own baseDelayOffset.
+    //
+    // Why two anchors, not just previousOffset: seeding the search purely
+    // from the previous grain's own found offset is what let
+    // alignmentSearchRadiusSamples shrink from a full grain length down to a
+    // small fraction of one (see its own comment) -- but a previousOffset-ONLY
+    // search was measured (via an exhaustive radius sweep from 1 up to 800,
+    // i.e. matching the old fixed-origin design's full search width) to
+    // PLATEAU on a bad, self-consistent local optimum at extreme pitch
+    // ratios (+24 semitones, pitchRatio=4.0), never reaching within 8dB of
+    // the required spectral-sideband threshold no matter how wide the
+    // radius: once that search has wandered to a bad region it has no way
+    // back, because it only ever looks near wherever it already is.
+    // Re-checking the fixed zero anchor at the SAME small radius every call
+    // fixes this while staying just as cheap (one more small window, not a
+    // full grain-length one) -- see PitchShifterTests.cpp's DIAGNOSTIC tests
+    // for the measured before/after numbers.
+    float findAlignmentOffset (const std::array<Grain, maxConcurrentGrainsPerGroup>& grains, float previousOffset);
+
     DelayLineType delayLine;
 
     // Computed once in prepare() from the live sample rate, not recomputed
@@ -262,6 +309,36 @@ private:
     int grainLengthSamplesInt = 0;
     int hopSamples = 0;
     int crossfadeSamplesInt = 0;
+
+    // Search radius (samples) used around EACH of findAlignmentOffset()'s two
+    // anchor points (previousOffset and the fixed nominal zero -- see that
+    // function's own comment), computed once in prepare(). The very first
+    // version of this search re-derived the FULL cumulative drift from
+    // scratch around the fixed nominal origin at every single grain launch,
+    // which required a radius of a full grainLengthSamplesInt to catch up to
+    // wherever that drift had wandered -- expensive (see the class-level
+    // performance-regression history this was written to fix). Seeding the
+    // search from the previous grain's own found offset (which already
+    // accounts for all prior drift) let each launch cover only that single
+    // hop's INCREMENTAL drift, shrinking the needed radius dramatically --
+    // but a previousOffset-only search was then measured to plateau on a bad
+    // local optimum at extreme pitch ratios no matter how wide the radius
+    // (see findAlignmentOffset()'s comment), which the current two-anchor
+    // design fixes by also re-checking the same small radius around zero
+    // every call. Tuned empirically at 44.1kHz: 22 samples
+    // (crossfadeSamplesInt/4, crossfadeSamplesInt=88) is the smallest value
+    // that gets the +24 semitone spectral-sideband test comfortably past its
+    // -30dB bar (measured -44.67dB; the search's improvement saturates by
+    // radius=24 at -54.2dB, so 22 sits just below that plateau with a little
+    // headroom rather than paying for the extra, no-longer-helpful width).
+    // See PitchShifter.cpp's prepare() for the exact formula and
+    // PitchShifterTests.cpp's DIAGNOSTIC tests for the full measured numbers.
+    int alignmentSearchRadiusSamples = 0;
+
+    // Reused scratch buffer for findAlignmentOffset()'s reference window --
+    // sized once in prepare() to crossfadeSamplesInt samples, never resized in
+    // the audio-thread hot path (real-time safety).
+    std::vector<float> alignmentReferenceBuffer;
 
     // Cached so processSample() never calls std::pow (updated only when
     // setPitchShiftSemitones() is called).
@@ -288,6 +365,16 @@ private:
     int quadratureNextSlot = 0;
     int primarySamplesUntilLaunch = 0;
     int quadratureSamplesUntilLaunch = 0;
+
+    // Running alignment-offset estimate for each pool, carried forward from one
+    // grain launch to the next. findAlignmentOffset() searches a SMALL window
+    // around this running value (not the fixed nominal baseDelaySamples) so it
+    // only needs to track each hop's INCREMENTAL drift, not the full cumulative
+    // drift from scratch every time -- see findAlignmentOffset()'s own comment
+    // for why this replaces the earlier (correct but far too expensive) design
+    // that searched +-grainLengthSamplesInt from a fixed origin at every launch.
+    float primaryLastOffset = 0.0f;
+    float quadratureLastOffset = 0.0f;
 
     // Cached crossfaded (and normalized) output of the quadrature pool from
     // the most recent processSample() call, exposed via
