@@ -15,16 +15,41 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (-24.0f, 24.0f),
         12.0f));
 
-    // Backs ShimmerReverbEngine::setFeedback() -> DattorroTank::setDecay().
-    // Upper bound of 0.85 matches shimmer-reverb-architecture.md's documented
-    // safe ceiling; default matches DattorroTank::defaultDecayGain (0.7f,
-    // settled during Phase 3's structural fix -- see that class's header
-    // comment for the 0.6f -> 0.8f (rejected) -> 0.7f history).
+    // Slice 2 (docs/reverb-space-research.md section 9). Decay replaces
+    // the old Feedback gain (see ParamIDs::decay): RT60 in seconds, backing
+    // ShimmerReverbEngine::setDecaySeconds(). Log-like skew (geometric
+    // midpoint ~2.45 s at the knob's centre). Default 7.0 s gives g = 0.6993
+    // at Size 1, the old 0.7 Feedback default to within 0.1%
+    // (DattorroTank::defaultDecaySeconds). g stays clamped to the old 0.85
+    // ceiling, so the longest reachable RT60 depends on Size (~7.7 s at
+    // 0.5, ~15.4 s at 1); settings above it clamp silently, as the editor
+    // tooltip says.
+    {
+        juce::NormalisableRange<float> decayRange (0.3f, 20.0f);
+        decayRange.setSkewForCentre (2.449f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::decay, 1 }, "Decay", decayRange, 7.0f));
+    }
+
+    // Size: scales the tank's delay lines and output taps (not the input
+    // diffusers), 0.5x..2x, default 1.0 (the unscaled Dattorro tank). Skew
+    // puts 1.0 at the knob's centre. Glides per sample inside the tank, so
+    // PluginProcessor passes it raw.
+    {
+        juce::NormalisableRange<float> sizeRange (0.5f, 2.0f);
+        sizeRange.setSkewForCentre (1.0f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::size, 1 }, "Size", sizeRange, 1.0f));
+    }
+
+    // Modulation: 0..1 -> 0..1 ms of allpass1 delay modulation in the tank
+    // (DattorroTank::setModulation()). Default 0.3 (0.3 ms) breaks up
+    // static metallic modes; 0 is bit-identical to the unmodulated tank.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::feedback, 1 },
-        "Feedback",
-        juce::NormalisableRange<float> (0.0f, 0.85f),
-        0.7f));
+        juce::ParameterID { ParamIDs::modulation, 1 },
+        "Modulation",
+        juce::NormalisableRange<float> (0.0f, 1.0f),
+        0.3f));
 
     // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
     // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal

@@ -30,7 +30,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     // inside processBlock(). bypassParam's underlying value is still a
     // float (0.0/1.0) even though it's an AudioParameterBool.
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
-    feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
+    decayParam      = apvts.getRawParameterValue (ParamIDs::decay);
     shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
     shimmerSustainParam = apvts.getRawParameterValue (ParamIDs::shimmerSustain);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
@@ -44,6 +44,8 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
     lowCutParam     = apvts.getRawParameterValue (ParamIDs::lowCut);
     highCutParam    = apvts.getRawParameterValue (ParamIDs::highCut);
+    sizeParam       = apvts.getRawParameterValue (ParamIDs::size);
+    modulationParam = apvts.getRawParameterValue (ParamIDs::modulation);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -120,9 +122,14 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
 
-    // Seeded before prepare() so the engine's own pre-delay smoother starts
-    // at the host's current value instead of gliding in from 0 ms.
+    // Seeded before prepare() so the engine's own per-sample smoothers
+    // (pre-delay, Size, Modulation) start at the host's current values
+    // instead of gliding in from their defaults. Decay too, so the tank's
+    // g is right from the first sample.
     shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
+    shimmerReverbEngine.setSize (sizeParam->load());
+    shimmerReverbEngine.setModulation (modulationParam->load());
+    shimmerReverbEngine.setDecaySeconds (decayParam->load());
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
 
@@ -132,7 +139,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // start with an audible ramp-in from some default toward wherever the
     // host actually has each parameter set.
     smoothedPitchShift.reset (sampleRate, 0.05);
-    smoothedFeedback.reset (sampleRate, 0.05);
+    smoothedDecay.reset (sampleRate, 0.05);
     smoothedShimmerAmount.reset (sampleRate, 0.05);
     smoothedShimmerSustain.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
@@ -160,7 +167,7 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedFreeze.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
-    smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
+    smoothedDecay.setCurrentAndTargetValue (decayParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
     smoothedShimmerSustain.setCurrentAndTargetValue (shimmerSustainParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
@@ -239,7 +246,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const auto numSamples = buffer.getNumSamples();
 
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
-    smoothedFeedback.setTargetValue (feedbackParam->load());
+    smoothedDecay.setTargetValue (decayParam->load());
     smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
     smoothedShimmerSustain.setTargetValue (shimmerSustainParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
@@ -265,7 +272,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedMix.setTargetValue (mixTarget);
 
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
-    shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
+    shimmerReverbEngine.setDecaySeconds (smoothedDecay.skip ((int) numSamples));
     shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
     shimmerReverbEngine.setShimmerSustain (smoothedShimmerSustain.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
@@ -278,6 +285,11 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setLowCutHz (smoothedLowCut.skip ((int) numSamples));
     shimmerReverbEngine.setHighCutHz (smoothedHighCut.skip ((int) numSamples));
     shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
+
+    // Slice 2: raw, the tank ramps Size (300 ms) and Modulation (50 ms) per
+    // sample -- see sizeParam's header comment.
+    shimmerReverbEngine.setSize (sizeParam->load());
+    shimmerReverbEngine.setModulation (modulationParam->load());
 
     // Phase 9: Freeze gets the exact same block-granularity smoothing
     // treatment as every other continuous parameter above -- originally a

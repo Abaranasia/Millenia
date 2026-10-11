@@ -1,4 +1,6 @@
 #include "DattorroTank.h"
+#include <cmath>
+#include <limits>
 
 DattorroTank::DattorroTank() = default;
 DattorroTank::~DattorroTank() = default;
@@ -22,30 +24,19 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     prepareBranch (branchB, monoSpec, branchBAllpass1Ms, branchBDelay1Ms, branchBAllpass2Ms, branchBDelay2Ms);
 
     auto msToSamples = [&spec] (float ms) { return ms * 0.001f * (float) spec.sampleRate; };
-    outputTapBDelay1aSamples  = msToSamples (outputTapBDelay1aMs);
-    outputTapBDelay1bSamples  = msToSamples (outputTapBDelay1bMs);
-    outputTapBAllpass2Samples = msToSamples (outputTapBAllpass2Ms);
-    outputTapBDelay2Samples   = msToSamples (outputTapBDelay2Ms);
-    outputTapADelay1Samples   = msToSamples (outputTapADelay1Ms);
-    outputTapAAllpass2Samples = msToSamples (outputTapAAllpass2Ms);
-    outputTapADelay2Samples   = msToSamples (outputTapADelay2Ms);
-    outputTapRightADelay1aSamples  = msToSamples (outputTapRightADelay1aMs);
-    outputTapRightADelay1bSamples  = msToSamples (outputTapRightADelay1bMs);
-    outputTapRightAAllpass2Samples = msToSamples (outputTapRightAAllpass2Ms);
-    outputTapRightADelay2Samples   = msToSamples (outputTapRightADelay2Ms);
-    outputTapRightBDelay1Samples   = msToSamples (outputTapRightBDelay1Ms);
-    outputTapRightBAllpass2Samples = msToSamples (outputTapRightBAllpass2Ms);
-    outputTapRightBDelay2Samples   = msToSamples (outputTapRightBDelay2Ms);
+    for (size_t i = 0; i < outputTapMs.size(); ++i)
+        outputTapBaseSamples[i] = msToSamples (outputTapMs[i]);
 
-    // Infinite mode (see setInfiniteAmount() and the header's infinite*/
-    // mod*/level* constants). prepareBranch() above already gave both
-    // allpass1 lines enough headroom for +modDepthSamples; their configured
-    // (unmodulated) delay is captured here straight from the line itself so
-    // processSample()'s "base + 0.0f" at infinite == 0 re-applies exactly the
-    // same value setDelay() was given -- bit-identical by construction.
-    allpass1BaseDelayA = branchA.allpass1.delayLine.getDelay();
-    allpass1BaseDelayB = branchB.allpass1.delayLine.getDelay();
+    // Infinite mode and user Modulation (see setInfiniteAmount()/
+    // setModulation() and the header's mod* constants). prepareBranch()
+    // above already gave both allpass1 lines headroom for the larger of the
+    // two depths at maxSize. Their unmodulated centre is the branch's
+    // allpass1Samples (the whole-sample Size-1 length times Size), so
+    // processSample()'s "centre + 0.0f" with no modulation re-applies
+    // exactly the value setDelay() was given -- bit-identical by
+    // construction.
     modDepthSamples = msToSamples (modDepthMs);
+    userModDepthSamples = msToSamples (maxModulationDepthMs);
     modPhaseIncrementA = juce::MathConstants<float>::twoPi * modRateHzA / (float) spec.sampleRate;
     modPhaseIncrementB = juce::MathConstants<float>::twoPi * modRateHzB / (float) spec.sampleRate;
 
@@ -60,34 +51,70 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     // it anyway, mirroring its shimmerSustain re-seed.
     smoothedInfiniteAmount.reset (spec.sampleRate, infiniteRampSeconds);
 
+    // Same "keep the caller's target, snap to it" rule for Size and
+    // Modulation; reset() below then scales the lines to that Size.
+    smoothedSize.reset (spec.sampleRate, sizeRampSeconds);
+    smoothedModulation.reset (spec.sampleRate, modulationRampSeconds);
+
     reset();
 }
 
 void DattorroTank::prepareBranch (TankBranch& branch, const juce::dsp::ProcessSpec& monoSpec,
                                    float allpass1Ms, float delay1Ms, float allpass2Ms, float delay2Ms)
 {
+    // Returns the whole-sample Size-1 length. Each line is allocated for
+    // that length times maxSize (slice 2), so Size never reallocates; a
+    // larger buffer does not change what any read returns (reads are
+    // relative to the write pointer), so Size 1 is unaffected.
     auto sizeDelay = [&monoSpec] (auto& delay, float delayMs, int extraHeadroomSamples = 0)
     {
         auto delayInSamples = juce::roundToInt (delayMs * 0.001 * monoSpec.sampleRate);
-        delay.setMaximumDelayInSamples (delayInSamples + 1 + extraHeadroomSamples);
+        delay.setMaximumDelayInSamples ((int) std::ceil ((float) delayInSamples * maxSize) + 1 + extraHeadroomSamples);
         delay.prepare (monoSpec);
         delay.setDelay ((float) delayInSamples);
+        return (float) delayInSamples;
     };
 
-    // Infinite mode modulates allpass1's read delay by up to +modDepthMs
-    // (see processSample()), so its maximum must cover delay + depth. A
-    // larger buffer does not change what any read returns (reads are
-    // relative to the write pointer), so the default sound is unaffected.
-    const int modHeadroomSamples = (int) std::ceil (modDepthMs * 0.001 * monoSpec.sampleRate) + 1;
-    sizeDelay (branch.allpass1.delayLine, allpass1Ms, modHeadroomSamples);
+    // Infinite mode and user Modulation move allpass1's read delay by up
+    // to +-max(modDepthMs, maxModulationDepthMs) around its centre (see
+    // processSample()), so its maximum must cover the longest centre plus
+    // that depth.
+    const float maxDepthMs = juce::jmax (modDepthMs, maxModulationDepthMs);
+    const int modHeadroomSamples = (int) std::ceil (maxDepthMs * 0.001 * monoSpec.sampleRate) + 1;
+    branch.allpass1BaseSamples = sizeDelay (branch.allpass1.delayLine, allpass1Ms, modHeadroomSamples);
     branch.allpass1.feedback = branchAllpass1Feedback;
 
-    sizeDelay (branch.delay1, delay1Ms);
+    branch.delay1BaseSamples = sizeDelay (branch.delay1, delay1Ms);
 
-    sizeDelay (branch.allpass2.delayLine, allpass2Ms);
+    branch.allpass2BaseSamples = sizeDelay (branch.allpass2.delayLine, allpass2Ms);
     branch.allpass2.feedback = branchAllpass2Feedback;
 
-    sizeDelay (branch.delay2, delay2Ms);
+    branch.delay2BaseSamples = sizeDelay (branch.delay2, delay2Ms);
+}
+
+void DattorroTank::applySize (float size)
+{
+    // base * 1.0f is exact, so at Size 1 every line and tap gets exactly the
+    // value it had before Size existed (bit-identical, see the golden-hash
+    // tests). Off 1.0 the delays are fractional: delay1/delay2/allpass2
+    // read through Lagrange3rd, allpass1 through Thiran (see
+    // ModulatedDelayLineType for its glide-rate analysis).
+    for (auto* branch : { &branchA, &branchB })
+    {
+        branch->allpass1Samples = branch->allpass1BaseSamples * size;
+        branch->delay1Samples   = branch->delay1BaseSamples * size;
+        branch->allpass2Samples = branch->allpass2BaseSamples * size;
+        branch->delay2Samples   = branch->delay2BaseSamples * size;
+
+        branch->delay1.setDelay (branch->delay1Samples);
+        branch->allpass2.delayLine.setDelay (branch->allpass2Samples);
+        branch->delay2.setDelay (branch->delay2Samples);
+        // allpass1's delay is set every sample in processSample() (centre +
+        // modulation offset).
+    }
+
+    for (size_t i = 0; i < outputTapSamples.size(); ++i)
+        outputTapSamples[i] = outputTapBaseSamples[i] * size;
 }
 
 void DattorroTank::reset()
@@ -109,6 +136,14 @@ void DattorroTank::reset()
     modPhaseB = modPhaseOffsetB;
     levelEnvelope = 0.0f;
     levelGain = 1.0f;
+
+    // Size/Modulation: same snap-to-target rule, then scale the lines to
+    // the snapped Size and re-derive g from it.
+    smoothedSize.setCurrentAndTargetValue (smoothedSize.getTargetValue());
+    smoothedModulation.setCurrentAndTargetValue (smoothedModulation.getTargetValue());
+    appliedSize = smoothedSize.getTargetValue();
+    applySize (appliedSize);
+    decayGainDirty = true;
 }
 
 void DattorroTank::resetBranch (TankBranch& branch)
@@ -125,9 +160,54 @@ void DattorroTank::setDamping (float newDampingCoefficient)
     dampingCoefficient = newDampingCoefficient;
 }
 
-void DattorroTank::setDecay (float newDecayGain)
+void DattorroTank::setDecaySeconds (float newDecaySeconds)
 {
-    decayGain = newDecayGain;
+    // Called every block by the processor; only a real change re-derives g.
+    if (newDecaySeconds != decaySeconds)
+    {
+        decaySeconds = newDecaySeconds;
+        decayGainDirty = true;
+    }
+}
+
+void DattorroTank::setSize (float newSize)
+{
+    smoothedSize.setTargetValue (newSize);
+}
+
+void DattorroTank::setModulation (float newModulation)
+{
+    smoothedModulation.setTargetValue (newModulation);
+}
+
+float DattorroTank::decayGainFor (float newDecaySeconds, float size) noexcept
+{
+    // Double precision so the result is the correctly-rounded float of the
+    // exact mapping (decaySecondsForGain() relies on that to hit a target
+    // gain exactly). The RT60 floor only guards a division by zero.
+    const double rt60 = juce::jmax (1.0e-3, (double) newDecaySeconds);
+    const double g = std::pow (10.0, -3.0 * halfLoopSeconds * (double) size / rt60);
+    return (float) juce::jmin ((double) maxDecayGain, g);
+}
+
+float DattorroTank::decaySecondsForGain (float gain, float size) noexcept
+{
+    // Analytic inverse, then a short walk over neighbouring floats until
+    // decayGainFor() returns `gain` exactly (g rises monotonically with
+    // RT60). Gains outside (0, maxDecayGain] have no exact preimage; the
+    // closest analytic value is returned for them.
+    const double analytic = -3.0 * halfLoopSeconds * (double) size / std::log10 ((double) juce::jlimit (1.0e-6f, 0.999999f, gain));
+    float candidate = (float) analytic;
+
+    for (int step = 0; step < 1024; ++step)
+    {
+        const float g = decayGainFor (candidate, size);
+        if (g == gain)
+            break;
+        candidate = std::nextafter (candidate, g < gain ? std::numeric_limits<float>::max() : 0.0f);
+    }
+
+    return candidate;
 }
 
 void DattorroTank::setShimmerFeedbackGain (float newShimmerFeedbackGain)
@@ -198,14 +278,14 @@ float DattorroTank::processBranch (float input, TankBranch& branch)
     return out;
 }
 
-float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples)
+float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples, float configuredDelay)
 {
     // See the declaration-site comment: popSample's explicit-delayInSamples
     // overload calls setDelay() internally even when updateReadPointer is
     // false, so it would otherwise permanently shorten this delay line's
     // configured length for every later recirculating popSample(-1) call.
-    // Save/restore keeps this strictly a non-destructive output-only peek.
-    const float configuredDelay = delay.getDelay();
+    // Restoring the caller's configured value keeps this strictly a
+    // non-destructive output-only peek.
     float tapped = delay.popSample (0, offsetSamples, false);
     delay.setDelay (configuredDelay);
     return tapped;
@@ -213,6 +293,24 @@ float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples)
 
 float DattorroTank::processSample (float input, float externalFeedback)
 {
+    // Size glide and Decay (slice 2, see setSize()/setDecaySeconds()). When
+    // Size is not moving getNextValue() returns exactly appliedSize, so
+    // nothing below runs and steady-state cost is one compare; a Decay
+    // change re-derives g once.
+    const float size = smoothedSize.getNextValue();
+    if (size != appliedSize)
+    {
+        appliedSize = size;
+        applySize (size);
+        decayGainDirty = true;
+    }
+
+    if (decayGainDirty)
+    {
+        decayGain = decayGainFor (decaySeconds, appliedSize);
+        decayGainDirty = false;
+    }
+
     float diffused = input;
 
     for (auto& stage : diffuserStages)
@@ -269,20 +367,24 @@ float DattorroTank::processSample (float input, float externalFeedback)
     const float levelGainEffective = 1.0f + infiniteAmount * (levelGain - 1.0f);
     const float crossFeedGain = effectiveDecayGain * levelGainEffective;
 
-    // (b) allpass1 read-delay modulation. The offset is only computed when
-    // Infinite is actually ramped in, so at 0.0f each line gets back
-    // exactly the base delay prepare() configured (base + 0.0f == base).
+    // (b) allpass1 read-delay modulation, shared by Infinite and the user
+    // Modulation control (slice 2): the deeper of the two wins, so
+    // Infinite alone behaves exactly as before (max(0, x) == x for x >= 0).
+    // The offset is only computed when some depth is actually present, so
+    // with both at 0.0f each line gets back exactly its centre delay
+    // (centre + 0.0f == centre).
+    const float userDepth = smoothedModulation.getNextValue() * userModDepthSamples;
+    const float depth = juce::jmax (userDepth, infiniteAmount * modDepthSamples);
     float modOffsetA = 0.0f, modOffsetB = 0.0f;
 
-    if (infiniteAmount > 0.0f)
+    if (depth > 0.0f)
     {
-        const float depth = infiniteAmount * modDepthSamples;
         modOffsetA = depth * std::sin (modPhaseA);
         modOffsetB = depth * std::sin (modPhaseB);
     }
 
-    branchA.allpass1.delayLine.setDelay (allpass1BaseDelayA + modOffsetA);
-    branchB.allpass1.delayLine.setDelay (allpass1BaseDelayB + modOffsetB);
+    branchA.allpass1.delayLine.setDelay (branchA.allpass1Samples + modOffsetA);
+    branchB.allpass1.delayLine.setDelay (branchB.allpass1Samples + modOffsetB);
 
     // Freeze, second mechanism (see frozenMaxShimmerBlendWeight's header
     // comment for the full measured history): crossfades the shimmerWeight
@@ -330,14 +432,15 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // tankB_out, or the recirculating cross-feed -- output-only.
     // tankA_out/tankB_out are used purely for recirculation now, not
     // summed directly into the output.
+    const auto& taps = outputTapSamples;
     float tankOut = outputScale * (
-          peekTap (branchB.delay1, outputTapBDelay1aSamples)
-        + peekTap (branchB.delay1, outputTapBDelay1bSamples)
-        - peekTap (branchB.allpass2.delayLine, outputTapBAllpass2Samples)
-        + peekTap (branchB.delay2, outputTapBDelay2Samples)
-        - peekTap (branchA.delay1, outputTapADelay1Samples)
-        - peekTap (branchA.allpass2.delayLine, outputTapAAllpass2Samples)
-        - peekTap (branchA.delay2, outputTapADelay2Samples)
+          peekTap (branchB.delay1, taps[tapBDelay1a], branchB.delay1Samples)
+        + peekTap (branchB.delay1, taps[tapBDelay1b], branchB.delay1Samples)
+        - peekTap (branchB.allpass2.delayLine, taps[tapBAllpass2], branchB.allpass2Samples)
+        + peekTap (branchB.delay2, taps[tapBDelay2], branchB.delay2Samples)
+        - peekTap (branchA.delay1, taps[tapADelay1], branchA.delay1Samples)
+        - peekTap (branchA.allpass2.delayLine, taps[tapAAllpass2], branchA.allpass2Samples)
+        - peekTap (branchA.delay2, taps[tapADelay2], branchA.delay2Samples)
     );
 
     // Dattorro's right-channel tap set (see the outputTapRight* constants):
@@ -347,13 +450,13 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // shared cross-feed, upstream of both tap sets). Computed after the left
     // sum so the left output's arithmetic is untouched (bit-identical).
     lastRightOutput = outputScale * (
-          peekTap (branchA.delay1, outputTapRightADelay1aSamples)
-        + peekTap (branchA.delay1, outputTapRightADelay1bSamples)
-        - peekTap (branchA.allpass2.delayLine, outputTapRightAAllpass2Samples)
-        + peekTap (branchA.delay2, outputTapRightADelay2Samples)
-        - peekTap (branchB.delay1, outputTapRightBDelay1Samples)
-        - peekTap (branchB.allpass2.delayLine, outputTapRightBAllpass2Samples)
-        - peekTap (branchB.delay2, outputTapRightBDelay2Samples)
+          peekTap (branchA.delay1, taps[tapRightADelay1a], branchA.delay1Samples)
+        + peekTap (branchA.delay1, taps[tapRightADelay1b], branchA.delay1Samples)
+        - peekTap (branchA.allpass2.delayLine, taps[tapRightAAllpass2], branchA.allpass2Samples)
+        + peekTap (branchA.delay2, taps[tapRightADelay2], branchA.delay2Samples)
+        - peekTap (branchB.delay1, taps[tapRightBDelay1], branchB.delay1Samples)
+        - peekTap (branchB.allpass2.delayLine, taps[tapRightBAllpass2], branchB.allpass2Samples)
+        - peekTap (branchB.delay2, taps[tapRightBDelay2], branchB.delay2Samples)
     );
 
     return tankOut;

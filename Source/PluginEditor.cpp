@@ -48,7 +48,14 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
 {
     configureRotary (pitchShiftSlider, pitchShiftLabel, "Pitch Shift");
     pitchShiftSlider.setLookAndFeel (&bipolarLookAndFeel);
-    configureRotary (feedbackSlider, feedbackLabel, "Feedback");
+    // Slice 2: Decay (RT60 in seconds) replaces Feedback in the same slot.
+    configureRotary (decaySlider, decayLabel, "Decay");
+    decaySlider.setTextValueSuffix (" s");
+    decaySlider.setNumDecimalPlacesToDisplay (2);
+    decaySlider.setTooltip ("Reverb time (RT60) in seconds. The tank's loop gain is capped for stability, "
+                            "so the longest reachable decay grows with Size: about 7.7 s at Size 0.5, "
+                            "15 s at 1 and 20 s (the knob maximum) at 1.3 and above. Longer settings "
+                            "clamp to that limit.");
     configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
     configureRotary (shimmerSustainSlider, shimmerSustainLabel, "Shimmer Sustain");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
@@ -82,6 +89,14 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     preDelaySlider.setTextValueSuffix (" ms");
     lowCutSlider.setTextValueSuffix (" Hz");
     highCutSlider.setTextValueSuffix (" Hz");
+
+    // Slice 2 space controls (docs/reverb-space-research.md section 9.4),
+    // on the same second row.
+    configureRotary (sizeSlider,       sizeLabel,       "Size");
+    configureRotary (modulationSlider, modulationLabel, "Modulation");
+    sizeSlider.setTextValueSuffix (" x");
+    sizeSlider.setNumDecimalPlacesToDisplay (2);
+    modulationSlider.setNumDecimalPlacesToDisplay (2);
 
     addAndMakeVisible (bypassButton);
     addAndMakeVisible (freezeQuickToggle);
@@ -123,7 +138,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     preset19Button.onClick = [this] { pitchShiftSlider.setValue (19.0, juce::sendNotificationSync); };
 
     pitchShiftAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::pitchShift, pitchShiftSlider);
-    feedbackAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::feedback,   feedbackSlider);
+    decayAttachment      = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::decay,      decaySlider);
     shimmerAmountAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerAmount, shimmerAmountSlider);
     shimmerSustainAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerSustain, shimmerSustainSlider);
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
@@ -137,6 +152,8 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     preDelayAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::preDelay,   preDelaySlider);
     lowCutAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::lowCut,     lowCutSlider);
     highCutAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::highCut,    highCutSlider);
+    sizeAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::size,       sizeSlider);
+    modulationAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::modulation, modulationSlider);
 
     // Phase 6's own goal is a functional editor, not final-polish (see plan
     // doc) -- fixed-size, non-resizable is a deliberate choice for this
@@ -149,7 +166,9 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // fit this 9th knob, then 920 -> 1020 ("Loop Mix" dial) for the 10th, at
     // the same per-knob width every prior knob already uses. 320 -> 470
     // (2026-10-11) for a second knob row holding Pre-Delay/Low Cut/High Cut,
-    // instead of widening to 13 knobs in one row.
+    // instead of widening to 13 knobs in one row. Slice 2's Size and
+    // Modulation join that second row (5 of its 10 slots), so the size is
+    // unchanged.
     setSize (1020, 470);
 }
 
@@ -193,7 +212,7 @@ void MilleniaAudioProcessorEditor::resized()
     auto spaceRow = bounds.removeFromBottom (130);
     bounds.removeFromBottom (20); // headroom for the second row's labels
     const int knobWidth = bounds.getWidth() / 10;
-    for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider })
+    for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider, &sizeSlider, &modulationSlider })
         slider->setBounds (spaceRow.removeFromLeft (knobWidth));
 
     auto presetArea = bounds.removeFromBottom (28);
@@ -202,7 +221,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &feedbackSlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
+    for (auto* slider : { &pitchShiftSlider, &decaySlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

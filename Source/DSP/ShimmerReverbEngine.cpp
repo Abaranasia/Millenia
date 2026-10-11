@@ -127,9 +127,19 @@ void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
     applyPitchAndFreezeCrossfade();
 }
 
-void ShimmerReverbEngine::setFeedback (float newFeedback)
+void ShimmerReverbEngine::setDecaySeconds (float newDecaySeconds)
 {
-    tank.setDecay (newFeedback);
+    tank.setDecaySeconds (juce::jlimit (DattorroTank::minDecaySeconds, DattorroTank::maxDecaySeconds, newDecaySeconds));
+}
+
+void ShimmerReverbEngine::setSize (float newSize)
+{
+    tank.setSize (juce::jlimit (DattorroTank::minSize, DattorroTank::maxSize, newSize));
+}
+
+void ShimmerReverbEngine::setModulation (float newModulation)
+{
+    tank.setModulation (juce::jlimit (0.0f, 1.0f, newModulation));
 }
 
 void ShimmerReverbEngine::setDamping (float newDamping)

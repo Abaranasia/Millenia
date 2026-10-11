@@ -51,7 +51,7 @@ public:
     // safetyLimiter itself replaces an earlier bare std::tanh(...) stopgap
     // with a real, memoryless soft-knee limiter -- see SafetyLimiter.h for
     // the full design rationale. Because of this, the tank's
-    // own decayGain (DattorroTank::setDecay(), default 0.6f, already inside
+    // own decayGain (DattorroTank::setDecaySeconds() since slice 2; then setDecay(), default 0.6f, inside
     // the architecture doc's documented 0.6-0.85 "feedback gain" range) is
     // now the single knob controlling both how much sustains AND how much
     // of that sustain is pitch-shifted -- there is no longer a separate
@@ -89,12 +89,23 @@ public:
     // DattorroTank/PitchShifter but that ShimmerReverbEngine never routed
     // to its own public API. Plain setters for empirical tuning by ear /
     // future APVTS parameter callbacks, same convention as
-    // DattorroTank::setDecay()/SafetyLimiter::setThreshold() -- this class
+    // DattorroTank::setDamping()/SafetyLimiter::setThreshold() -- this class
     // still owns no parameter knowledge itself; APVTS/PluginProcessor
     // wiring is a later Phase 5 step, not this one.
     void setPitchShiftSemitones (float semitones);
-    void setFeedback (float newFeedback);
     void setDamping (float newDamping);
+
+    // Slice 2 space controls (docs/reverb-space-research.md section 9),
+    // forwarded to DattorroTank after clamping to its ranges: Decay as RT60
+    // seconds (replaces the old raw-gain setFeedback(); g is derived from
+    // RT60 and the current Size, ceiling 0.85), Size 0.5..2 (tank lines
+    // and output taps, glided per sample over 300 ms inside the tank) and
+    // Modulation 0..1 (0..1 ms allpass1 depth, ramped per sample inside the
+    // tank). Both ramps live in the DSP, so callers pass raw values. The
+    // tank keeps all three across prepare()/reset(), like its other state.
+    void setDecaySeconds (float newDecaySeconds);
+    void setSize (float newSize);
+    void setModulation (float newModulation);
 
     // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
     // comment), clamped to [0, 1] here -- never amplifies above unity, so

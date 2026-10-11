@@ -240,6 +240,56 @@ The default-settings sine fingerprint changed by design, from `be7b4e1487c0ce8b`
 - The width parameter's range changed in place under the same ID. This is acceptable because no presets have shipped.
 - Next slices: always-on modulation, RT60 decay, and a Size control (section 7, items 3–5).
 
+## 2026-10-11 — Reverb space, slice 2: Decay in seconds, Size, Modulation
+
+Branch `feat/reverb-size`. Plan: [`reverb-space-research.md`](./reverb-space-research.md) section 9; deviations are in 9.7.
+
+### What changed
+
+- **Decay (RT60).** A new `decay` parameter (0.3–20 s, log skew, default 7.0 s) replaces `feedback`. The tank derives `g = 10^(−3·L_half·size/RT60)` from it, with `L_half` = 362.70 ms (the mean branch length, since the gain is applied once per branch). g is clamped to 0.85 and recomputed whenever Decay or the smoothed Size changes. Freeze and Infinite override it as before. 7.0 s gives g = 0.6993.
+- **Size.** A new `size` parameter (0.5–2×, default 1). It scales both branches' allpass1/delay1/allpass2/delay2 and all 14 output taps. The input diffusers are not scaled. Lines are allocated for 2× plus modulation headroom in `prepare()`. Size glides per sample over 300 ms (linear), and only `setDelay()` runs while it moves.
+- **Modulation.** A new `modulation` parameter (0–1 → 0–1 ms, default 0.3) on both allpass1 lines, reusing Infinite's Thiran lines and its 0.5/0.7 Hz LFOs. Effective depth is `max(user, infinite × 0.5 ms)`. It is ramped per sample over 50 ms.
+- **Tap restore.** `peekTap()` now restores the configured delay from the branch's stored value instead of `getDelay()`. At fractional delays, `getDelay()` can be off by one ulp.
+- **Editor.** Feedback became Decay (seconds, with a tooltip about the ceiling). Size and Modulation joined the second row. The window size is unchanged.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| Golden hashes at Modulation 0 + `decaySecondsForGain(0.7f)` (7.024514 s) | tank `475497026ccf0ceb`, engine L `918d1cec9419a789`, engine sine `106b8609081503f9`: all unchanged |
+| Bare-tank RT60, Schroeder T30 fit (Size 1: 2 s / 5 s) | 2.248 s (+12.4%) / 5.522 s (+10.4%) |
+| Bare-tank RT60 (Size 2: 2 s / 5 s) | 2.274 s (+13.7%) / 5.611 s (+12.2%) |
+| RT60 4 s at Size 0.5 vs Size 2 | 4.164 s vs 4.522 s (ratio 1.086) |
+| Max g over a Decay × Size sweep, and while Size glides | 0.850000 / 0.850000 |
+| First tap arrival, Size 1 → 2 | 392 → 786 samples (ratio 2.005) |
+| Size glide 1→2 (Thiran), max sample delta glide/steady | 1.046× |
+| Tank Size automation, Modulation 1, g 0.85, 20 s noise | peak 2.08 |
+| Frozen tank at Size 2 + Modulation 1 + g 0.85, 180 s noise | peak 8.85 (bound 10) |
+| Engine Size automation / 180 s stress (Size 2, Modulation 1, Decay 20 s, Freeze from 60 s) | peak 1.89 / 1.96 |
+| Engine decay to silence at those settings | final-second peak 0 at 40 s (3.05e-4 at 20 s) |
+| Full-engine RT60, Decay 2 s / 7 s | 2.07 s / 6.20 s |
+| Real-time factor at defaults (Release) | 0.043 (slice 1: ~0.037) |
+
+The bare tank runs 10–14% long against the nominal value. The cause is allpass energy storage: the energy-weighted delay of an allpass is `M/(1−g²)`, which gives an effective `L_half` of about 413 ms. Correcting for it would move the 7 s default to g ≈ 0.666, so that change is left open.
+
+**PitchShifter offset stability** (block size 1, last 5 s of 10 s, Shimmer Amount 1). Each cell is the mean primary−quadrature offset divergence / the number of primary-offset jumps over 10 samples.
+
+| Tone | Mod 0 | Mod 0.3 | Mod 1.0 |
+|---|---|---|---|
+| 220 Hz | 164.3 / 6 | 185.8 / 7 | 70.0 / 89 |
+| 330 Hz | 27.4 / 16 | 91.9 / 13 | 24.0 / 70 |
+
+At 0.3, the jump count matches Mod 0, but the divergence rises (×1.1 at 220 Hz, ×3.4 at 330 Hz). At 1.0, jumps rise 5–15×.
+
+**Shimmer Sustain vs Modulation.** The tail-decay gap between Sustain 0 and Sustain 1 is 2.4 dB at Modulation 0, about 0 at 0.2–0.3, and −0.6 dB at 1.0. Modulation decorrelates the direct and shifter-delayed loop copies, and the comb loss Sustain relies on goes with that correlation. The Sustain test is now pinned to Modulation 0, and the dependence is logged.
+
+### Still open
+
+- Default Modulation: 0.3 was kept as specified. At that setting Sustain's decay effect is gone (its Width gating still works), and the shifter's offset divergence rises. The alternatives are a lower default (around 0.1) or modulating only some lines.
+- Whether to calibrate `L_half` for allpass storage (+14%).
+- Ear test: Size sweeps, Decay 1–20 s at several Sizes, and Modulation 0 / 0.3 / 1.
+- The Thiran glide measured as click-free (1.05×). Lagrange reads at fractional Size add a slight per-pass HF loss off Size 1.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against
