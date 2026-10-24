@@ -72,7 +72,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // header comment for its two effects (DattorroTank's recirculation cap,
     // INVERTED, plus a direct gate on process()'s audible Width/decorrelation
     // injection). Independently controls how present and long-lived the
-    // shimmer layer is, decoupled from both Feedback (decayGain) and Shimmer
+    // shimmer layer is, decoupled from both Decay (decayGain) and Shimmer
     // Amount (shimmerFeedbackGain, the overall shimmer level).
     //
     // Default 0.85f matches ShimmerReverbEngine::defaultShimmerSustainAmount

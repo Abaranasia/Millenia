@@ -13,7 +13,7 @@
 //     they arrive. Adding delay HERE, inside the recirculating loop, would
 //     corrupt DattorroTank's own delay-line lengths, which were empirically
 //     tuned across Phases 2-3 against exact round-trip timing (see
-//     DattorroTank.h's defaultDecayGain comment history) -- this is not the
+//     DattorroTank.h's decay-gain history comment) -- this is not the
 //     plugin's final output stage, where a few extra samples of latency
 //     would be free.
 //   - An envelope follower's attack/release time constants could interact
@@ -69,7 +69,7 @@ public:
     float processSample (float input);
 
     // Plain setter for empirical tuning by ear, same convention as
-    // DattorroTank::setDecay()/setDamping() -- Phase 5 wires this to a real
+    // DattorroTank::setDecaySeconds()/setDamping() -- Phase 5 wires this to a real
     // parameter; this class owns no parameter knowledge itself.
     void setThreshold (float newThreshold);
 
