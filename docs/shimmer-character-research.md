@@ -9,7 +9,7 @@ Line numbers are as of 2026-10-24. Comments in `Source/` are being edited at the
 
 The user says the effect "never sounded like a shimmer". The project history shows a recurring loop:
 
-1. The octave was too audible, and the user reported "chipmunk" or "HF noise wall".
+1. The octave was too audible or too harsh, and the user reported "chipmunk".
 2. The shifted share of the loop was cut, or the octave was corrected toward the dry timbre.
 3. The shimmer became quiet or short-lived.
 
@@ -31,7 +31,13 @@ tank.feedbackFromB (end of branch B, after damping)            ShimmerReverbEngi
 ```
 
 - **Placement.** The shifter sits in the loop (in-tank). The shifted signal replaces part of the branch-B to branch-A cross-feed, after the input diffusers. This is the classic topology and is not the problem.
-- **Feed-forward side term.** A second, raw shifted copy reaches the output directly as a side-only signal: `0.15 · amount · sustain · 0.5 · (primary − quadrature)` (`ShimmerReverbEngine.cpp:566-567`). It cancels in mono.
+- **Feed-forward side term.** A second shifted signal reaches the output directly as a side-only signal, without passing through the tank again. It is not a raw shifter output:
+  - Both voices are formant-corrected: the primary at `:408`, the quadrature at `:492`.
+  - Both are DC-blocked and SafetyLimited (`:427`, `:438` and their quadrature counterparts).
+  - Their difference is limited again: `sideShift = limiter(safeFeedback − quadratureSafe)`.
+  - It is then scaled by `0.15 · amount · sustain · 0.5` (`ShimmerReverbEngine.cpp:566-567`).
+
+  It skips the tank's diffusion, so it carries the single-pass pitch-shifter sound, and it cancels in mono.
 
 ### 2.2 Gain staging of the shifted path
 
@@ -43,7 +49,7 @@ tank.feedbackFromB (end of branch B, after damping)            ShimmerReverbEngi
 | Sustain = 1.0 (knob fully up) | shimmerWeight = 0: **no shifted signal recirculates** | same |
 | Blend law | Linear: `plain + shimmer = 1` (amplitude, not energy) | `DattorroTank.cpp:398` |
 | Decay gain g | 0.6993 at 7 s / Size 1, ceiling 0.85 | `DattorroTank.h:142`, journal slice 2 |
-| Frozen cap | 0.01 | `DattorroTank.h:524` |
+| Frozen cap | 0.01 | `DattorroTank.h:525` |
 
 History of the cap:
 - **0.5** on 2026-08-18.
@@ -60,7 +66,7 @@ So the default now recirculates less than a fifth of the shifted share that the 
 | Base delay | 4 grains ≈ 80 ms, so the shifted copy lags the plain copy by about 80 ms | `PitchShifter.h:303` |
 | Known artifact | Pitch "oscillation" at ±12 st. The alignment search pins to the window edge on 99.6% of launches on a tonal drone. Closed as a permanent limitation after 7 reverted fixes | formant doc §11 |
 | Formant correction | Order-10 LPC, 40 ms window, 20 ms hop. Pulls the shifted envelope back to the dry envelope every pass, gain-normalized | `FormantEnvelopeCorrector.h:151-158` |
-| Anti-alias / tone filter before or after the shift | **None.** Lagrange-3 reads at ratio 2 fold everything above fs/4 (11 kHz at 44.1 kHz) | grep of `PitchShifter.*` |
+| Anti-alias / tone filter before or after the shift | **None.** Lagrange-3 reads at ratio 2 fold everything above fs/4 (11 kHz at 44.1 kHz). At +24 (ratio 4) the threshold drops to fs/8 (5.5 kHz) | grep of `PitchShifter.*` |
 | In-loop HF loss | Damping default 0.0005, which puts the cutoff above Nyquist. Wet High Cut default 20 kHz is output-only | `Parameters.cpp:115-119, 152-155` |
 | Interval | One voice, continuous −24..+24, default +12. No +7/+19 voice | `Parameters.cpp:13-17` |
 
@@ -107,10 +113,12 @@ Valhalla pages were read through search summaries; direct fetches returned HTTP 
 ### What the classic designs agree on
 
 1. **The shifted feedback is large.** About 0.5 or more of the loop, so the octave reaches parity with the fundamental within roughly one loop. Ours is 0.15.
-2. **The feedback path is band-limited**, through a dark mode, a tone control or crossover-selected bands. This removes aliasing and makes the upper generations roll off naturally after 2–3 octaves, instead of climbing into hiss. We have no band-limiting in the shifted path, and the Phase 8 "wall of HF noise" report is exactly that failure.
+2. **The feedback path is band-limited**, through a dark mode, a tone control or crossover-selected bands. This removes aliasing and makes the upper generations roll off naturally after 2–3 octaves, instead of climbing into hiss. We have no band-limiting in the shifted path.
+
+   The Phase 8 "wall of HF noise" (2026-08-18) is **not** evidence for this. It was traced to the additive loop-gain bug: loop gain was about 1.7 and clipped by the limiter. The budget-conserving crossfade fixed it (`shimmer-reverb-implementation-plan.md:317-320`). Content pushed toward Nyquist was at most a secondary contributor. Band-limiting matters here as a **prerequisite** for raising the shifted share, not as a fix for a reported symptom.
 3. **Nobody formant-corrects.** The brightening octave is the effect. A corrector that pulls each pass back to the dry envelope works against the shimmer.
 4. **Simple shifters are fine, even preferred.** Splice and grain artifacts are re-diffused on every pass and read as "shimmer". Valhalla randomizes grain timing to avoid comb coloration rather than chasing waveform-aligned splices. Its reverse-grain mode trades motion for smoothness.
-5. **Diffusion around the shifter.** Valhalla's loop contains diffusors, and our in-tank placement already gives that. The raw feed-forward copy is what "a pitch shifter in parallel" sounds like. Our side term is exactly that, and the user described it in those words on 2026-08-16.
+5. **Diffusion around the shifter.** Valhalla's loop contains diffusors, and our in-tank placement already gives that. A shifted copy that skips the reverb is what "a pitch shifter in parallel" sounds like. Our side term is that kind of copy (corrected and limited, but not re-diffused), and the user described it in those words on 2026-08-16.
 
 ### Open-source references (ideas only from GPL)
 
@@ -130,9 +138,9 @@ See also [`shimmer-reverb-open-source-survey.md`](./shimmer-reverb-open-source-s
 |---|---|---|---|
 | 1 | **The shifted share of the loop is tiny at defaults** (0.15). The octave never catches up with the fundamental before the tail dies. With Sustain fully up there is **no cascade at all**, so the knob's top end removes the shimmer | **High** | Code (§2.2) + model (§3) + history (0.85 cap was "much longer"; inversion 2026-09-06) |
 | 2 | **The linear blend loses energy** (`plainWeight² + shimmerWeight²`), so more shimmer shortens the tail. This drove the cap down and the knob inverted. It is misattributed to comb filtering | **Medium-high** | Model predicts a 0.83 RT60 ratio; measured 0.80 (6.20 s vs ≈ 7.8 s bare) |
-| 3 | **No band-limiting in the shifted path.** Aliasing above fs/4 and unbounded upper generations made a large shimmer share sound like hiss ("wall of HF noise", 2026-08-18), which pushed the share down | **Medium** | No filter in the path (§2.3); Valhalla's dark mode exists for exactly this |
-| 4 | **Formant correction is anti-shimmer.** It re-imposes the unshifted envelope on the octave every pass, removing the brightness lift that identifies a shimmer. It also measurably narrows the stereo image (≈ 50% side retention) | **Medium**: the mechanism is certain, the perceptual weight is not measured | `FormantEnvelopeCorrector.h:7-29`; formant doc §13 |
-| 5 | **What is audible as shimmer is mostly the raw feed-forward side term**, the "parallel pitch shifter" sound. It vanishes in mono and gets louder as Sustain goes up, while the cascade gets weaker | **Medium** | `ShimmerReverbEngine.cpp:566-567`; ear report 2026-08-16; Sustain round 2 notes |
+| 3 | **Formant correction is anti-shimmer.** It re-imposes the unshifted envelope on the octave every pass, removing the brightness lift that identifies a shimmer. It acts on the side term directly too: both voices feeding `sideShift` are corrected (`:408`, `:492`), and correction keeps only ≈ 50% of the uncorrected side RMS | **Medium**: the mechanism is certain, the perceptual weight is not measured | `FormantEnvelopeCorrector.h:7-29`; formant doc §13 |
+| 4 | **What is audible as shimmer is mostly the feed-forward side term.** It is formant-corrected and limited, but never re-diffused by the tank, so it gives the "parallel pitch shifter" sound. It vanishes in mono and gets louder as Sustain goes up, while the cascade gets weaker | **Medium** | `ShimmerReverbEngine.cpp:408, 492, 566-567`; ear report 2026-08-16; Sustain round 2 notes |
+| 5 | **No band-limiting in the shifted path.** Content above fs/(2·ratio) aliases, and nothing makes upper generations roll off. Today, with the small share from cause #1, this matters little. It becomes a blocker once the share is raised. The 2026-08-18 "wall of HF noise" is **not** evidence for it: that was the additive loop-gain bug (loop gain ≈ 1.7, limiter-clipped), fixed by the crossfade (`shimmer-reverb-implementation-plan.md:317-320`) | **Low-medium** (as a current cause); high as a prerequisite | No filter in the path (§2.3); Valhalla's dark mode exists for exactly this |
 | 6 | **Shifter character.** Short 20 ms grains and correlation-aligned splices give the documented ±12 st pitch oscillation and the "grainy/low-bitrate" reports. This is a quality issue, not why the shimmer is absent | **Low-medium** | Formant doc §11; ear reports 2026-08-21 |
 | 7 | Interactions with Modulation (0.1 default) and Size. They affect shifter offset stability but not the shimmer's presence | Low | Journal slice 2 |
 
@@ -142,7 +150,7 @@ See also [`shimmer-reverb-open-source-survey.md`](./shimmer-reverb-open-source-s
 |---|---|---|---|---|
 | 1 | **Energy-preserving blend** for shifted feedback: `plainWeight = √(1 − shimmerWeight²)` when \|shift\| ≥ 1 st. Blend back to today's linear law as the shift goes toward 0 st, because the copies are correlated there and equal-power could exceed unity | `DattorroTank::processSample` (needs the shift amount) | Low | Medium: rerun every stability test; harmonic input at +12 overlaps partially (2nd harmonic vs shifted fundamental) |
 | 2 | **Restore a large shifted share and un-invert Sustain.** Once #1 removes the energy loss, the inversion has no reason to exist. Target default shimmerWeight ≈ 0.5–0.6, user tunes | Engine mapping + parameter default | Trivial | Low |
-| 3 | **Shimmer Tone: a low-pass on the signal entering the shifter**, default ≈ 5 kHz, range 1.5–10 kHz. It is also the anti-alias filter: content stays at or below 2·fc after the shift, so it stays under Nyquist at 44.1 kHz and above when fc ≤ fs/4. Optional fixed high-pass ≈ 80–150 Hz | Engine, before `shifter.processSample` | Low | Low (one-pole or TPT, no latency) |
+| 3 | **Shimmer Tone: a low-pass on the signal entering the shifter**, default ≈ 5 kHz, range 1.5–10 kHz plus an Off endpoint. It doubles as the anti-alias filter, but only if the cutoff tracks the shift. Shifted content is f·ratio, so aliasing starts above fs/(2·ratio): fs/4 at +12, **fs/8 at +24** (5.5 kHz at 44.1 kHz). A 2nd-order TPT is only 12 dB/oct, far from a brick wall. So: 4th-order (two cascaded TPT sections), with effective cutoff `min(Tone, fs / (4·max(ratio, 1)))`, one octave under the alias threshold. Optional fixed high-pass ≈ 80–150 Hz | Engine, before `shifter.processSample` | Low | Low: no latency. The cap darkens +19/+24 noticeably; that cost is the user's call |
 | 4 | **Formant correction off by default** (bypass in the shimmer loop), kept behind a toggle for A/B | Engine | Trivial | Low: a bit-identical bypass already exists at ≤ 0 st |
 | 5 | Shimmer side term: drop it, or tie it to Width only, once the cascade carries the shimmer | Engine | Trivial | Low |
 | 6 | Shifter rework: **randomized grain timing** (Valhalla idea) and/or longer grains (40–80 ms), or a plain two-tap shifter without the correlation search (Clouds idea), plus an optional reverse-grain "smooth" mode | `PitchShifter` | Medium–high | Medium: retunes everything downstream |
@@ -168,22 +176,30 @@ Each sub-change gets its own commit, so the user can build and ear-test each ste
    - Default 0.55, so shimmerWeight = 0.55 at Amount 1. This is a starting point for the user's tuning.
    - The side term's `shimmerSustainAmount` gate keeps its value.
 3. **Shimmer Tone.**
-   - New parameter `shimmerTone`: 1.5–10 kHz, log skew, default 5 kHz.
-   - It is a 2nd-order TPT low-pass on `dryFeedback` before **both** `shifter` and the corrector's dry analysis. It is not applied to `unityShifter`, so Freeze stays untouched.
+   - New parameter `shimmerTone`: 1.5–10 kHz, log skew, default 5 kHz. The top endpoint is labelled **Off**: the filter keeps running warm, but its output is unused, the same pattern as the wet EQ endpoints. Off is the legacy path and does not alias-protect.
+   - It is a 4th-order low-pass (two cascaded TPT sections) on `dryFeedback`.
+   - Effective cutoff is `min(shimmerTone, fs / (4·max(ratio, 1)))`. At 44.1 kHz that caps it at 5.5 kHz at +12 and 2.76 kHz at +24. Downward shifts are not capped.
+   - It feeds **both** `shifter` and the corrector's dry analysis. It is not applied to `unityShifter`, so Freeze stays untouched.
+   - **It also changes the side term.** Both grain pools read the filtered signal, so `sideShift` loses the same top end.
 4. **Formant correction.**
    - New bool parameter `formantCorrection`, default **off**.
-   - When off, the shifted signal bypasses `FormantEnvelopeCorrector`. The corrector keeps running so its state stays warm, the same pattern as the wet EQ.
+   - When off, the primary and quadrature shifted signals bypass `FormantEnvelopeCorrector` (`:408` and `:492`). The corrector keeps running so its state stays warm, the same pattern as the wet EQ.
+   - **It also changes the side term.** Uncorrected voices are less correlated, so expect the side RMS to rise by up to about 2× (+6 dB), the inverse of the ≈ 50% retention in formant doc §13. Ear-check Width at 1 and 2 at step D.
+5. **Legacy path, test-only.**
+   - `setLegacyShimmerBlendForTesting(bool)` restores the linear law and the inverted `1 − Sustain` mapping.
+   - It uses the same idiom as `forceUnityShifterActiveForTesting()` and is never called by `PluginProcessor`.
+   - Together with Tone Off and formant on, it reproduces today's arithmetic exactly. T6 relies on this.
 
 ### 7.2 Tests (written first)
 
 | # | Test | Assertion |
 |---|---|---|
-| T1 | **Cascade emergence.** 220 Hz, 0.5 s burst, defaults. Goertzel at 220/440/880 Hz in 200 ms windows at t = 1, 2, 3 s | At t = 1.5 s, (440 − 220) improves by ≥ 9 dB over a pinned legacy run. Absolute levels are logged for the user |
+| T1 | **Cascade emergence.** 220 Hz, 0.5 s burst, defaults. Hann-windowed FFT over 400 ms windows (2.5 Hz bins) centred at t = 1.0, 1.5, 2.0 and 3.0 s. Measure **band energy** in ±1/6-octave bands around 220, 440 and 880 Hz, not single bins, so the known ±12 st pitch oscillation (detuning) stays inside the band | At the t = 1.5 s window, (440-band − 220-band) improves by ≥ 9 dB over the legacy path (T6 settings). All windows and the 880 band are logged for the user |
 | T2 | **Energy-neutral blend.** Full-engine RT60 at +12 st, Decay 5 s, shimmerWeight 0 / 0.5 / 0.85 | Within ±10% of each other. Today it drops with the blend. Also tests the hypothesis in §3 |
-| T3 | **Anti-alias.** 15 kHz sine into the engine at 44.1 kHz, +12 | Energy at the alias (14.1 kHz) in the wet output is more than 40 dB below the input. Log the same figure with Tone at maximum |
+| T3 | **Anti-alias**, at 44.1 kHz, Tone at its 10 kHz maximum (not Off), so only the ratio cap protects. Two cases: (a) +12 with a 15 kHz sine, alias at 44.1 − 30 = 14.1 kHz; (b) +24 with an 8 kHz sine, alias at 44.1 − 32 = 12.1 kHz | Alias-band energy in the wet output is ≥ 30 dB below the same measurement with Tone Off. Expected about −37 dB at 24 dB/oct, about 1.5 octaves above the capped cutoff. Log the Off figure too |
 | T4 | **Near-unity guard.** Pitch 0 st and ±0.5 st, maximum shimmer, 180 s noise | Bounded (≤ 10), and decays to silence |
 | T5 | **Harmonic stress.** Sawtooth chord, +12, Shimmer Feedback 1.0, Decay 20 s, Size 2, Modulation 1, 180 s | Bounded; freeze-boundedness and decay-to-silence still pass |
-| T6 | **Toggle bit-identity.** Formant on + Tone at max + legacy mapping | Bit-identical to pre-change golden hashes |
+| T6 | **Legacy-path bit-identity.** `setLegacyShimmerBlendForTesting(true)` + Tone Off + formant on, with the pre-change golden settings | Bit-identical to the pre-change golden hashes. This works because each new stage is either output-gated at its endpoint (Tone Off, formant on) or replaced by the old arithmetic (legacy flag) |
 | T7 | Existing suite | Green. Golden default hashes change by design and are recorded |
 
 ### 7.3 A/B ear-test plan (user)
@@ -198,8 +214,8 @@ Each sub-change gets its own commit, so the user can build and ear-test each ste
 | Step | Listen for | Call to make |
 |---|---|---|
 | A → B | An ascending octave clearly present within about 1 s, and a tail as long as A's | Shimmer Feedback default (sweep 0.3 / 0.55 / 0.8) |
-| B → C | Hiss or "wall of noise" gone; upper octaves fade after 2–3 generations | Tone default (sweep 3 / 5 / 8 kHz) |
-| C → D | Brighter, more "angelic" octave; check whether high notes now read as "chipmunk" | Keep formant off or on |
+| B → C | Any aliasing hiss at the higher share is gone; upper octaves fade after 2–3 generations; also try +19/+24, where the cap darkens the shimmer | Tone default (sweep 3 / 5 / 8 kHz) |
+| C → D | Brighter, more "angelic" octave; check whether high notes now read as "chipmunk"; at Width 1 and 2, check that the wider side term is not harsh | Keep formant off or on |
 | Mono check (Width 0) | The shimmer must survive in mono. Today's side term vanishes | — |
 
 ## 8. Decisions for the user
@@ -215,6 +231,9 @@ Each sub-change gets its own commit, so the user can build and ear-test each ste
    - Randomized grain timing in the existing grain pool.
    - A simple two-tap shifter without correlation search, which may also close the ±12 st pitch-oscillation limitation.
    - Keep as is.
+6. **Tone cap at large intervals.**
+   - Recommended: the ratio-tracking cap. It is alias-free, but darker at +19/+24 (2.76 kHz at +24, 44.1 kHz).
+   - Alternatives: accept some aliasing at large intervals, or oversample the shifter at higher CPU cost.
 
 ## 9. Constraints carried over
 
