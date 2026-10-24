@@ -16,4 +16,5 @@ Project-scoped skills under `.claude/skills/`, applied automatically by trigger 
 - [docs/reference/](docs/reference/README.md) — external design/DSP docs from comparable reverb plugins (LushVerb, FlutterVerb), imported for comparison against our own shimmer reverb design
 - [docs/shimmer-reverb-implementation-plan.md](docs/shimmer-reverb-implementation-plan.md) — phased, checklist-level build plan for the shimmer reverb DSP and plugin shell
 - [docs/reverb-space-research.md](docs/reverb-space-research.md) — research on why the reverb sounds small: pre-slice-1 design facts, perceptual size cues, algorithm families, papers, open-source references, ranked improvement list
+- [docs/shimmer-character-research.md](docs/shimmer-character-research.md) — research on why the effect never sounded like a shimmer: current shimmer path facts, cascade-level model, how classic shimmers are built, ranked root causes, proposed slice 1 (blend law, Shimmer Tone, formant off)
 - [docs/reverb-dev-journal.md](docs/reverb-dev-journal.md) — running log of what's actually been built against the implementation plan, phase by phase

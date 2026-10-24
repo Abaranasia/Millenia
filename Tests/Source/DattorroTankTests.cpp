@@ -270,7 +270,7 @@ public:
             // "Shimmer Sustain" task (see Source/DSP/DattorroTank.h's comment
             // above maxShimmerBlendWeight): this constant just became a
             // runtime-adjustable, UNCLAMPED (same convention as
-            // setDecay()/setDamping()/setShimmerFeedbackGain()/
+            // setDecaySeconds()/setDamping()/setShimmerFeedbackGain()/
             // setFreezeAmount()) instance member via setMaxShimmerBlendWeight().
             // The header's own safety argument is that shimmerWeight+plainWeight
             // == 1.0 exactly for ANY value in [0, 1], so the combined feedback

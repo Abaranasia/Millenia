@@ -84,7 +84,7 @@ public:
 
 private:
     // Fast enough to track real level changes (a genuine new sound arriving,
-    // Feedback/Shimmer Amount changes) without being so fast it responds to
+    // Decay/Shimmer Amount changes) without being so fast it responds to
     // individual waveform cycles; slow enough not to pump on the reverb
     // tail's own natural envelope fluctuation.
     static constexpr float fastAttackSeconds = 0.3f;

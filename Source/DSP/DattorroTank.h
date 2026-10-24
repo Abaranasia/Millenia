@@ -126,7 +126,7 @@ public:
     // Ranges/defaults shared with ShimmerReverbEngine and the APVTS
     // layout (Parameters.cpp keeps its own literals in sync by hand).
     // defaultDecaySeconds gives g = 0.6993 at Size 1, i.e. the old fixed
-    // 0.7f default to within 0.1% (see the defaultDecayGain history below).
+    // 0.7f default to within 0.1% (see the decay-gain history below).
     static constexpr float minDecaySeconds = 0.3f;
     static constexpr float maxDecaySeconds = 20.0f;
     static constexpr float defaultDecaySeconds = 7.0f;
@@ -148,7 +148,7 @@ public:
     // maxShimmerBlendWeight's comment for why that was a real bug). The
     // COMBINED total feedback gain reaching the tank stays bounded by
     // decayGain alone at every setting. Not clamped here (same convention
-    // as setDecay()/setDamping() -- the APVTS parameter range is the source
+    // as setDecaySeconds()/setDamping() -- the APVTS parameter range is the source
     // of truth); ShimmerReverbEngine::setShimmerAmount() clamps to [0, 1]
     // before calling this.
     void setShimmerFeedbackGain (float newShimmerFeedbackGain);
@@ -156,8 +156,8 @@ public:
     // "Shimmer Sustain" task: runtime setter for maxShimmerBlendWeight (see
     // that member's comment above and processSample()'s
     // effectiveMaxShimmerBlendWeight) -- how long the shimmer layer itself
-    // sustains, independent of decayGain (Feedback) and shimmerFeedbackGain
-    // (Shimmer Amount). Not clamped here, same convention as setDecay()/
+    // sustains, independent of decayGain (Decay) and shimmerFeedbackGain
+    // (Shimmer Amount). Not clamped here, same convention as setDecaySeconds()/
     // setDamping()/setShimmerFeedbackGain()/setFreezeAmount() -- the APVTS
     // parameter range is the source of truth; ShimmerReverbEngine::
     // setShimmerSustain() clamps to [0, 1] before calling this.
@@ -376,7 +376,8 @@ private:
     // "sounds like a delay, not a reverb").
     static constexpr float defaultDampingCoefficient = 0.0005f;
 
-    // Bumped from 0.5f to 0.7f, then walked back down to 0.6f during Phase 2
+    // Decay-gain history (the former fixed defaultDecayGain constant, removed
+    // in slice 2): bumped from 0.5f to 0.7f, then walked back down to 0.6f during Phase 2
     // (plain, unshifted tank): a live listening pass after the 0.7f bump
     // reported still hearing distinct spaced-out echoes -- 0.7f means the
     // ~725ms full cross-feed round trip needs ~10 repeats to decay past
@@ -448,7 +449,7 @@ private:
     // "Shimmer Sustain" task: promoted from a compile-time constant to a
     // plain, runtime-adjustable instance member (see setMaxShimmerBlendWeight()
     // below) so the user can directly control how long the shimmer layer
-    // itself sustains, independent of decayGain (Feedback) and
+    // itself sustains, independent of decayGain (Decay) and
     // shimmerFeedbackGain (Shimmer Amount). The safety argument above --
     // shimmerWeight + plainWeight == 1.0 exactly, for ANY value in [0, 1] --
     // holds unchanged regardless of who sets this value or when.

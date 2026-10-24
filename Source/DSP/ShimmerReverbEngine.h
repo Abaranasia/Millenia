@@ -51,14 +51,14 @@ public:
     // safetyLimiter itself replaces an earlier bare std::tanh(...) stopgap
     // with a real, memoryless soft-knee limiter -- see SafetyLimiter.h for
     // the full design rationale. Because of this, the tank's
-    // own decayGain (DattorroTank::setDecaySeconds() since slice 2; then setDecay(), default 0.6f, inside
-    // the architecture doc's documented 0.6-0.85 "feedback gain" range) is
+    // own decayGain (originally a fixed raw gain inside the architecture
+    // doc's documented 0.6-0.85 "feedback gain" range; since slice 2
+    // derived from the RT60 Decay via setDecaySeconds(), capped at 0.85) is
     // now the single knob controlling both how much sustains AND how much
     // of that sustain is pitch-shifted -- there is no longer a separate
     // "shimmer amount" vs. "reverb decay" knob, since after this change
-    // there's only one recirculation path. Reconciling this with Phase 5's
-    // originally-planned separate "feedback" parameter is an open decision
-    // for that phase, not resolved here.
+    // there's only one recirculation path. Phase 5 exposed this knob as the
+    // Feedback parameter; slice 2 replaced it with Decay (RT60 in seconds).
     //
     // Phase 4 stereo decorrelation: everything above (tank input, shifter
     // feeding back into the tank, feedbackDcBlocker, safetyLimiter,
@@ -121,7 +121,7 @@ public:
 
     // "Shimmer Sustain" task: clamped to [0, 1], same convention as
     // setShimmerAmount()/setWidth()/setFreezeAmount(). Controls how present
-    // and how long-lived the shimmer layer is, independent of Feedback
+    // and how long-lived the shimmer layer is, independent of Decay
     // (decayGain) and Shimmer Amount (shimmerFeedbackGain, the OVERALL
     // shimmer level). Two effects, both driven by this single value:
     //

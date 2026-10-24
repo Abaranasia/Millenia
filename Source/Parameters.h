@@ -55,7 +55,7 @@ namespace ParamIDs
     // "Infinite mode" section and DattorroTank::setInfiniteAmount()): the
     // tail never decays AND fresh input keeps layering on top -- unlike
     // Freeze above, nothing mutes the input. A separate, independent toggle
-    // from Feedback/Freeze. juce::AudioParameterBool, same reasoning as
+    // from Decay/Freeze. juce::AudioParameterBool, same reasoning as
     // freeze's original bool and bypass (audible, must be host-automatable/
     // state-saveable); the 0/1 jump is ramped sample-accurately inside
     // DattorroTank, so PluginProcessor reads it raw.

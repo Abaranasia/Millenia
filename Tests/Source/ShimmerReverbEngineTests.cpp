@@ -19,8 +19,9 @@
 // DattorroTank::peekFeedbackSignal()/the two-argument processSample()
 // overload, matching shimmer-reverb-architecture.md's documented topology.
 // There is no longer a separate "feedback gain" to set -- the only knob is
-// DattorroTank's own decayGain (default 0.6f), which these tests exercise
-// at its default since ShimmerReverbEngine exposes no setter for it.
+// DattorroTank's own decayGain (since slice 2 derived from the RT60 Decay,
+// ShimmerReverbEngine::setDecaySeconds(), default 7 s ~= g 0.7 at Size 1),
+// which most of these tests exercise at its default.
 //
 // These tests keep the exact same two safety properties the old
 // feedbackGain-based tests checked (boundedness over 30s+, decay-to-silence
