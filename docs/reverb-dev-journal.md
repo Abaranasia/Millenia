@@ -323,6 +323,17 @@ Opted into correction on, to keep the pre-change measurements they encode: the t
 - Ear check of the default-off cascade and of the toggle.
 - `FormantEnvelopeCorrector::reset()` zeroes `currentSemitones` but keeps `armed`. That matches the state after `prepare()` that the golden hashes encode, so it was left as is.
 
+## 2026-10-25 — Rename: Shimmer Sustain → Shimmer Feedback identifiers
+
+**Status: rename only, no behaviour change. Unit-tested in Debug and Release; golden hashes unchanged.**
+
+The dial has been un-inverted and labelled "Shimmer Feedback" since 2026-10-24, but its identifiers still said "Sustain", which suggested the old inverted meaning. Nothing has shipped, so they were renamed now.
+
+- **Parameter.** `ParamIDs::shimmerSustain` → `ParamIDs::shimmerFeedback`, string ID `"shimmerSustain"` → `"shimmerFeedback"` (`ParameterID` version stays 1). A saved state from before (including the user's Standalone state) loses this one value and falls back to the default, 0.55.
+- **Engine and plugin.** `setShimmerSustain` → `setShimmerFeedback`, `shimmerSustainAmount` → `shimmerFeedbackAmount`, `defaultShimmerSustainAmount` → `defaultShimmerFeedbackAmount`; `shimmerFeedbackParam`, `smoothedShimmerFeedback` and the editor's `shimmerFeedback*` slider, label and attachment.
+- **Tank.** `DattorroTank::setShimmerFeedbackGain` / `shimmerFeedbackGain` / `defaultShimmerFeedbackGain` → `setShimmerAmountGain` / `shimmerAmountGain` / `defaultShimmerAmountGain`. They are driven by Shimmer Amount, and the old names would now read as the Feedback dial.
+- **Tests.** Calls and test names updated. Legacy-path tests are named "Shimmer Feedback (legacy path)"; their inverted mapping is untouched. Dated comments that say "Shimmer Sustain" are kept as history.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

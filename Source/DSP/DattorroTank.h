@@ -57,7 +57,7 @@ public:
     // run it as a whole-block operation. Takes one mono input sample and an
     // externally-supplied signal that claims a capped SHARE of the tank's
     // fixed recirculation budget (see maxShimmerBlendWeight and
-    // setShimmerFeedbackGain()), crossfaded against the tank's own natural
+    // setShimmerAmountGain()), crossfaded against the tank's own natural
     // feedbackFromB -- NOT added independently on top of it. Passing the
     // tank's own shifted feedback here (e.g.
     // shifter.processSample(peekFeedbackSignal())) is what lets
@@ -72,7 +72,7 @@ public:
     // all (e.g. process() below, or DattorroTankTests.cpp): 0.0f means the
     // externalFeedback term above contributes nothing, leaving only the
     // tank's own natural feedbackFromB recirculation -- identical behavior
-    // to the plain (no-shimmer) tank, since shimmerFeedbackGain * 0.0f is
+    // to the plain (no-shimmer) tank, since shimmerAmountGain * 0.0f is
     // always exactly zero regardless of its value.
     float processSample (float input) { return processSample (input, 0.0f); }
 
@@ -151,16 +151,16 @@ public:
     // as setDecaySeconds()/setDamping() -- the APVTS parameter range is the source
     // of truth); ShimmerReverbEngine::setShimmerAmount() clamps to [0, 1]
     // before calling this.
-    void setShimmerFeedbackGain (float newShimmerFeedbackGain);
+    void setShimmerAmountGain (float newShimmerAmountGain);
 
     // "Shimmer Sustain" task: runtime setter for maxShimmerBlendWeight (see
     // that member's comment above and processSample()'s
     // effectiveMaxShimmerBlendWeight) -- how long the shimmer layer itself
-    // sustains, independent of decayGain (Decay) and shimmerFeedbackGain
+    // sustains, independent of decayGain (Decay) and shimmerAmountGain
     // (Shimmer Amount). Not clamped here, same convention as setDecaySeconds()/
-    // setDamping()/setShimmerFeedbackGain()/setFreezeAmount() -- the APVTS
+    // setDamping()/setShimmerAmountGain()/setFreezeAmount() -- the APVTS
     // parameter range is the source of truth; ShimmerReverbEngine::
-    // setShimmerSustain() clamps to [0, 1] before calling this, and since
+    // setShimmerFeedback() clamps to [0, 1] before calling this, and since
     // 2026-10-24 passes the "Shimmer Feedback" value straight through
     // (no longer inverted, see setShimmerBlendLaw()).
     void setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight);
@@ -426,22 +426,22 @@ private:
     // reproduce 0.7f exactly via decaySecondsForGain (0.7f, 1.0f).
 
     // Default for the new independent shimmer-injection gain (see
-    // setShimmerFeedbackGain()). 1.0f matches
+    // setShimmerAmountGain()). 1.0f matches
     // ShimmerReverbEngine::defaultShimmerAmount's own default so "shimmer at
     // full strength" is the out-of-the-box behavior, same convention as
     // decayGain/dampingCoefficient's defaults mirroring their APVTS
     // parameter defaults.
-    static constexpr float defaultShimmerFeedbackGain = 1.0f;
+    static constexpr float defaultShimmerAmountGain = 1.0f;
 
     // Structural-fix correction (docs/shimmer-reverb-implementation-plan.md's
     // Phase 8 note, 2026-08-18, second pass): caps how much of the tank's
     // recirculating budget the shimmer path can ever claim, so the COMBINED
     // total feedback gain reaching the tank (see processSample()) stays
     // bounded by decayGain alone -- the same ceiling Phase 4 already
-    // validated safe (decayGain <= 0.85) -- regardless of shimmerFeedbackGain's
+    // validated safe (decayGain <= 0.85) -- regardless of shimmerAmountGain's
     // value. The first attempt at this fix (now corrected) let decayGain and
-    // shimmerFeedbackGain add independently, so the EFFECTIVE combined loop
-    // gain could reach decayGain + shimmerFeedbackGain (e.g. ~1.7 at
+    // shimmerAmountGain add independently, so the EFFECTIVE combined loop
+    // gain could reach decayGain + shimmerAmountGain (e.g. ~1.7 at
     // defaults) -- well past the validated-safe ceiling, kept only
     // technically bounded by SafetyLimiter's hard clipping, which is exactly
     // what produced the reported "oscillating, unnatural, psychedelic"
@@ -466,7 +466,7 @@ private:
     // plain, runtime-adjustable instance member (see setMaxShimmerBlendWeight()
     // below) so the user can directly control how long the shimmer layer
     // itself sustains, independent of decayGain (Decay) and
-    // shimmerFeedbackGain (Shimmer Amount). The safety argument above --
+    // shimmerAmountGain (Shimmer Amount). The safety argument above --
     // shimmerWeight + plainWeight == 1.0 exactly, for ANY value in [0, 1] --
     // holds unchanged regardless of who sets this value or when.
     float maxShimmerBlendWeight = 0.85f;
@@ -705,7 +705,7 @@ private:
     TankBranch branchA, branchB;
 
     float dampingCoefficient = defaultDampingCoefficient;
-    float shimmerFeedbackGain = defaultShimmerFeedbackGain;
+    float shimmerAmountGain = defaultShimmerAmountGain;
 
     // Blend law (see setShimmerBlendLaw()). 0.0f default = the linear law,
     // bit-identical to the pre-2026-10-24 tank.

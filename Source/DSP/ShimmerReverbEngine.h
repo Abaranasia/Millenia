@@ -107,7 +107,7 @@ public:
     void setSize (float newSize);
     void setModulation (float newModulation);
 
-    // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
+    // Forwards to DattorroTank::setShimmerAmountGain() (see that method's
     // comment), clamped to [0, 1] here -- never amplifies above unity, so
     // Phase 4's runaway-safety margin (decayGain < 0.85) on the tank's OWN
     // natural recirculation is never affected by this parameter at all (it
@@ -122,7 +122,7 @@ public:
     // "Shimmer Sustain" task: clamped to [0, 1], same convention as
     // setShimmerAmount()/setWidth()/setFreezeAmount(). Controls how present
     // and how long-lived the shimmer layer is, independent of Decay
-    // (decayGain) and Shimmer Amount (shimmerFeedbackGain, the OVERALL
+    // (decayGain) and Shimmer Amount (shimmerAmountGain, the OVERALL
     // shimmer level). Two effects, both driven by this single value:
     //
     // 1. Forwards to DattorroTank::setMaxShimmerBlendWeight() DIRECTLY
@@ -155,7 +155,7 @@ public:
     // this dial down toward 0 produce an unmistakable, immediate reduction
     // in the shimmer's audible presence (collapsing to near-mono at 0.0f),
     // not just a subtle long-term tail-shape change.
-    void setShimmerSustain (float newAmount);
+    void setShimmerFeedback (float newAmount);
 
     // M/S width of the wet signal, clamped to [0, 2] (2026-10-11, docs/
     // reverb-space-research.md section 8.2): 0 = mono, 1 = the tank's
@@ -303,7 +303,7 @@ public:
 
     // Test-only switch, same idiom (2026-10-24, shimmer cascade slice 1):
     // true restores the pre-2026-10-24 shimmer blend exactly -- the INVERTED
-    // 1 - x mapping of setShimmerSustain() and the tank's linear blend law
+    // 1 - x mapping of setShimmerFeedback() and the tank's linear blend law
     // (equalPowerAmount 0) -- so T6 can prove today's engine still reproduces
     // the old golden hashes, and T1/T2 can measure old against new in the
     // same build. Re-pushes both to the tank at once. Never called by
@@ -334,9 +334,9 @@ private:
     void applyPitchAndFreezeCrossfade();
 
     // Pushes the shimmer blend to the tank (2026-10-24): maxShimmerBlendWeight
-    // from shimmerSustainAmount and the equal-power amount from
+    // from shimmerFeedbackAmount and the equal-power amount from
     // pitchShiftSemitones, or the legacy inverted/linear pair. Called by
-    // prepare(), setShimmerSustain(), applyPitchAndFreezeCrossfade() and
+    // prepare(), setShimmerFeedback(), applyPitchAndFreezeCrossfade() and
     // setLegacyShimmerBlendForTesting(); two stores, no allocation.
     void pushShimmerBlendToTank();
 
@@ -411,13 +411,13 @@ private:
     static constexpr bool defaultFormantCorrection = false;
     static constexpr double formantRampSeconds = 0.02;
 
-    // Matches DattorroTank::defaultShimmerFeedbackGain so "shimmer at full
+    // Matches DattorroTank::defaultShimmerAmountGain so "shimmer at full
     // strength" is the out-of-the-box behavior, same convention as the
     // other defaults above.
     static constexpr float defaultShimmerAmount = 1.0f;
 
     // "Shimmer Sustain" task (2026-09-06, by-ear follow-up -- see
-    // setShimmerSustain()'s comment): 0.85f is a fresh, deliberately-chosen
+    // setShimmerFeedback()'s comment): 0.85f is a fresh, deliberately-chosen
     // default for this control's now-widened scope (both the tank
     // recirculation cap AND the audible width-injection gate below), NOT a
     // preserved bit-identical match to any prior hardcoded constant --
@@ -430,7 +430,7 @@ private:
     // 1, up from the old effective 0.15 (docs/shimmer-character-research.md
     // section 7.1 item 2: a starting point for the user's ear-tuning). The
     // side-term gate gets 0.55 instead of 0.85 too.
-    static constexpr float defaultShimmerSustainAmount = 0.55f;
+    static constexpr float defaultShimmerFeedbackAmount = 0.55f;
 
     DattorroTank tank;
     PitchShifter shifter;
@@ -555,18 +555,18 @@ private:
     float lastTankLeft = 0.0f;
     float lastTankRight = 0.0f;
 
-    // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
+    // Local copy of the value forwarded to DattorroTank::setShimmerAmountGain()
     // -- see setShimmerAmount()'s comment for why process()'s Width term
     // needs its own gating copy rather than trusting the tank alone.
     float shimmerAmount = defaultShimmerAmount;
 
-    // Local copy of setShimmerSustain()'s USER-FACING (pre-mapping)
+    // Local copy of setShimmerFeedback()'s USER-FACING (pre-mapping)
     // value -- same "process()'s Width term needs its own gating copy"
-    // reasoning as shimmerAmount immediately above, see setShimmerSustain()'s
+    // reasoning as shimmerAmount immediately above, see setShimmerFeedback()'s
     // comment for the full rationale (2026-09-06 widening: this now ALSO
     // gates the width-injection term, not just DattorroTank's recirculation
     // cap).
-    float shimmerSustainAmount = defaultShimmerSustainAmount;
+    float shimmerFeedbackAmount = defaultShimmerFeedbackAmount;
 
     // Phase 5: dry/wet mix (see setMix()) and bypass (see setBypassed()).
     // bypassed does not gate/skip any processing -- it only forces the
@@ -586,7 +586,7 @@ private:
 
     // Infinite mode (see setInfiniteAmount()): default 0.0f, i.e. off and
     // bit-identical to pre-Infinite behavior. Cached so prepare() can
-    // re-seed the tank, same pattern as shimmerSustainAmount.
+    // re-seed the tank, same pattern as shimmerFeedbackAmount.
     float infiniteAmount = 0.0f;
 
     // Freeze level crossfade weight (see applyPitchAndFreezeCrossfade()/

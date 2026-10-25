@@ -57,7 +57,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
                             "15 s at 1 and 20 s (the knob maximum) at 1.3 and above. Longer settings "
                             "clamp to that limit.");
     configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
-    configureRotary (shimmerSustainSlider, shimmerSustainLabel, "Shimmer Feedback");
+    configureRotary (shimmerFeedbackSlider, shimmerFeedbackLabel, "Shimmer Feedback");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
@@ -141,7 +141,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     pitchShiftAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::pitchShift, pitchShiftSlider);
     decayAttachment      = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::decay,      decaySlider);
     shimmerAmountAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerAmount, shimmerAmountSlider);
-    shimmerSustainAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerSustain, shimmerSustainSlider);
+    shimmerFeedbackAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerFeedback, shimmerFeedbackSlider);
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
@@ -225,7 +225,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &decaySlider, &shimmerAmountSlider, &shimmerSustainSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
+    for (auto* slider : { &pitchShiftSlider, &decaySlider, &shimmerAmountSlider, &shimmerFeedbackSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

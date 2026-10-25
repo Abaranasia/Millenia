@@ -38,10 +38,10 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // its own hardcoded default (0.85f) -- unlike pitchShiftSemitones above,
     // tank.prepare()/reset() never touches it, so an untouched
     // ShimmerReverbEngine's tank stayed at THAT stale default forever unless
-    // setShimmerSustain() happened to be called at least once. Re-push the
-    // CURRENT shimmerSustainAmount (the member-initializer default, or a
+    // setShimmerFeedback() happened to be called at least once. Re-push the
+    // CURRENT shimmerFeedbackAmount (the member-initializer default, or a
     // caller's prior customization surviving a re-prepare, e.g. a host
-    // sample-rate change) through the same mapping setShimmerSustain()
+    // sample-rate change) through the same mapping setShimmerFeedback()
     // itself uses, so an untouched engine's tank actually reflects the
     // intended default instead of silently diverging from it. Since
     // 2026-10-24 the same call also re-seeds the tank's blend law from
@@ -50,7 +50,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // this comment records cannot silently regress if that call moves.
     pushShimmerBlendToTank();
 
-    // Infinite mode: same re-seed reasoning as shimmerSustainAmount above --
+    // Infinite mode: same re-seed reasoning as shimmerFeedbackAmount above --
     // push the cached value so the tank reflects it after a re-prepare.
     // DattorroTank::reset() snaps its ramp to this target rather than
     // ramping, so a host sample-rate change while Infinite is on does not
@@ -167,15 +167,15 @@ void ShimmerReverbEngine::setDamping (float newDamping)
 void ShimmerReverbEngine::setShimmerAmount (float newShimmerAmount)
 {
     shimmerAmount = juce::jlimit (0.0f, 1.0f, newShimmerAmount);
-    tank.setShimmerFeedbackGain (shimmerAmount);
+    tank.setShimmerAmountGain (shimmerAmount);
 }
 
-void ShimmerReverbEngine::setShimmerSustain (float newAmount)
+void ShimmerReverbEngine::setShimmerFeedback (float newAmount)
 {
     // Cached locally so process()'s Width/decorrelation term can gate on it
     // directly too -- see this method's header comment for why (same
     // "process() needs its own gating copy" reasoning as shimmerAmount).
-    shimmerSustainAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+    shimmerFeedbackAmount = juce::jlimit (0.0f, 1.0f, newAmount);
 
     // Direct (un-inverted since 2026-10-24) mapping to DattorroTank -- see
     // this method's header comment and pushShimmerBlendToTank().
@@ -202,7 +202,7 @@ void ShimmerReverbEngine::pushShimmerBlendToTank()
     const float equalPowerAmount = legacyShimmerBlend
                                        ? 0.0f
                                        : juce::jlimit (0.0f, 1.0f, (std::abs (pitchShiftSemitones) - 0.5f) / 0.5f);
-    tank.setMaxShimmerBlendWeight (legacyShimmerBlend ? 1.0f - shimmerSustainAmount : shimmerSustainAmount);
+    tank.setMaxShimmerBlendWeight (legacyShimmerBlend ? 1.0f - shimmerFeedbackAmount : shimmerFeedbackAmount);
     tank.setShimmerBlendLaw (equalPowerAmount);
 }
 
@@ -530,7 +530,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const float tankInput = preDelayNowMs > 0.0f ? preDelayed : monoData[i];
 
         // The shimmerAmount gain now lives inside DattorroTank itself (see
-        // setShimmerFeedbackGain()) -- it scales safeFeedback as an
+        // setShimmerAmountGain()) -- it scales safeFeedback as an
         // ADDITIVE term layered on top of the tank's own natural
         // decayGain-scaled recirculation, not a replacement for it. This is
         // NOT the Width direct-injection term below (safeFeedback/
@@ -621,10 +621,10 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // mean no shimmer character anywhere in the output, not just in the
         // tank's recirculating budget.
         // "Shimmer Sustain" task (2026-09-06 widening, see
-        // setShimmerSustain()'s comment, effect 2): gated by
-        // shimmerSustainAmount too, same multiplicative-gate convention
+        // setShimmerFeedback()'s comment, effect 2): gated by
+        // shimmerFeedbackAmount too, same multiplicative-gate convention
         // shimmerAmount already established here (2026-08-21) -- at
-        // shimmerSustainAmount=0.0f the shimmer side term is exactly 0, same
+        // shimmerFeedbackAmount=0.0f the shimmer side term is exactly 0, same
         // gate shimmerAmount=0.0f produces (the tank's own L/R stereo, added
         // 2026-10-11, is unaffected by either gate).
         // Safety net, 2026-09-06 ("Shimmer Sustain" glitch investigation):
@@ -652,7 +652,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // operation (typical sideShift magnitude is well under its 0.8f
         // threshold) and only engages during the pathological case.
         float sideShift = safetyLimiter.processSample (safeFeedback - quadratureSafe);
-        const float shimmerSide = shimmerSideGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
+        const float shimmerSide = shimmerSideGain * shimmerAmount * shimmerFeedbackAmount * 0.5f * sideShift;
         lastTankLeft = tankOut;
         lastTankRight = tankRight;
 

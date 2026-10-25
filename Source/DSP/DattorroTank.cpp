@@ -48,7 +48,7 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     // reset(sampleRate, ramp) snaps the current value to the existing
     // target, so a caller's setInfiniteAmount() survives a re-prepare (e.g.
     // a host sample-rate change) -- ShimmerReverbEngine::prepare() re-seeds
-    // it anyway, mirroring its shimmerSustain re-seed.
+    // it anyway, mirroring its shimmerFeedback re-seed.
     smoothedInfiniteAmount.reset (spec.sampleRate, infiniteRampSeconds);
 
     // Same "keep the caller's target, snap to it" rule for Size and
@@ -210,9 +210,9 @@ float DattorroTank::decaySecondsForGain (float gain, float size) noexcept
     return candidate;
 }
 
-void DattorroTank::setShimmerFeedbackGain (float newShimmerFeedbackGain)
+void DattorroTank::setShimmerAmountGain (float newShimmerAmountGain)
 {
-    shimmerFeedbackGain = newShimmerFeedbackGain;
+    shimmerAmountGain = newShimmerAmountGain;
 }
 
 void DattorroTank::setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight)
@@ -331,10 +331,10 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // max(|feedbackFromB|, |externalFeedback|) -- so the TOTAL feedback gain
     // reaching the tank stays bounded by decayGain alone (the same ceiling
     // Phase 4 already validated safe, decayGain <= 0.85), for ANY
-    // shimmerFeedbackGain setting. The first attempt at this fix (a plain
-    // additive sum, decayGain*feedbackFromB + shimmerFeedbackGain*
+    // shimmerAmountGain setting. The first attempt at this fix (a plain
+    // additive sum, decayGain*feedbackFromB + shimmerAmountGain*
     // externalFeedback) let the two gains add independently, so combined
-    // loop gain could reach decayGain + shimmerFeedbackGain (~1.7 at
+    // loop gain could reach decayGain + shimmerAmountGain (~1.7 at
     // defaults) -- past unity, kept only technically bounded by
     // SafetyLimiter's hard clipping, which produced the reported
     // "oscillating, unnatural, psychedelic" character. capping
@@ -399,7 +399,7 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // plainWeight all the way to the proven-unstable 1.0.
     const float effectiveMaxShimmerBlendWeight = maxShimmerBlendWeight
                                                       + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
-    const float shimmerWeight = shimmerFeedbackGain * effectiveMaxShimmerBlendWeight;
+    const float shimmerWeight = shimmerAmountGain * effectiveMaxShimmerBlendWeight;
 
     // Blend law (2026-10-24, shimmer cascade slice 1, see setShimmerBlendLaw()
     // and docs/shimmer-character-research.md sections 3 and 7.1). The linear

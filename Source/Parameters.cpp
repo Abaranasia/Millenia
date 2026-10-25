@@ -56,7 +56,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         DattorroTank::defaultModulation));
 
     // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
-    // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal
+    // setShimmerAmountGain(). Independently gains the pitch-shifted signal
     // layered additively on top of the tank's own natural (decayGain-scaled)
     // recirculation -- decoupling "how much shimmer cascade gets added" from
     // "how long the plain tail sustains" (decayGain). At 0.0f the tank is a
@@ -68,26 +68,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         1.0f));
 
-    // Backs ShimmerReverbEngine::setShimmerSustain() -- see that method's
+    // Backs ShimmerReverbEngine::setShimmerFeedback() -- see that method's
     // header comment for its two effects (DattorroTank's recirculation cap,
     // direct since 2026-10-24 -- it was inverted before -- plus a direct gate
     // on process()'s audible Width/decorrelation injection). Shown as
-    // "Shimmer Feedback" since 2026-10-24; the ID stays shimmerSustain
-    // (nothing has shipped, and a rename would only churn the diff).
+    // "Shimmer Feedback" since 2026-10-24; the ID was renamed from
+    // shimmerSustain to shimmerFeedback on 2026-10-25 (nothing has shipped;
+    // a saved state from before falls back to this default).
     // Independently controls how present and long-lived the shimmer layer
     // is, decoupled from both Decay (decayGain) and Shimmer Amount
-    // (shimmerFeedbackGain, the overall shimmer level).
+    // (shimmerAmountGain, the overall shimmer level).
     //
-    // Default (was 0.85f) matches ShimmerReverbEngine::defaultShimmerSustainAmount
+    // Default (was 0.85f) matches ShimmerReverbEngine::defaultShimmerFeedbackAmount
     // -- a freshly-chosen default for this control's now-widened scope, NOT
     // a preserved match to any prior hardcoded constant (that guarantee was
     // dropped 2026-09-06 once this parameter's scope grew to also gate the
     // always-live Width path, which the old hardcoded behavior never touched
-    // at all -- see ShimmerReverbEngine.h's defaultShimmerSustainAmount
+    // at all -- see ShimmerReverbEngine.h's defaultShimmerFeedbackAmount
     // comment). 2026-10-24: 0.85f -> 0.55f with the un-inverted mapping
     // (docs/shimmer-character-research.md section 7.1 item 2).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::shimmerSustain, 1 },
+        juce::ParameterID { ParamIDs::shimmerFeedback, 1 },
         "Shimmer Feedback",
         juce::NormalisableRange<float> (0.0f, 1.0f),
         0.55f));

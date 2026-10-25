@@ -270,7 +270,7 @@ public:
             // "Shimmer Sustain" task (see Source/DSP/DattorroTank.h's comment
             // above maxShimmerBlendWeight): this constant just became a
             // runtime-adjustable, UNCLAMPED (same convention as
-            // setDecaySeconds()/setDamping()/setShimmerFeedbackGain()/
+            // setDecaySeconds()/setDamping()/setShimmerAmountGain()/
             // setFreezeAmount()) instance member via setMaxShimmerBlendWeight().
             // The header's own safety argument is that shimmerWeight+plainWeight
             // == 1.0 exactly for ANY value in [0, 1], so the combined feedback
@@ -469,8 +469,8 @@ public:
 
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
 
-            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
-            // see setShimmerFeedbackGain()'s comment) would otherwise claim
+            // DattorroTank's own class default (shimmerAmountGain = 1.0f,
+            // see setShimmerAmountGain()'s comment) would otherwise claim
             // maxShimmerBlendWeight's share (0.85) of the recirculation
             // budget for an externalFeedback that's always 0.0 here (both
             // tanks are driven through the single-arg processSample()/
@@ -481,12 +481,12 @@ public:
             DattorroTank plainTank;
             plainTank.prepare (spec);
             plainTank.reset();
-            plainTank.setShimmerFeedbackGain (0.0f);
+            plainTank.setShimmerAmountGain (0.0f);
 
             DattorroTank frozenTank;
             frozenTank.prepare (spec);
             frozenTank.reset();
-            frozenTank.setShimmerFeedbackGain (0.0f);
+            frozenTank.setShimmerAmountGain (0.0f);
             frozenTank.setFreezeAmount (1.0f);
 
             juce::AudioBuffer<float> plainBuffer (numChannels, blockSize);
@@ -682,9 +682,9 @@ public:
         // "Infinite mode" section and DattorroTank::setInfiniteAmount()):
         // unlike Freeze, Infinite keeps feeding fresh input into a tank that
         // never decays, so new material layers on top of the sustained tail.
-        // T2-T4 below zero shimmerFeedbackGain on purpose: the single-arg
+        // T2-T4 below zero shimmerAmountGain on purpose: the single-arg
         // processSample() overload always passes externalFeedback=0.0f, so
-        // the class default (shimmerFeedbackGain=1.0f, i.e. shimmerWeight=0.85)
+        // the class default (shimmerAmountGain=1.0f, i.e. shimmerWeight=0.85)
         // would leave only a 0.15 plainWeight share of the loop recirculating
         // -- a tail that dies within a second no matter what Infinite does.
         // Zeroing it gives plainWeight=1.0, the exact "bare tank, unity decay,
@@ -763,7 +763,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, see the section comment above
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, see the section comment above
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -835,7 +835,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -903,7 +903,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -1135,7 +1135,7 @@ public:
         {
             DattorroTank tank;
             tank.prepare ({ sampleRate, 512, 2 });
-            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
             tank.setModulation (1.0f);
             tank.setDecaySeconds (ceilingDecaySeconds()); // g = 0.85 at every Size
             tank.reset();
@@ -1288,7 +1288,7 @@ private:
     {
         DattorroTank tank;
         tank.prepare ({ sampleRate, 512, 2 });
-        tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
+        tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
         tank.setModulation (0.0f);
         tank.setSize (size);
         tank.setDecaySeconds (rt60);

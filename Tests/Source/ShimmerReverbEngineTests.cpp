@@ -538,17 +538,17 @@ public:
                                            + juce::String (maxPeak) + ")");
         }
 
-        beginTest ("Shimmer Feedback (shimmerSustain) defaults to 0.55 and an untouched engine matches explicitly setting that default");
+        beginTest ("Shimmer Feedback (shimmerFeedback) defaults to 0.55 and an untouched engine matches explicitly setting that default");
         {
-            // "Shimmer Sustain" task: setShimmerSustain() has two effects
+            // "Shimmer Sustain" task: setShimmerFeedback() has two effects
             // (see its header comment) -- an INVERTED forward to
             // DattorroTank::setMaxShimmerBlendWeight(), and a direct gate on
             // process()'s Width injection. Its own default
-            // (ShimmerReverbEngine::defaultShimmerSustainAmount, matching
+            // (ShimmerReverbEngine::defaultShimmerFeedbackAmount, matching
             // Parameters.cpp's APVTS default) is 0.85f -- a freshly-chosen
             // default for this control's widened scope, deliberately NOT
             // preserved bit-identical to any prior hardcoded constant (see
-            // defaultShimmerSustainAmount's comment for why that guarantee
+            // defaultShimmerFeedbackAmount's comment for why that guarantee
             // was dropped). This test only proves internal consistency: an
             // untouched engine matches one with the default explicitly set,
             // same discipline as the Shimmer Amount/Freeze default-regression
@@ -572,7 +572,7 @@ public:
             ShimmerReverbEngine explicitEngine;
             explicitEngine.prepare (spec);
             explicitEngine.reset();
-            explicitEngine.setShimmerSustain (0.55f);
+            explicitEngine.setShimmerFeedback (0.55f);
 
             juce::AudioBuffer<float> defaultBuffer (numChannels, blockSize);
             juce::AudioBuffer<float> explicitBuffer (numChannels, blockSize);
@@ -604,7 +604,7 @@ public:
                     auto* explicitData = explicitBuffer.getReadPointer (ch);
                     for (int i = 0; i < blockSize; ++i)
                     {
-                        expectEquals (explicitData[i], defaultData[i], "setShimmerSustain(0.55f) diverged from the "
+                        expectEquals (explicitData[i], defaultData[i], "setShimmerFeedback(0.55f) diverged from the "
                                                                             "untouched default at channel "
                                                                             + juce::String (ch) + ", block "
                                                                             + juce::String (b) + ", sample "
@@ -614,19 +614,19 @@ public:
             }
         }
 
-        beginTest ("Shimmer Sustain at 0.0f collapses the Width injection to mono, an unmistakable audible gate");
+        beginTest ("Shimmer Feedback at 0.0f collapses the Width injection to mono, an unmistakable audible gate");
         {
             // "Shimmer Sustain" task, 2026-09-06 widening (see
-            // setShimmerSustain()'s header comment, effect 2): this is the
+            // setShimmerFeedback()'s header comment, effect 2): this is the
             // deterministic regression test for the fix to the by-ear report
             // "I don't clearly notice any difference [moving the dial]" --
-            // shimmerSustainAmount now directly gates process()'s
+            // shimmerFeedbackAmount now directly gates process()'s
             // sideShift/wetLeft/wetRight Width injection, the same
             // multiplicative-gate convention shimmerAmount=0.0f and
             // width=0.0f already use individually to collapse to mono. Uses
             // Width and Shimmer Amount both at FULL strength (1.0f) so this
             // test isn't just re-proving one of those two pre-existing
-            // mono-collapse cases -- Shimmer Sustain=0.0f must independently
+            // mono-collapse cases -- Shimmer Feedback=0.0f must independently
             // collapse to mono even when neither of the other two gates is
             // doing it.
             //
@@ -649,7 +649,7 @@ public:
             engine.reset();
             engine.setWidth (2.0f);
             engine.setShimmerAmount (1.0f);
-            engine.setShimmerSustain (0.0f);
+            engine.setShimmerFeedback (0.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (778899);
@@ -669,20 +669,20 @@ public:
                 const double shimmerAtOutput = outputShimmerTerm (buffer, engine, 2.0f);
                 if (std::abs (shimmerAtOutput) > 1.0e-6)
                     expectWithinAbsoluteError (shimmerAtOutput, 0.0, 1.0e-6,
-                                               "setShimmerSustain(0.0f) failed to zero the shimmer side term at the output, "
+                                               "setShimmerFeedback(0.0f) failed to zero the shimmer side term at the output, "
                                                "sample " + juce::String (b) + " (Width=2.0, Shimmer Amount=1.0 -- the Width "
                                                "injection gate must still zero out on its own)");
             }
         }
 
-        beginTest ("Shimmer Sustain: a HIGH (dial) value decays measurably slower than a LOW value at ordinary (non-frozen, default decayGain) settings");
+        beginTest ("Shimmer Feedback (legacy path): a HIGH (dial) value decays measurably slower than a LOW value at ordinary (non-frozen, default decayGain) settings");
         {
             // "Shimmer Sustain" task: verifies the new knob actually does
             // something audible-proxy-measurable (not just that it's wired
             // up), at ordinary settings -- no Freeze involved, default
             // feedback/decayGain. Same burst-then-silence-then-measure-RMS
             // shape as the Freeze=1.0 full-chain tail diagnostic above, but
-            // comparing two engines (low vs. high setShimmerSustain()) instead
+            // comparing two engines (low vs. high setShimmerFeedback()) instead
             // of comparing time within one engine.
             //
             // IMPORTANT history (2026-09-06, two findings, in order):
@@ -703,20 +703,20 @@ public:
             // ANY decayGain, just far more visible once decayGain's own
             // (much larger) attenuation is out of the way.
             // (2) By-ear follow-up, same day, two rounds: first, the user
-            // found this direction unintuitive -- setShimmerSustain() now
+            // found this direction unintuitive -- setShimmerFeedback() now
             // DELIBERATELY INVERTS the mapping (1.0f - newAmount before
             // forwarding to DattorroTank), so the USER-FACING dial's high end
             // now maps to the LOW (slow-decay) end of the underlying
             // mechanism -- this test's low/high sample points and assertion
             // direction below are therefore the OPPOSITE of finding (1)
-            // above, at the ShimmerReverbEngine::setShimmerSustain() level
+            // above, at the ShimmerReverbEngine::setShimmerFeedback() level
             // (DattorroTank's own setMaxShimmerBlendWeight() is untouched and
             // still behaves per finding (1)). Second, the user reported not
             // clearly noticing a difference at all -- traced to
             // process()'s Width/decorrelation injection never having been
             // gated by this parameter in the first place (see
-            // setShimmerSustain()'s header comment, effect 2, and the new
-            // "collapses to mono" test above) -- shimmerSustainAmount now
+            // setShimmerFeedback()'s header comment, effect 2, and the new
+            // "collapses to mono" test above) -- shimmerFeedbackAmount now
             // ALSO gates that term directly, so this test's measured dB gap
             // below is now driven by BOTH effects together, not just the
             // tank-recirculation effect alone. Measured at the full [0, 1]
@@ -731,8 +731,8 @@ public:
             constexpr int numChannels = 2;
             static constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
 
-            constexpr float lowShimmerSustain = 0.0f;
-            constexpr float highShimmerSustain = 1.0f;
+            constexpr float lowShimmerFeedback = 0.0f;
+            constexpr float highShimmerFeedback = 1.0f;
 
             // 2026-10-11, slice 2: pinned to Modulation 0 (set before
             // prepare(), so no ramp). The tank-recirculation half of this
@@ -758,7 +758,7 @@ public:
             // new path's low/high figures are logged below.
             float modulationToUse = 0.0f;
             bool legacyToUse = true;
-            auto measureTailDecayDb = [&] (float shimmerSustainToUse, juce::int64 randomSeed) -> float
+            auto measureTailDecayDb = [&] (float shimmerFeedbackToUse, juce::int64 randomSeed) -> float
             {
                 ShimmerReverbEngine engine;
                 engine.setLegacyShimmerBlendForTesting (legacyToUse);
@@ -773,7 +773,7 @@ public:
                 juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
                 engine.prepare (spec);
                 engine.reset();
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 // Defaults otherwise: pitchShift=12st, shimmerAmount=1.0,
                 // Decay 7.0 s (g 0.6993; was feedback=0.7), freeze off --
                 // ordinary, non-frozen settings.
@@ -820,8 +820,8 @@ public:
                 }
 
                 for (float v : perBlockRms)
-                    expect (std::isfinite (v), "Non-finite RMS block in setShimmerSustain("
-                                                    + juce::String (shimmerSustainToUse) + ") tail measurement");
+                    expect (std::isfinite (v), "Non-finite RMS block in setShimmerFeedback("
+                                                    + juce::String (shimmerFeedbackToUse) + ") tail measurement");
 
                 auto meanRmsOverBlocks = [&perBlockRms] (int startBlock, int count) -> float
                 {
@@ -836,16 +836,16 @@ public:
                 return 20.0f * std::log10 (juce::jmax (1.0e-9f, lastSecondMean) / juce::jmax (1.0e-9f, firstSecondMean));
             };
 
-            const float lowDecayDb  = measureTailDecayDb (lowShimmerSustain, 11223344);
-            const float highDecayDb = measureTailDecayDb (highShimmerSustain, 11223344);
+            const float lowDecayDb  = measureTailDecayDb (lowShimmerFeedback, 11223344);
+            const float highDecayDb = measureTailDecayDb (highShimmerFeedback, 11223344);
 
-            logMessage ("setShimmerSustain() tail decay over 5s: low (" + juce::String (lowShimmerSustain) + ") = "
-                            + juce::String (lowDecayDb, 2) + " dB, high (" + juce::String (highShimmerSustain) + ") = "
+            logMessage ("setShimmerFeedback() tail decay over 5s: low (" + juce::String (lowShimmerFeedback) + ") = "
+                            + juce::String (lowDecayDb, 2) + " dB, high (" + juce::String (highShimmerFeedback) + ") = "
                             + juce::String (highDecayDb, 2) + " dB");
 
-            expect (lowDecayDb < highDecayDb, "Expected setShimmerSustain(" + juce::String (lowShimmerSustain)
+            expect (lowDecayDb < highDecayDb, "Expected setShimmerFeedback(" + juce::String (lowShimmerFeedback)
                                                    + ") to decay measurably faster (more negative dB) than "
-                                                   + "setShimmerSustain(" + juce::String (highShimmerSustain)
+                                                   + "setShimmerFeedback(" + juce::String (highShimmerFeedback)
                                                    + ") over the same 5s tail window (see this test's comment for the "
                                                    + "inverted dial mapping) -- got low=" + juce::String (lowDecayDb, 2)
                                                    + " dB, high=" + juce::String (highDecayDb, 2) + " dB");
@@ -855,8 +855,8 @@ public:
             for (float modulation : { 0.0f, 0.3f, 1.0f })
             {
                 modulationToUse = modulation;
-                const float low = measureTailDecayDb (lowShimmerSustain, 11223344);
-                const float high = measureTailDecayDb (highShimmerSustain, 11223344);
+                const float low = measureTailDecayDb (lowShimmerFeedback, 11223344);
+                const float high = measureTailDecayDb (highShimmerFeedback, 11223344);
                 logMessage ("DIAGNOSTIC Shimmer Sustain tail decay at Modulation " + juce::String (modulation, 1) + ": low "
                                 + juce::String (low, 2) + " dB, high " + juce::String (high, 2) + " dB (gap "
                                 + juce::String (high - low, 2) + " dB)");
@@ -866,13 +866,13 @@ public:
             // seed, Modulation 0.
             legacyToUse = false;
             modulationToUse = 0.0f;
-            const float newLow = measureTailDecayDb (lowShimmerSustain, 11223344);
-            const float newHigh = measureTailDecayDb (highShimmerSustain, 11223344);
+            const float newLow = measureTailDecayDb (lowShimmerFeedback, 11223344);
+            const float newHigh = measureTailDecayDb (highShimmerFeedback, 11223344);
             logMessage ("DIAGNOSTIC Shimmer Feedback (new path) tail decay at Modulation 0: low " + juce::String (newLow, 2)
                             + " dB, high " + juce::String (newHigh, 2) + " dB (gap " + juce::String (newHigh - newLow, 2) + " dB)");
         }
 
-        beginTest ("Shimmer Amount=1, Shimmer Sustain=1 (max), Width=1 -- confirmed root cause, regression-tests the fix");
+        beginTest ("Shimmer Amount=1, Shimmer Feedback=1 (max, legacy path), Width=1 -- confirmed root cause, regression-tests the fix");
         {
             // "Shimmer Sustain" task follow-up (2026-09-06, by-ear report):
             // "when shimmer amount and sustain values are high, higher values
@@ -888,7 +888,7 @@ public:
             // out the shifter alone); a dedicated divergence diagnostic
             // (below) measured up to ~265 samples of primary/quadrature
             // offset divergence, ~178 samples average, ONLY once
-            // shimmerSustainAmount drives maxShimmerBlendWeight toward 0.0 --
+            // shimmerFeedbackAmount drives maxShimmerBlendWeight toward 0.0 --
             // removing the shimmer-cascade content that used to keep the
             // tank's own recirculation just complex enough to avoid the
             // ambiguity. Given this project's own four prior, all-failed
@@ -902,7 +902,7 @@ public:
             // test now asserts the fix's actual bound, not just a first
             // measurement pass.
             //
-            // (Original hypothesis, confirmed correct): shimmerSustainAmount=1.0 drives maxShimmerBlendWeight to 0.0 --
+            // (Original hypothesis, confirmed correct): shimmerFeedbackAmount=1.0 drives maxShimmerBlendWeight to 0.0 --
             // the tank's own recirculation then carries ZERO shimmer-cascade
             // content (a plain, undamped decaying resonance only), unlike the
             // old always-0.85f-weighted tank, which always had substantial
@@ -951,7 +951,7 @@ public:
             constexpr int numChannels = 2;
             constexpr float toneFrequencyHz = 220.0f;
 
-            auto measurePeaks = [&] (float shimmerSustainToUse, bool legacy = true) -> std::pair<float, float>
+            auto measurePeaks = [&] (float shimmerFeedbackToUse, bool legacy = true) -> std::pair<float, float>
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
@@ -959,7 +959,7 @@ public:
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
                 // Defaults otherwise: pitchShift=12st, feedback=0.7, freeze off.
 
@@ -993,29 +993,29 @@ public:
                     {
                         expect (std::isfinite (left[i]) && std::isfinite (right[i]),
                                 "Non-finite sample at block " + juce::String (b) + ", sample " + juce::String (i)
-                                    + " (shimmerSustain=" + juce::String (shimmerSustainToUse) + ")");
+                                    + " (shimmerFeedback=" + juce::String (shimmerFeedbackToUse) + ")");
 
                         peakWet  = juce::jmax (peakWet, std::abs (left[i]), std::abs (right[i]));
-                        peakDiff = juce::jmax (peakDiff, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)));
+                        peakDiff = juce::jmax (peakDiff, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerFeedbackToUse)));
                     }
                 }
 
                 return { peakWet, peakDiff };
             };
 
-            const auto highSustainPeaks = measurePeaks (1.0f);
-            const auto lowSustainPeaks  = measurePeaks (0.15f);
+            const auto highFeedbackPeaks = measurePeaks (1.0f);
+            const auto lowFeedbackPeaks  = measurePeaks (0.15f);
 
             logMessage ("Shimmer Amount=1, Width=1, 220Hz tone, 6s: "
-                            + juce::String ("high Sustain (1.0) peakWet=") + juce::String (highSustainPeaks.first, 4)
-                            + ", peak|L-R|=" + juce::String (highSustainPeaks.second, 4)
-                            + " -- low Sustain (0.15) peakWet=" + juce::String (lowSustainPeaks.first, 4)
-                            + ", peak|L-R|=" + juce::String (lowSustainPeaks.second, 4));
+                            + juce::String ("high Sustain (1.0) peakWet=") + juce::String (highFeedbackPeaks.first, 4)
+                            + ", peak|L-R|=" + juce::String (highFeedbackPeaks.second, 4)
+                            + " -- low Sustain (0.15) peakWet=" + juce::String (lowFeedbackPeaks.first, 4)
+                            + ", peak|L-R|=" + juce::String (lowFeedbackPeaks.second, 4));
 
-            expect (highSustainPeaks.first <= 10.0f, "High-Sustain peak exceeded the 10.0 safety ceiling: "
-                                                          + juce::String (highSustainPeaks.first));
-            expect (lowSustainPeaks.first <= 10.0f, "Low-Sustain peak exceeded the 10.0 safety ceiling: "
-                                                         + juce::String (lowSustainPeaks.first));
+            expect (highFeedbackPeaks.first <= 10.0f, "High-Sustain peak exceeded the 10.0 safety ceiling: "
+                                                          + juce::String (highFeedbackPeaks.first));
+            expect (lowFeedbackPeaks.first <= 10.0f, "Low-Sustain peak exceeded the 10.0 safety ceiling: "
+                                                         + juce::String (lowFeedbackPeaks.first));
 
             // The real regression assertion: peak|L-R| (the injected
             // sideShift's own contribution) used to reach 2.0 at high
@@ -1024,9 +1024,9 @@ public:
             // approaches but never reaches 1.0f -- 1.2f leaves a small margin
             // above that asymptote while still catching a regression back to
             // anything near the old 2.0f.
-            expect (highSustainPeaks.second <= 1.2f, "High-Sustain peak|L-R| regression: expected the safetyLimiter "
+            expect (highFeedbackPeaks.second <= 1.2f, "High-Sustain peak|L-R| regression: expected the safetyLimiter "
                                                           "fix on sideShift to bound this well under the old unfixed "
-                                                          "2.0 peak, got " + juce::String (highSustainPeaks.second));
+                                                          "2.0 peak, got " + juce::String (highFeedbackPeaks.second));
 
             const auto newTopPeaks = measurePeaks (1.0f, false);
             logMessage ("Shimmer Feedback 1.0 (new mapping), same tone: peakWet=" + juce::String (newTopPeaks.first, 4)
@@ -1035,7 +1035,7 @@ public:
             expect (newTopPeaks.second <= 1.2f, "Shimmer Feedback 1.0 peak|L-R| exceeded 1.2: " + juce::String (newTopPeaks.second));
         }
 
-        beginTest ("DIAGNOSTIC: what peekDryFeedback() actually looks like reaching the shifter, high vs. low Sustain");
+        beginTest ("DIAGNOSTIC: what peekDryFeedback() actually looks like reaching the shifter, high vs. low Shimmer Feedback (legacy path)");
         {
             // Glitch investigation, second pass: a BARE PitchShifter fed the
             // same 220Hz tone directly stayed perfectly well-behaved
@@ -1053,7 +1053,7 @@ public:
             constexpr float toneFrequencyHz = 220.0f;
             constexpr int snippetLength = 40;
 
-            auto captureSnippet = [&] (float shimmerSustainToUse) -> std::vector<float>
+            auto captureSnippet = [&] (float shimmerFeedbackToUse) -> std::vector<float>
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
@@ -1061,7 +1061,7 @@ public:
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
                 engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1102,7 +1102,7 @@ public:
             logMessage ("peekDryFeedback() last " + juce::String (snippetLength) + " samples, low Sustain (0.15): " + lowStr);
         }
 
-        beginTest ("DIAGNOSTIC: do primary/quadrature grain pools settle on the SAME alignment offset, high vs. low Sustain?");
+        beginTest ("DIAGNOSTIC: do primary/quadrature grain pools settle on the SAME alignment offset, high vs. low Shimmer Feedback (legacy path)?");
         {
             // Glitch investigation, third pass. This codebase's own
             // extensively-documented "pitch oscillation" investigation
@@ -1134,7 +1134,7 @@ public:
 
             struct OffsetStats { float maxAbsDiff; float meanAbsDiff; int numSamplesOverThreshold; };
 
-            auto measureOffsetDivergence = [&] (float shimmerSustainToUse) -> OffsetStats
+            auto measureOffsetDivergence = [&] (float shimmerFeedbackToUse) -> OffsetStats
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
@@ -1142,7 +1142,7 @@ public:
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
                 engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1219,7 +1219,7 @@ public:
             // existed.
             //
             // RESULT: swept 0.00/0.02/0.05/0.10/0.15/0.20/0.30 (via
-            // setShimmerSustain(1.0f - floor), which already reaches
+            // setShimmerFeedback(1.0f - floor), which already reaches
             // maxShimmerBlendWeight=floor exactly -- no source change needed
             // to test this). meanOffsetDiff came back NOISY and NON-
             // MONOTONIC across that whole range (178/120/181/125/85/118/86
@@ -1230,7 +1230,7 @@ public:
             // the dial exists to provide) only reached ~86 samples average
             // divergence, barely better than 0.15's 85 -- no floor in this
             // practical range gives a clean, reliable win. NOT implemented in
-            // production code as a result -- `setShimmerSustain()` still maps
+            // production code as a result -- `setShimmerFeedback()` still maps
             // to the unfloored `1.0f - newAmount`, unchanged from before this
             // sweep. Decision (user, 2026-09-06): keep the safetyLimiter fix
             // (a real, verified severity reduction) as the stopping point;
@@ -1243,9 +1243,9 @@ public:
             // session doesn't re-attempt the same floor idea without knowing
             // it was already measured and found wanting.
             //
-            // `ShimmerReverbEngine::setShimmerSustain(x)` maps to
+            // `ShimmerReverbEngine::setShimmerFeedback(x)` maps to
             // `maxShimmerBlendWeight = 1.0f - x`, so testing candidate FLOOR
-            // values here doesn't need any source change -- setShimmerSustain
+            // values here doesn't need any source change -- setShimmerFeedback
             // (1.0f - floor) reaches exactly maxShimmerBlendWeight=floor,
             // letting this sweep answer "how big a floor is actually needed"
             // with real measurements before
@@ -1264,7 +1264,7 @@ public:
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
                 engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
-                engine.setShimmerSustain (1.0f - floorWeight); // reaches maxShimmerBlendWeight == floorWeight exactly
+                engine.setShimmerFeedback (1.0f - floorWeight); // reaches maxShimmerBlendWeight == floorWeight exactly
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1317,7 +1317,7 @@ public:
             logMessage ("maxShimmerBlendWeight floor sweep (Shimmer Amount=1, Width=1, 220Hz tone, final 1s of 6s): " + summary);
         }
 
-        beginTest ("DIAGNOSTIC: sample-to-sample discontinuity ('click') size in wetLeft, post-limiter-fix, high vs. low Sustain");
+        beginTest ("DIAGNOSTIC: sample-to-sample discontinuity ('click') size in wetLeft, post-limiter-fix, high vs. low Shimmer Feedback (legacy path)");
         {
             // Glitch investigation, fourth pass -- user reports it STILL
             // sounds glitchy after the safetyLimiter fix on sideShift. That
@@ -1342,7 +1342,7 @@ public:
 
             struct ClickStats { float maxDelta; float meanDelta; float p99Delta; float fractionSaturated; };
 
-            auto measureClickStats = [&] (float shimmerSustainToUse) -> ClickStats
+            auto measureClickStats = [&] (float shimmerFeedbackToUse) -> ClickStats
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
@@ -1350,7 +1350,7 @@ public:
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
                 engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1397,7 +1397,7 @@ public:
                         // measures how much of the time the limiter is actively,
                         // heavily distorting this signal, not just occasionally
                         // catching a peak.
-                        if (std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)) > 0.7)
+                        if (std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerFeedbackToUse)) > 0.7)
                             ++saturatedCount;
 
                         ++measuredCount;
@@ -1475,7 +1475,7 @@ public:
 
         beginTest ("Shimmer Amount = 0.0 makes the engine's tail behave identically to a bare DattorroTank (no shimmer contribution at all)");
         {
-            // Structural-fix regression: proves shimmerFeedbackGain = 0.0
+            // Structural-fix regression: proves shimmerAmountGain = 0.0
             // genuinely means ZERO shimmer contribution (the tank's own
             // natural recirculation, completely independent of the shift
             // path), not just "small" -- by cross-checking
@@ -1501,15 +1501,15 @@ public:
             DattorroTank plainTank;
             plainTank.prepare (spec);
             plainTank.reset();
-            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
+            // DattorroTank's own class default (shimmerAmountGain = 1.0f,
             // matching ShimmerReverbEngine's default so untouched use "just
             // works") would otherwise make this comparison tank claim half
             // its recirculation budget for an externalFeedback that's always
-            // 0.0 (see setShimmerFeedbackGain()'s crossfade comment) --
+            // 0.0 (see setShimmerAmountGain()'s crossfade comment) --
             // explicitly zero it so this reference truly represents "zero
             // shimmer, full decayGain", matching engine.setShimmerAmount(0.0f)
             // above.
-            plainTank.setShimmerFeedbackGain (0.0f);
+            plainTank.setShimmerAmountGain (0.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (135790);
@@ -1567,7 +1567,7 @@ public:
             // - quadratureSafe) is computed from the pitch shifter's output
             // unconditionally, on every sample, regardless of shimmerAmount
             // -- shimmerAmount only ever gated DattorroTank's own internal
-            // recirculation crossfade (see setShimmerFeedbackGain()), never
+            // recirculation crossfade (see setShimmerAmountGain()), never
             // this separate feed-forward term. The prior regression test
             // above ("...behave identically to a bare DattorroTank...")
             // masked this exact bug by always zeroing Width alongside
@@ -1892,7 +1892,7 @@ public:
             // "still finishes soon, oscillates too much, and sometimes sounds
             // like a motor" -- not ethereal/static as intended. The existing
             // DattorroTankTests.cpp freeze-sustain test only proves the BARE
-            // tank sustains (with setShimmerFeedbackGain(0.0f), i.e. the shifter/
+            // tank sustains (with setShimmerAmountGain(0.0f), i.e. the shifter/
             // DCBlocker/SafetyLimiter chain excluded entirely) -- it never
             // measured whether the REAL product signal path (through
             // ShimmerReverbEngine, default shimmerAmount=1.0, so 85% of the
@@ -2920,7 +2920,7 @@ public:
             auto legacyDefault = [] (ShimmerReverbEngine& engine)
             {
                 engine.setLegacyShimmerBlendForTesting (true);
-                engine.setShimmerSustain (0.85f);
+                engine.setShimmerFeedback (0.85f);
             };
 
             for (int blockSize : { defaultBlockSize, 512 })
@@ -3808,7 +3808,7 @@ static ShimmerReverbEngineSizeTests shimmerReverbEngineSizeTests;
 //==============================================================================
 // Shimmer cascade slice 1, step B (2026-10-24, docs/shimmer-character-research.md
 // section 7): the equal-power blend law (DattorroTank::setShimmerBlendLaw())
-// and the un-inverted "Shimmer Feedback" mapping (setShimmerSustain(x) now
+// and the un-inverted "Shimmer Feedback" mapping (setShimmerFeedback(x) now
 // sets maxShimmerBlendWeight = x, default 0.55). Its own class so it can be
 // run alone with Main.cpp's name filter ("Cascade"). "Legacy" below always
 // means setLegacyShimmerBlendForTesting (true): the inverted 1 - x mapping
@@ -3831,7 +3831,7 @@ public:
     {
         engine.setLegacyShimmerBlendForTesting (legacy);
         engine.setShimmerAmount (1.0f);
-        engine.setShimmerSustain (legacy ? 1.0f - weight : weight);
+        engine.setShimmerFeedback (legacy ? 1.0f - weight : weight);
     }
 
     // Stereo output of an engine configured by `setup` before prepare(), fed
@@ -3977,7 +3977,7 @@ public:
             {
                 ShimmerReverbEngineFreezeCrossfadeTests::legacySlice1Settings (engine);
                 engine.setLegacyShimmerBlendForTesting (true);
-                engine.setShimmerSustain (oldDefaultSustain);
+                engine.setShimmerFeedback (oldDefaultSustain);
             };
 
             for (bool forceUnityActive : { false, true })
@@ -4032,7 +4032,7 @@ public:
             const auto legacy = runSignal ([] (ShimmerReverbEngine& e)
                                            {
                                                e.setLegacyShimmerBlendForTesting (true);
-                                               e.setShimmerSustain (oldDefaultSustain);
+                                               e.setShimmerFeedback (oldDefaultSustain);
                                            },
                                            3.5, sine, silenceFrom);
 
@@ -4118,7 +4118,7 @@ public:
                                       if (legacy)
                                       {
                                           e.setLegacyShimmerBlendForTesting (true);
-                                          e.setShimmerSustain (oldDefaultSustain);
+                                          e.setShimmerFeedback (oldDefaultSustain);
                                       }
                                       else
                                       {
@@ -4331,7 +4331,7 @@ public:
     static void fullShimmer (ShimmerReverbEngine& engine)
     {
         engine.setShimmerAmount (1.0f);
-        engine.setShimmerSustain (1.0f);
+        engine.setShimmerFeedback (1.0f);
         engine.setPitchShiftSemitones (12.0f);
     }
 
