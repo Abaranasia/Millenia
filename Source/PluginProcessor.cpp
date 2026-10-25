@@ -39,6 +39,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
     freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
     infiniteParam   = apvts.getRawParameterValue (ParamIDs::infinite);
+    formantCorrectionParam = apvts.getRawParameterValue (ParamIDs::formantCorrection);
     loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
     loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
     preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
@@ -130,6 +131,9 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     shimmerReverbEngine.setSize (sizeParam->load());
     shimmerReverbEngine.setModulation (modulationParam->load());
     shimmerReverbEngine.setDecaySeconds (decayParam->load());
+    // Formant Correction too, so its crossfade starts settled at the host's
+    // value (prepare()/reset() snap it) instead of ramping in.
+    shimmerReverbEngine.setFormantCorrection (formantCorrectionParam->load() > 0.5f);
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
 
@@ -303,6 +307,11 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // 0/1 target itself over infiniteRampSeconds, sample-accurately, same
     // reasoning as Loop Mix below.
     shimmerReverbEngine.setInfiniteAmount (infiniteParam->load() > 0.5f ? 1.0f : 0.0f);
+
+    // Formant Correction: read RAW, no smoother here -- the engine crossfades
+    // raw <-> corrected per sample over 20 ms (formantRampSeconds), same
+    // reasoning as Infinite above.
+    shimmerReverbEngine.setFormantCorrection (formantCorrectionParam->load() > 0.5f);
 
     // Phase 10 Loop Mix: read RAW, no smoother here -- the engage/disengage
     // ramp lives INSIDE LoopCapture itself (2026-09-06 fix, see

@@ -66,6 +66,11 @@ private:
     // pattern as bypassButton. Sits in the top bar left of freezeQuickToggle.
     juce::ToggleButton infiniteToggle { "Infinite" };
 
+    // Formant Correction (see ParamIDs::formantCorrection): APVTS-attached
+    // bool toggle (formantCorrectionAttachment below), same pattern as
+    // infiniteToggle. Sits in the top bar left of infiniteToggle.
+    juce::ToggleButton formantCorrectionToggle { "Formant Correction" };
+
     juce::TextButton presetNeg12Button { "-12 st" };
     juce::TextButton preset0Button  { "0 st" };
     juce::TextButton preset7Button  { "+7 st" };
@@ -85,6 +90,7 @@ private:
     std::unique_ptr<SliderAttachment> freezeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
     std::unique_ptr<ButtonAttachment> infiniteAttachment;
+    std::unique_ptr<ButtonAttachment> formantCorrectionAttachment;
 
     // Phase 10 Loop Freeze / Loop Mix.
     std::unique_ptr<SliderAttachment> loopLengthAttachment;

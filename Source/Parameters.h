@@ -29,8 +29,8 @@ namespace ParamIDs
 
     // "Shimmer Sustain" task: backs ShimmerReverbEngine::setShimmerSustain()
     // -- see that method's header comment for its two effects (DattorroTank's
-    // recirculation cap, inverted, plus a direct gate on the audible Width
-    // injection). Default (0.85f) matches
+    // recirculation cap, direct since 2026-10-24, plus a direct gate on the
+    // audible Width injection); shown as "Shimmer Feedback". Default (0.55f) matches
     // ShimmerReverbEngine::defaultShimmerSustainAmount, a freshly-chosen
     // default for this control, not a preserved match to any prior hardcoded
     // constant.
@@ -60,6 +60,17 @@ namespace ParamIDs
     // state-saveable); the 0/1 jump is ramped sample-accurately inside
     // DattorroTank, so PluginProcessor reads it raw.
     constexpr auto infinite   = "infinite";
+
+    // Formant Correction on/off (2026-10-25, see ShimmerReverbEngine::
+    // setFormantCorrection() and docs/shimmer-character-research.md): the
+    // LPC formant corrector used to run on the shimmer feedback path
+    // unconditionally. Measured: on tonal input it is numerically unstable
+    // (a +12 st shift of a 440 Hz sine lost ~59 dB of its 880 Hz octave,
+    // with ~2.6e6 internal peaks that safetyLimiter clipped into broadband
+    // noise), which kept the octave cascade from ever forming. Default OFF;
+    // juce::AudioParameterBool read RAW, the 20 ms crossfade lives in the
+    // engine, same convention as infinite above.
+    constexpr auto formantCorrection = "formantCorrection";
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
     // Source/DSP/LoopCapture.h): a NEW, fully independent feature alongside

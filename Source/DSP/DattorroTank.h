@@ -160,8 +160,24 @@ public:
     // (Shimmer Amount). Not clamped here, same convention as setDecaySeconds()/
     // setDamping()/setShimmerFeedbackGain()/setFreezeAmount() -- the APVTS
     // parameter range is the source of truth; ShimmerReverbEngine::
-    // setShimmerSustain() clamps to [0, 1] before calling this.
+    // setShimmerSustain() clamps to [0, 1] before calling this, and since
+    // 2026-10-24 passes the "Shimmer Feedback" value straight through
+    // (no longer inverted, see setShimmerBlendLaw()).
     void setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight);
+
+    // Shimmer cascade slice 1 (2026-10-24, docs/shimmer-character-research.md
+    // section 7.1 item 1): how processSample() derives plainWeight from
+    // shimmerWeight. 0 = the linear law (plainWeight = 1 - shimmerWeight,
+    // amplitudes sum to 1, the only law before this date and still the
+    // default, so an untouched tank keeps the old arithmetic bit-for-bit);
+    // 1 = equal-power (plainWeight = sqrt (1 - shimmerWeight^2), energies
+    // sum to 1, which keeps the loop's energy when the two feeds are
+    // uncorrelated, i.e. when the external signal is pitch-shifted by a
+    // semitone or more); linear crossfade in between. Not clamped here, same
+    // convention as the other setters; ShimmerReverbEngine derives it from
+    // the pitch shift and keeps it in [0, 1]. See shimmerEqualPowerAmount and
+    // processSample() for why Freeze forces the linear law regardless.
+    void setShimmerBlendLaw (float equalPowerAmount);
 
     // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): 0..1 crossfade
     // between the live, APVTS-driven decayGain (0.0f) and frozenDecayGain
@@ -690,6 +706,10 @@ private:
 
     float dampingCoefficient = defaultDampingCoefficient;
     float shimmerFeedbackGain = defaultShimmerFeedbackGain;
+
+    // Blend law (see setShimmerBlendLaw()). 0.0f default = the linear law,
+    // bit-identical to the pre-2026-10-24 tank.
+    float shimmerEqualPowerAmount = 0.0f;
 
     // Decay (see setDecaySeconds()). decayGain is derived, recomputed at the
     // top of processSample() whenever decayGainDirty is set (a new Decay, or

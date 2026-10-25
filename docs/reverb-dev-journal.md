@@ -289,6 +289,40 @@ At 0.3, the jump count matches Mod 0, but the divergence rises (×1.1 at 220 Hz,
 - Whether to calibrate `L_half` for allpass storage (+14%).
 - The Thiran glide measured as click-free (1.05×). Lagrange reads at fractional Size add a slight per-pass HF loss off Size 1.
 
+## 2026-10-25 — Formant Correction toggle (default off)
+
+**Status: code complete, unit-tested in Debug and Release. Not ear-verified.**
+
+### Why
+
+A measured diagnosis showed that `FormantEnvelopeCorrector` is numerically unstable on tonal input inside the feedback loop. After a +12 st shift of a 440 Hz sine it removed about 59 dB of the 880 Hz octave. It also rang at 440 Hz with internal peaks near 2.6e6, and `SafetyLimiter` clipped that into broadband noise inside the loop. With the corrector bypassed, the octave cascade is clean: 880 → 1760 → 3520 Hz, about one octave per 0.5 s. The user chose a toggle, off by default. Fixing the corrector itself is a separate task.
+
+### What changed
+
+- **Engine.** `ShimmerReverbEngine::setFormantCorrection (bool)`, with `defaultFormantCorrection = false`. A 20 ms per-sample linear crossfade (`juce::SmoothedValue`) blends the raw shifted signal with the corrected one, on both the primary and the quadrature paths, at the corrector's old chain position. While the weight rests at 0, the corrector is not run at all. That makes "off" bit-identical to having no corrector in the chain. On the idle → active edge the corrector is `reset()` first, which is allocation-free (`std::fill` and array fills only). The setting survives `prepare()`/`reset()`, and `reset()` snaps the crossfade to its target.
+- **Parameter.** `formantCorrection` (`AudioParameterBool`, version 1, "Formant Correction", default false). PluginProcessor reads it raw every block and before `prepare()`, the same way as Infinite.
+- **Editor.** A "Formant Correction" toggle in the top bar, to the left of Infinite, with a `ButtonAttachment`.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| 880 Hz band share, 1.0–1.5 s after a 1 s 440 Hz burst (+12 st, Shimmer Feedback 1), off / on | −5.45 dB / −19.79 dB (bound > −15 dB) |
+| Peak in that run, off | 0.83 |
+| Golden hashes with correction on (mono `933a970f88302962`, left `e30cadee8d7121fb`, legacy T6 `106b8609081503f9` / `918d1cec9419a789`) | all unchanged, no re-baseline |
+| On → off → `reset()` vs a never-enabled engine with the same history | bit-identical after the reset |
+| Switch click test (max delta in the 30 ms after the switch / in the 0.5 s before it), on / off | 0.79 / 0.86 (bound 3) |
+
+The click test is a guard, not proof that the ramp is needed. A hard switch measured the same, because the tank's delay network smooths the in-loop step before it reaches the output. The ramp is kept anyway, since a hard step between two in-loop signals is a discontinuity by construction.
+
+Opted into correction on, to keep the pre-change measurements they encode: the three golden-hash tests (via `legacySlice1Settings()`), and the legacy-path "Shimmer Sustain: a HIGH value decays slower" test. With correction off, that test measured −31.34 / −31.38 dB, so its gap disappears.
+
+### Still open
+
+- Fix `FormantEnvelopeCorrector`'s instability on tonal input (separate bug).
+- Ear check of the default-off cascade and of the toggle.
+- `FormantEnvelopeCorrector::reset()` zeroes `currentSemitones` but keeps `armed`. That matches the state after `prepare()` that the golden hashes encode, so it was left as is.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

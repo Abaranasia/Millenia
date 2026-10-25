@@ -220,6 +220,11 @@ void DattorroTank::setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight)
     maxShimmerBlendWeight = newMaxShimmerBlendWeight;
 }
 
+void DattorroTank::setShimmerBlendLaw (float equalPowerAmount)
+{
+    shimmerEqualPowerAmount = equalPowerAmount;
+}
+
 void DattorroTank::setFreezeAmount (float newFreezeAmount)
 {
     freezeAmount = newFreezeAmount;
@@ -395,7 +400,35 @@ float DattorroTank::processSample (float input, float externalFeedback)
     const float effectiveMaxShimmerBlendWeight = maxShimmerBlendWeight
                                                       + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
     const float shimmerWeight = shimmerFeedbackGain * effectiveMaxShimmerBlendWeight;
-    const float plainWeight = 1.0f - shimmerWeight;
+
+    // Blend law (2026-10-24, shimmer cascade slice 1, see setShimmerBlendLaw()
+    // and docs/shimmer-character-research.md sections 3 and 7.1). The linear
+    // law above keeps the AMPLITUDE budget at 1, but when the external signal
+    // is pitch-shifted by a semitone or more it is uncorrelated with
+    // feedbackFromB, so only plainWeight^2 + shimmerWeight^2 of the ENERGY
+    // survives each pass (0.745 at shimmerWeight 0.15, 0.5 at 0.5): more
+    // shimmer meant a shorter tail, which is what drove the old 0.15 cap and
+    // the inverted Sustain mapping. Equal-power (plainWeight = sqrt (1 -
+    // shimmerWeight^2)) keeps that energy at 1; the engine fades back to the
+    // linear law as the shift goes toward 0 st, where the copies correlate.
+    //
+    // The (1 - freezeAmount) factor is required, not cosmetic: when frozen,
+    // the engine's unity crossfade makes externalFeedback an UNSHIFTED copy,
+    // correlated with feedbackFromB, and equal-power weights on correlated
+    // signals sum above 1 (at the 0.01 frozen cap, 0.99995 + 0.01 ~= 1.01)
+    // inside a near-lossless (0.999) loop -- growth. Linear weights sum to
+    // exactly 1, so Freeze keeps its validated arithmetic: at freezeAmount
+    // 1.0 this is bit-identical to the linear law (DattorroTankTests), and the
+    // full-engine Freeze guard in ShimmerReverbEngineCascadeTests holds level
+    // like the legacy path. At equalPower == 0.0f (default, or fully frozen)
+    // the branch is skipped and plainWeight is the old 1 - shimmerWeight
+    // bit-for-bit.
+    float plainWeight = 1.0f - shimmerWeight;
+    const float equalPower = shimmerEqualPowerAmount * (1.0f - freezeAmount);
+
+    if (equalPower != 0.0f)
+        plainWeight += equalPower * (std::sqrt (juce::jmax (0.0f, 1.0f - shimmerWeight * shimmerWeight)) - plainWeight);
+
     float inputToA = diffused + crossFeedGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);
 

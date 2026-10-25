@@ -57,7 +57,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
                             "15 s at 1 and 20 s (the knob maximum) at 1.3 and above. Longer settings "
                             "clamp to that limit.");
     configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
-    configureRotary (shimmerSustainSlider, shimmerSustainLabel, "Shimmer Sustain");
+    configureRotary (shimmerSustainSlider, shimmerSustainLabel, "Shimmer Feedback");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
@@ -101,6 +101,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     addAndMakeVisible (bypassButton);
     addAndMakeVisible (freezeQuickToggle);
     addAndMakeVisible (infiniteToggle);
+    addAndMakeVisible (formantCorrectionToggle);
 
     // Recovered by user request (2026-08-22): a quick full-freeze toggle
     // above the Freeze knob. Checking remembers the dial's current value
@@ -147,6 +148,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     freezeAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::freeze,     freezeSlider);
     bypassAttachment     = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::bypass,     bypassButton);
     infiniteAttachment   = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::infinite,   infiniteToggle);
+    formantCorrectionAttachment = std::make_unique<ButtonAttachment> (audioProcessor.apvts, ParamIDs::formantCorrection, formantCorrectionToggle);
     loopLengthAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopLength, loopLengthSlider);
     loopMixAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::loopMix,    loopMixSlider);
     preDelayAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::preDelay,   preDelaySlider);
@@ -204,6 +206,8 @@ void MilleniaAudioProcessorEditor::resized()
     freezeQuickToggle.setBounds (topArea.removeFromRight (80));
     topArea.removeFromRight (8);
     infiniteToggle.setBounds (topArea.removeFromRight (80));
+    topArea.removeFromRight (8);
+    formantCorrectionToggle.setBounds (topArea.removeFromRight (150)); // wider: longer label
 
     bounds.removeFromTop (20); // headroom for the attachToComponent labels drawn above each knob
 

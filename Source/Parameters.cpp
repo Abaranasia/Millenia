@@ -70,23 +70,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 
     // Backs ShimmerReverbEngine::setShimmerSustain() -- see that method's
     // header comment for its two effects (DattorroTank's recirculation cap,
-    // INVERTED, plus a direct gate on process()'s audible Width/decorrelation
-    // injection). Independently controls how present and long-lived the
-    // shimmer layer is, decoupled from both Decay (decayGain) and Shimmer
-    // Amount (shimmerFeedbackGain, the overall shimmer level).
+    // direct since 2026-10-24 -- it was inverted before -- plus a direct gate
+    // on process()'s audible Width/decorrelation injection). Shown as
+    // "Shimmer Feedback" since 2026-10-24; the ID stays shimmerSustain
+    // (nothing has shipped, and a rename would only churn the diff).
+    // Independently controls how present and long-lived the shimmer layer
+    // is, decoupled from both Decay (decayGain) and Shimmer Amount
+    // (shimmerFeedbackGain, the overall shimmer level).
     //
-    // Default 0.85f matches ShimmerReverbEngine::defaultShimmerSustainAmount
+    // Default (was 0.85f) matches ShimmerReverbEngine::defaultShimmerSustainAmount
     // -- a freshly-chosen default for this control's now-widened scope, NOT
     // a preserved match to any prior hardcoded constant (that guarantee was
     // dropped 2026-09-06 once this parameter's scope grew to also gate the
     // always-live Width path, which the old hardcoded behavior never touched
     // at all -- see ShimmerReverbEngine.h's defaultShimmerSustainAmount
-    // comment).
+    // comment). 2026-10-24: 0.85f -> 0.55f with the un-inverted mapping
+    // (docs/shimmer-character-research.md section 7.1 item 2).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::shimmerSustain, 1 },
-        "Shimmer Sustain",
+        "Shimmer Feedback",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.85f));
+        0.55f));
 
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
     // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
@@ -202,6 +206,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::infinite, 1 },
         "Infinite",
+        false));
+
+    // Formant Correction (see ParamIDs::formantCorrection). Default false
+    // matches ShimmerReverbEngine::defaultFormantCorrection: the corrector is
+    // numerically unstable on tonal input inside the feedback loop (measured
+    // 2026-10-25: ~59 dB of the 880 Hz octave removed after a +12 st shift
+    // of a 440 Hz sine, ~2.6e6 internal peaks clipped into broadband noise by
+    // the SafetyLimiter), so it is opt-in until the corrector itself is fixed
+    // -- see docs/shimmer-character-research.md. Raw 0/1; the engine
+    // crossfades the switch over 20 ms.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::formantCorrection, 1 },
+        "Formant Correction",
         false));
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and

@@ -103,6 +103,11 @@ private:
     // its own smoothing" convention as loopMixParam below.
     std::atomic<float>* infiniteParam   = nullptr;
 
+    // Formant Correction (see ParamIDs::formantCorrection): bool read RAW
+    // every block, same as infiniteParam -- the engine owns the 20 ms
+    // crossfade.
+    std::atomic<float>* formantCorrectionParam = nullptr;
+
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Mix --
     // additive, fully independent of freezeParam above. loopMixParam is read
     // RAW every block, with NO PluginProcessor-level SmoothedValue, same as
