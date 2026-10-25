@@ -334,6 +334,54 @@ The dial has been un-inverted and labelled "Shimmer Feedback" since 2026-10-24, 
 - **Tank.** `DattorroTank::setShimmerFeedbackGain` / `shimmerFeedbackGain` / `defaultShimmerFeedbackGain` → `setShimmerAmountGain` / `shimmerAmountGain` / `defaultShimmerAmountGain`. They are driven by Shimmer Amount, and the old names would now read as the Feedback dial.
 - **Tests.** Calls and test names updated. Legacy-path tests are named "Shimmer Feedback (legacy path)"; their inverted mapping is untouched. Dated comments that say "Shimmer Sustain" are kept as history.
 
+## 2026-10-25 — Shimmer Tone (slice 1, step C)
+
+**Status: code complete, unit-tested in Debug and Release, plugin builds. Not ear-verified.**
+
+### Why
+
+Step C of [`shimmer-character-research.md`](./shimmer-character-research.md) section 7.1 item 3. The shifted path had no band-limiting. Content above fs / (2 · ratio) folded back as aliases, and nothing made the upper generations of the cascade roll off. That becomes a problem now that the shifted share is large (step B). The user chose the ratio-tracking alias cap (section 8, decision 6).
+
+### What changed
+
+- **Engine.** `ShimmerReverbEngine::setShimmerTone (float hz)`, clamped to 1.5–10 kHz, default 5 kHz (`min/max/defaultShimmerToneHz`). Two cascaded mono `StateVariableTPTFilter` lowpass sections (4th order) filter `dryFeedback` before it reaches `shifter` and the formant corrector's dry analysis. `unityShifter` still gets the raw signal, so Freeze is untouched. The effective cutoff is `min(Tone, fs / (4 · max(ratio, 1)), 0.49 fs)` with ratio = 2^(st / 12), recomputed once per block. At 44.1 kHz that is 5512.5 Hz at +12 st and 2756.25 Hz at +24 st. Downward shifts count as ratio 1, so their cap is fs / 4, which is above the range from 40 kHz up.
+- **Off endpoint.** At 10 kHz the filters keep running warm, but the shifter gets the raw signal. This is the same pattern as the wet EQ endpoints. Off is the legacy path and applies no alias cap. The setting survives `prepare()`/`reset()`.
+- **Parameter.** `shimmerTone` ("Shimmer Tone", version 1), skewed so the geometric midpoint (~3.87 kHz) sits at the knob's centre, like the wet EQ corners. Its value text reads "5000 Hz" and "Off" at the top. That text lives in the parameter (`AudioParameterFloatAttributes`), not in an editor lambda: `SliderAttachment` overwrites the slider's `textFromValueFunction` with the parameter's own text, and a slider suffix would read "Off Hz". So hosts show "Off" too. PluginProcessor caches the raw pointer, pushes the value before `prepare()`, and runs it through a 50 ms block-rate `SmoothedValue` every block, like Low Cut/High Cut.
+- **Editor.** A "Shimmer Tone" knob right after Shimmer Feedback in the first row, with a tooltip about the cap. The window grows from 1020 to 1120 px to keep ~100 px per knob. The second row now uses the 11-knob width.
+- **Tests.** A new `ShimmerReverbEngineToneTests` class (8 tests). T6 and the legacy "decays slower" test now set Tone Off explicitly. T2 is asserted with Tone Off (see below).
+
+### Measured (Release)
+
+| Check | Result |
+|---|---|
+| Effective cutoff at 44.1 kHz: +12 / +24 / −12 (Tone 3 kHz) / Off | 5512.5 / 2756.25 / 3000 Hz / inactive |
+| T3 alias band, Tone 9999 Hz vs Off, Modulation 0: (a) +12, 15 kHz → 14.1 kHz | 17.87 vs 66.73 dB (−48.86 dB); floor with Amount 0: 13.21 dB |
+| T3 (b) +24, 8 kHz → 12.1 kHz | −1.49 vs 38.13 dB (−39.62 dB); floor 0.10 dB |
+| Darkening, 440 Hz burst, Feedback 1, +12: 7040 Hz+ bands at 2.75 s, 2 kHz vs Off | 6.96 vs 33.18 dB (−26.22 dB) |
+| Same run, 3520 Hz+ bands | 47.63 vs 48.20 dB (−0.57 dB) |
+| 880 Hz band at 1.25 s, Off / 5 kHz / 2 kHz | 65.04 / 64.85 / 64.86 dB |
+| Off after a 2 kHz excursion + `reset()` vs Off throughout | 0 mismatching samples |
+| Full Freeze, Tone Off → 1.5 kHz | 0 mismatching samples (control at Freeze 0: 74997) |
+| Tone 1.5 kHz, Feedback 1, +24 / −24 st, 180 s noise | peak 1.52 / 1.65; final-second peak after 40 s of silence 0 / 0 |
+| Click test, Off → 1.5 kHz / 1.5 kHz → Off (ratio of max deltas, bound 3) | 1.07 / 1.29 |
+| Golden hashes, default (mono / left) | `933a970f88302962` → `7149627bc88d4fcf`, `e30cadee8d7121fb` → `380d36dfca706ba2` (by design, 5 kHz default) |
+| Legacy T6 hashes (Tone Off + legacy blend + formant on) | `106b8609081503f9` / `918d1cec9419a789`, unchanged |
+| T1 (440−220) improvement at 1.5 s | 11.18 dB (bound 9) |
+| Real-time factor at Freeze 0 (unity idle) | 0.0347 |
+
+Notes on the measurements:
+
+- **The 3520 Hz band barely moves at 2 kHz.** Each pass filters before it shifts, so an output octave is attenuated by the filter's response at the octave below it. 3520 Hz comes from a 1760 Hz input, just under the cutoff. The darkening test therefore asserts on 7040 Hz and up.
+- **T3 needs Modulation 0.** At the 0.1 default, the tank's allpass modulation spreads the 15 kHz input into a skirt. That put the alias band's floor at 34.65 dB even with no shifter, only 26.5 dB under the Off alias. The capped run already sat on that floor.
+- **T2 (energy-neutral blend) failed at the default Tone.** RT60 at shimmerWeight 0 / 0.5 / 0.85 measured 5.22 / 4.79 / 4.17 s, against a ±10% bound. The low-pass removes the impulse's top end from the shifted share on every pass. That is an in-loop, frequency-dependent loss that grows with the share, like Damping applied to the shifted path only. T2 is now asserted with Tone Off, so it stays a test of the blend law: 5.22 / 5.29 / 5.40 s, within ±10%. The Tone-on figures are logged.
+- **Spec T3 asked for "Tone at its 10 kHz maximum (not Off)".** 10 kHz is Off, so 9999 Hz stands in for it.
+
+### Still open
+
+- Ear check of builds B → C: the 3 / 5 / 8 kHz sweep, and +19/+24, where the cap darkens the shimmer.
+- Whether the shorter broadband tail at high Shimmer Feedback with the Tone filter (−20% RT60 at 0.85) is acceptable by ear.
+- No APVTS round-trip test for `shimmerTone`: the test project has no `juce_audio_processors`, a documented gap. pluginval was not run.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

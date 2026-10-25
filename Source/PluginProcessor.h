@@ -134,6 +134,10 @@ private:
     std::atomic<float>* lowCutParam = nullptr;
     std::atomic<float>* highCutParam = nullptr;
 
+    // Shimmer Tone (see ParamIDs::shimmerTone): a block-rate smoother like
+    // lowCut/highCut -- the engine also updates this cutoff once per block.
+    std::atomic<float>* shimmerToneParam = nullptr;
+
     // Slice 2 (docs/reverb-space-research.md section 9). decayParam (above)
     // goes through a block-rate smoother like the other continuous values;
     // size and modulation are read RAW because DattorroTank glides both per
@@ -155,6 +159,7 @@ private:
     juce::SmoothedValue<float> smoothedMix;
     juce::SmoothedValue<float> smoothedLowCut;
     juce::SmoothedValue<float> smoothedHighCut;
+    juce::SmoothedValue<float> smoothedShimmerTone;
 
     // Phase 9: Freeze gets the exact same click-free smoothing treatment as
     // every other continuous parameter here -- even a hard 0->1 jump on

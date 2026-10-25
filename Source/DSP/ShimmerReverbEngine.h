@@ -270,6 +270,30 @@ public:
     // reset() like width/mix; reset() snaps the crossfade to its target.
     void setFormantCorrection (bool shouldCorrect);
 
+    // Shimmer Tone (2026-10-25, shimmer cascade slice 1 step C, docs/
+    // shimmer-character-research.md section 7.1 item 3): a 4th-order
+    // low-pass (two cascaded 2nd-order TPT sections) on dryFeedback before it
+    // feeds the main shifter and the formant corrector's dry analysis.
+    // Clamped to [minShimmerToneHz, maxShimmerToneHz]; the top endpoint is
+    // Off. It doubles as the shifter's anti-alias filter: shifted content is
+    // f * ratio, so it folds above fs / (2 * ratio), and the effective cutoff
+    // is min(Tone, fs / (4 * max(ratio, 1)), 0.49 fs) -- one octave under the
+    // fold point (5512.5 Hz at +12 st, 2756.25 Hz at +24 st, 44.1 kHz).
+    // Downward shifts are not capped beyond ratio 1's fs / 4, which is above
+    // the Tone range from 40 kHz up. Same warm-filter pattern as the wet EQ
+    // (see lowCutActive): the filters always run, and at Off their output is
+    // unused, so Off is bit-identical to the engine before the filter and
+    // applies no alias cap (the legacy path). Not applied to unityShifter's
+    // input, so Freeze is untouched. Applied once per block; survives
+    // prepare()/reset() like width/mix.
+    void setShimmerTone (float newShimmerToneHz);
+
+    // Test-only introspection, same idiom: the cutoff process() applies to
+    // the Shimmer Tone filters for the current Tone/pitch/sample rate, and
+    // whether their output is used (false at Off).
+    float getShimmerToneCutoffHzForTesting() const noexcept { return computeShimmerToneCutoffHz(); }
+    bool isShimmerToneActiveForTesting() const noexcept { return shimmerToneHz < maxShimmerToneHz; }
+
     // Test-only introspection -- same "peek" idiom as DattorroTank::
     // peekFeedbackSignal() (which this just forwards) and LoopCapture::
     // peekCapturedLoopSample(). Added 2026-09-06 for the "Shimmer Amount +
@@ -340,6 +364,12 @@ private:
     // setLegacyShimmerBlendForTesting(); two stores, no allocation.
     void pushShimmerBlendToTank();
 
+    // Shimmer Tone's effective cutoff (see setShimmerTone()): min(Tone,
+    // shimmerToneAliasCapBaseHz / max(ratio, 1), maxFilterCutoffHz), ratio =
+    // 2^(pitchShiftSemitones / 12). Used by process() once per block and by
+    // getShimmerToneCutoffHzForTesting(); one std::pow, no allocation.
+    float computeShimmerToneCutoffHz() const noexcept;
+
     // Phase 9 Freeze LEVEL crossfade curve: unityWeight = freezeAmount^16 is
     // how much of the in-loop shimmer feedback comes from unityShifter (0
     // semitones) instead of the main shifter (full user shift). process()
@@ -396,6 +426,13 @@ private:
     static constexpr float maxLowCutHz = 1000.0f;
     static constexpr float minHighCutHz = 1000.0f;
     static constexpr float maxHighCutHz = 20000.0f;
+
+    // Shimmer Tone range and default (see setShimmerTone()) -- must match
+    // Parameters.cpp. maxShimmerToneHz is the Off endpoint. 5 kHz is the
+    // research doc's starting point for the user's ear-tuning (section 7.3).
+    static constexpr float minShimmerToneHz = 1500.0f;
+    static constexpr float maxShimmerToneHz = 10000.0f;
+    static constexpr float defaultShimmerToneHz = 5000.0f;
 
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
     // wet, not bypassed, so existing tests/behavior are unchanged unless a
@@ -550,6 +587,18 @@ private:
     float maxFilterCutoffHz = maxHighCutHz;
     bool lowCutActive = false;
     bool highCutActive = false;
+
+    // Shimmer Tone (see setShimmerTone()): two mono 2nd-order TPT lowpass
+    // sections in series (4th order, 24 dB/oct). shimmerToneActive is the
+    // per-block "not at the Off endpoint" decision and, like lowCutActive,
+    // gates only which signal the shifter gets: both sections run on every
+    // sample, so their state always tracks dryFeedback and activation
+    // continues from it instead of stepping from zero state.
+    // shimmerToneAliasCapBaseHz is fs / 4, set in prepare().
+    juce::dsp::StateVariableTPTFilter<float> shimmerToneFilterA, shimmerToneFilterB;
+    float shimmerToneHz = defaultShimmerToneHz;
+    float shimmerToneAliasCapBaseHz = 11025.0f;
+    bool shimmerToneActive = false;
 
     // Test-only state, see peekTankLeft()/peekTankRight().
     float lastTankLeft = 0.0f;

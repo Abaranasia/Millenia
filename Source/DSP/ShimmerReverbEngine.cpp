@@ -83,6 +83,16 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     highCutFilter.prepare (stereoSpec);
     maxFilterCutoffHz = (float) (0.49 * spec.sampleRate);
 
+    // Shimmer Tone (see setShimmerTone()): mono, on dryFeedback. shimmerToneHz
+    // itself is NOT re-assigned here (same survive-a-re-prepare rule as
+    // width/mix); only the sample-rate-dependent alias cap base is.
+    const juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
+    shimmerToneFilterA.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+    shimmerToneFilterB.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+    shimmerToneFilterA.prepare (monoSpec);
+    shimmerToneFilterB.prepare (monoSpec);
+    shimmerToneAliasCapBaseHz = (float) (0.25 * spec.sampleRate);
+
     // mix/bypassed/width are NOT re-applied here (unlike the
     // pitch shift line above): they already have correct member-
     // initializer defaults in the header, and re-assigning them on every
@@ -113,6 +123,9 @@ void ShimmerReverbEngine::reset()
     highCutFilter.reset();
     lowCutActive = false;
     highCutActive = false;
+    shimmerToneFilterA.reset();
+    shimmerToneFilterB.reset();
+    shimmerToneActive = false;
 
     // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
     // comment): unityShifter was just cleared above, so mark it idle --
@@ -224,6 +237,21 @@ void ShimmerReverbEngine::setLowCutHz (float newLowCutHz)
 void ShimmerReverbEngine::setHighCutHz (float newHighCutHz)
 {
     highCutHz = juce::jlimit (minHighCutHz, maxHighCutHz, newHighCutHz);
+}
+
+void ShimmerReverbEngine::setShimmerTone (float newShimmerToneHz)
+{
+    shimmerToneHz = juce::jlimit (minShimmerToneHz, maxShimmerToneHz, newShimmerToneHz);
+}
+
+float ShimmerReverbEngine::computeShimmerToneCutoffHz() const noexcept
+{
+    // ratio = 2^(st / 12); max(ratio, 1) leaves downward shifts at ratio 1's
+    // fs / 4 cap. +12 st gives std::pow (2, 1) = 2 exactly, so the cap at
+    // 44.1 kHz is exactly 5512.5 Hz.
+    const float ratio = std::pow (2.0f, pitchShiftSemitones / 12.0f);
+    const float aliasCapHz = shimmerToneAliasCapBaseHz / juce::jmax (ratio, 1.0f);
+    return juce::jmin (shimmerToneHz, aliasCapHz, maxFilterCutoffHz);
 }
 
 void ShimmerReverbEngine::setMix (float newMix)
@@ -413,6 +441,19 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
     lowCutFilter.setCutoffFrequency (juce::jmin (lowCutHz, maxFilterCutoffHz));
     highCutFilter.setCutoffFrequency (juce::jmin (highCutHz, maxFilterCutoffHz));
 
+    // Shimmer Tone, decided once per block, same warm-filter pattern as the
+    // wet EQ above (see shimmerToneActive's header comment). At Off the
+    // sections still run, at the alias-capped 10 kHz endpoint, and their
+    // output is unused -- bit-identical to no filter, and no alias cap (the
+    // legacy path). Recomputed every block, so a Tone or pitch change lands
+    // within one block, like the wet EQ cutoffs.
+    shimmerToneActive = shimmerToneHz < maxShimmerToneHz;
+    {
+        const float shimmerToneCutoffHz = computeShimmerToneCutoffHz();
+        shimmerToneFilterA.setCutoffFrequency (shimmerToneCutoffHz);
+        shimmerToneFilterB.setCutoffFrequency (shimmerToneCutoffHz);
+    }
+
     for (size_t i = 0; i < numSamples; ++i)
     {
         // Last sample lands exactly on the targets, so no float drift carries
@@ -435,7 +476,16 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // weak side-loop competing with the tank's own unshifted decayGain
         // recirculation.
         float dryFeedback = tank.peekFeedbackSignal();
-        float shiftedFeedback = shifter.processSample (dryFeedback);
+
+        // Shimmer Tone (2026-10-25, see setShimmerTone()): the main shifter
+        // and the formant corrector's dry analysis get the low-passed signal
+        // while active; unityShifter below always gets the raw dryFeedback,
+        // so Freeze is untouched. Both sections run on every sample either
+        // way (warm state); at Off shifterInput IS dryFeedback, so the shifter
+        // sees exactly what it saw before this filter existed.
+        const float toneFiltered = shimmerToneFilterB.processSample (0, shimmerToneFilterA.processSample (0, dryFeedback));
+        const float shifterInput = shimmerToneActive ? toneFiltered : dryFeedback;
+        float shiftedFeedback = shifter.processSample (shifterInput);
 
         // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()).
         // History: unityShifter first ran EVERY sample, even at
@@ -483,7 +533,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const float formantWeight = formantCorrectorActive ? smoothedFormantWeight.getNextValue() : 0.0f;
         if (formantCorrectorActive)
         {
-            const float corrected = formantCorrector.processSample (dryFeedback, shiftedFeedback);
+            const float corrected = formantCorrector.processSample (shifterInput, shiftedFeedback);
             if (formantWeight > 0.0f)
                 shiftedFeedback = (1.0f - formantWeight) * shiftedFeedback + formantWeight * corrected;
         }

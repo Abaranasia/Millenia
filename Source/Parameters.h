@@ -110,6 +110,13 @@ namespace ParamIDs
     constexpr auto preDelay = "preDelay";
     constexpr auto lowCut   = "lowCut";
     constexpr auto highCut  = "highCut";
+
+    // Shimmer Tone (2026-10-25, shimmer cascade slice 1 step C, docs/
+    // shimmer-character-research.md section 7.1 item 3): low-pass cutoff in
+    // Hz on the signal entering the pitch shifter, backing
+    // ShimmerReverbEngine::setShimmerTone(). Its top endpoint (10 kHz) is
+    // Off. Range/default must match the engine's min/max/defaultShimmerToneHz.
+    constexpr auto shimmerTone = "shimmerTone";
 }
 
 // Builds the full parameter layout backing MilleniaAudioProcessor::apvts.

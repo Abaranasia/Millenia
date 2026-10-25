@@ -160,6 +160,32 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
             juce::ParameterID { ParamIDs::highCut, 1 }, "High Cut", highCutRange, 20000.0f));
     }
 
+    // Shimmer Tone (see ParamIDs::shimmerTone): 1.5-10 kHz, default 5 kHz
+    // (ShimmerReverbEngine::defaultShimmerToneHz), skewed like the wet EQ
+    // corners so the range's geometric midpoint (~3.87 kHz) sits at the
+    // knob's centre. The top endpoint is Off -- the engine stops using the
+    // filter's output there (legacy path, no alias cap) -- so the value text
+    // says "Off" at 10 kHz, in the editor (SliderAttachment shows the
+    // parameter's own text) and in host automation lanes alike. The text
+    // carries its own " Hz" unit, so the editor sets no suffix. Text entry
+    // accepts "Off" (-> 10 kHz) or a number in Hz.
+    {
+        constexpr float minToneHz = 1500.0f, maxToneHz = 10000.0f;
+        juce::NormalisableRange<float> shimmerToneRange (minToneHz, maxToneHz);
+        shimmerToneRange.setSkewForCentre (3873.0f);
+        auto attributes = juce::AudioParameterFloatAttributes()
+                              .withStringFromValueFunction ([maxToneHz] (float value, int)
+                              {
+                                  return value >= maxToneHz ? juce::String ("Off") : juce::String (juce::roundToInt (value)) + " Hz";
+                              })
+                              .withValueFromStringFunction ([maxToneHz] (const juce::String& text)
+                              {
+                                  return text.trim().equalsIgnoreCase ("off") ? maxToneHz : text.getFloatValue();
+                              });
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::shimmerTone, 1 }, "Shimmer Tone", shimmerToneRange, 5000.0f, attributes));
+    }
+
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below
     // and PluginProcessor's smoothing wiring for why. Default matches

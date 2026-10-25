@@ -58,6 +58,13 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
                             "clamp to that limit.");
     configureRotary (shimmerAmountSlider, shimmerAmountLabel, "Shimmer Amount");
     configureRotary (shimmerFeedbackSlider, shimmerFeedbackLabel, "Shimmer Feedback");
+    // Shimmer Tone (2026-10-25): next to the other shimmer knobs. No text
+    // suffix -- the parameter's own text already reads "5000 Hz" / "Off".
+    configureRotary (shimmerToneSlider, shimmerToneLabel, "Shimmer Tone");
+    shimmerToneSlider.setTooltip ("Low-pass on the signal entering the pitch shifter. Lower settings darken the "
+                                  "shimmer and make higher octaves fade sooner. It also caps itself one octave "
+                                  "below the shift's aliasing point (about 5.5 kHz at +12 st and 2.8 kHz at +24 st "
+                                  "at 44.1 kHz). Fully clockwise is Off: no filtering.");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");
@@ -142,6 +149,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     decayAttachment      = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::decay,      decaySlider);
     shimmerAmountAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerAmount, shimmerAmountSlider);
     shimmerFeedbackAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerFeedback, shimmerFeedbackSlider);
+    shimmerToneAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::shimmerTone, shimmerToneSlider);
     dampingAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::damping,    dampingSlider);
     widthAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::width,      widthSlider);
     mixAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::mix,        mixSlider);
@@ -170,8 +178,10 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // (2026-10-11) for a second knob row holding Pre-Delay/Low Cut/High Cut,
     // instead of widening to 13 knobs in one row. Slice 2's Size and
     // Modulation join that second row (5 of its 10 slots), so the size is
-    // unchanged.
-    setSize (1020, 470);
+    // unchanged. 1020 -> 1120 (2026-10-25) for Shimmer Tone, the first
+    // row's 11th knob, at the same ~100 px per knob; the second row keeps
+    // that per-knob width (see resized()).
+    setSize (1120, 470);
 }
 
 MilleniaAudioProcessorEditor::~MilleniaAudioProcessorEditor()
@@ -215,7 +225,7 @@ void MilleniaAudioProcessorEditor::resized()
     // the knob itself, left-aligned at the first row's per-knob width.
     auto spaceRow = bounds.removeFromBottom (130);
     bounds.removeFromBottom (20); // headroom for the second row's labels
-    const int knobWidth = bounds.getWidth() / 10;
+    const int knobWidth = bounds.getWidth() / 11; // the first row's per-knob width (11 knobs)
     for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider, &sizeSlider, &modulationSlider })
         slider->setBounds (spaceRow.removeFromLeft (knobWidth));
 
@@ -225,7 +235,7 @@ void MilleniaAudioProcessorEditor::resized()
     knobBox.flexDirection  = juce::FlexBox::Direction::row;
     knobBox.justifyContent = juce::FlexBox::JustifyContent::spaceAround;
 
-    for (auto* slider : { &pitchShiftSlider, &decaySlider, &shimmerAmountSlider, &shimmerFeedbackSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
+    for (auto* slider : { &pitchShiftSlider, &decaySlider, &shimmerAmountSlider, &shimmerFeedbackSlider, &shimmerToneSlider, &dampingSlider, &widthSlider, &mixSlider, &freezeSlider, &loopLengthSlider, &loopMixSlider })
         knobBox.items.add (juce::FlexItem (*slider).withMinWidth (90.0f).withMinHeight (100.0f));
 
     knobBox.performLayout (bounds);

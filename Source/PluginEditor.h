@@ -36,9 +36,9 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, decaySlider, shimmerAmountSlider, shimmerFeedbackSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
+    juce::Slider pitchShiftSlider, decaySlider, shimmerAmountSlider, shimmerFeedbackSlider, shimmerToneSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
     juce::Slider preDelaySlider, lowCutSlider, highCutSlider, sizeSlider, modulationSlider;
-    juce::Label  pitchShiftLabel,  decayLabel,  shimmerAmountLabel,  shimmerFeedbackLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
+    juce::Label  pitchShiftLabel,  decayLabel,  shimmerAmountLabel,  shimmerFeedbackLabel,  shimmerToneLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
     juce::Label  preDelayLabel,  lowCutLabel,  highCutLabel,  sizeLabel,  modulationLabel;
 
     // Shows the Decay knob's tooltip (the RT60 ceiling note).
@@ -84,6 +84,7 @@ private:
     std::unique_ptr<SliderAttachment> decayAttachment;
     std::unique_ptr<SliderAttachment> shimmerAmountAttachment;
     std::unique_ptr<SliderAttachment> shimmerFeedbackAttachment;
+    std::unique_ptr<SliderAttachment> shimmerToneAttachment;
     std::unique_ptr<SliderAttachment> dampingAttachment;
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;
