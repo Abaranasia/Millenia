@@ -32,18 +32,20 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
     decayParam      = apvts.getRawParameterValue (ParamIDs::decay);
     shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
-    shimmerSustainParam = apvts.getRawParameterValue (ParamIDs::shimmerSustain);
+    shimmerFeedbackParam = apvts.getRawParameterValue (ParamIDs::shimmerFeedback);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
     freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
     infiniteParam   = apvts.getRawParameterValue (ParamIDs::infinite);
+    formantCorrectionParam = apvts.getRawParameterValue (ParamIDs::formantCorrection);
     loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
     loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
     preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
     lowCutParam     = apvts.getRawParameterValue (ParamIDs::lowCut);
     highCutParam    = apvts.getRawParameterValue (ParamIDs::highCut);
+    shimmerToneParam = apvts.getRawParameterValue (ParamIDs::shimmerTone);
     sizeParam       = apvts.getRawParameterValue (ParamIDs::size);
     modulationParam = apvts.getRawParameterValue (ParamIDs::modulation);
 }
@@ -130,6 +132,12 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     shimmerReverbEngine.setSize (sizeParam->load());
     shimmerReverbEngine.setModulation (modulationParam->load());
     shimmerReverbEngine.setDecaySeconds (decayParam->load());
+    // Formant Correction too, so its crossfade starts settled at the host's
+    // value (prepare()/reset() snap it) instead of ramping in.
+    shimmerReverbEngine.setFormantCorrection (formantCorrectionParam->load() > 0.5f);
+    // Shimmer Tone too, so the first block already filters at the host's
+    // value (the engine keeps it across prepare()/reset()).
+    shimmerReverbEngine.setShimmerTone (shimmerToneParam->load());
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
 
@@ -141,12 +149,13 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.reset (sampleRate, 0.05);
     smoothedDecay.reset (sampleRate, 0.05);
     smoothedShimmerAmount.reset (sampleRate, 0.05);
-    smoothedShimmerSustain.reset (sampleRate, 0.05);
+    smoothedShimmerFeedback.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
     smoothedLowCut.reset (sampleRate, 0.05);
     smoothedHighCut.reset (sampleRate, 0.05);
+    smoothedShimmerTone.reset (sampleRate, 0.05);
 
     // 2026-08-29: tried giving Freeze its own longer ramp (0.3s, then 1.0s)
     // after a by-ear report that the freezeQuickToggle checkbox produced "a
@@ -169,12 +178,13 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedDecay.setCurrentAndTargetValue (decayParam->load());
     smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
-    smoothedShimmerSustain.setCurrentAndTargetValue (shimmerSustainParam->load());
+    smoothedShimmerFeedback.setCurrentAndTargetValue (shimmerFeedbackParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
     smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
     smoothedLowCut.setCurrentAndTargetValue (lowCutParam->load());
     smoothedHighCut.setCurrentAndTargetValue (highCutParam->load());
+    smoothedShimmerTone.setCurrentAndTargetValue (shimmerToneParam->load());
 
     // Bypass folds into the mix smoother's seed value too -- see
     // processBlock()'s comment for why bypass drives smoothedMix rather than
@@ -248,12 +258,13 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
     smoothedDecay.setTargetValue (decayParam->load());
     smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
-    smoothedShimmerSustain.setTargetValue (shimmerSustainParam->load());
+    smoothedShimmerFeedback.setTargetValue (shimmerFeedbackParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
     smoothedFreeze.setTargetValue (freezeParam->load());
     smoothedLowCut.setTargetValue (lowCutParam->load());
     smoothedHighCut.setTargetValue (highCutParam->load());
+    smoothedShimmerTone.setTargetValue (shimmerToneParam->load());
 
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
@@ -274,7 +285,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
     shimmerReverbEngine.setDecaySeconds (smoothedDecay.skip ((int) numSamples));
     shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
-    shimmerReverbEngine.setShimmerSustain (smoothedShimmerSustain.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerFeedback (smoothedShimmerFeedback.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
@@ -284,6 +295,8 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // 20 Hz / 20 kHz again once a knob is returned there.
     shimmerReverbEngine.setLowCutHz (smoothedLowCut.skip ((int) numSamples));
     shimmerReverbEngine.setHighCutHz (smoothedHighCut.skip ((int) numSamples));
+    // Same endpoint reasoning for Shimmer Tone's Off (10 kHz).
+    shimmerReverbEngine.setShimmerTone (smoothedShimmerTone.skip ((int) numSamples));
     shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
 
     // Slice 2: raw, the tank ramps Size (300 ms) and Modulation (50 ms) per
@@ -303,6 +316,11 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // 0/1 target itself over infiniteRampSeconds, sample-accurately, same
     // reasoning as Loop Mix below.
     shimmerReverbEngine.setInfiniteAmount (infiniteParam->load() > 0.5f ? 1.0f : 0.0f);
+
+    // Formant Correction: read RAW, no smoother here -- the engine crossfades
+    // raw <-> corrected per sample over 20 ms (formantRampSeconds), same
+    // reasoning as Infinite above.
+    shimmerReverbEngine.setFormantCorrection (formantCorrectionParam->load() > 0.5f);
 
     // Phase 10 Loop Mix: read RAW, no smoother here -- the engage/disengage
     // ramp lives INSIDE LoopCapture itself (2026-09-06 fix, see

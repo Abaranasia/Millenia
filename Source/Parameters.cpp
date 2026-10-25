@@ -56,7 +56,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         DattorroTank::defaultModulation));
 
     // Backs ShimmerReverbEngine::setShimmerAmount() -> DattorroTank::
-    // setShimmerFeedbackGain(). Independently gains the pitch-shifted signal
+    // setShimmerAmountGain(). Independently gains the pitch-shifted signal
     // layered additively on top of the tank's own natural (decayGain-scaled)
     // recirculation -- decoupling "how much shimmer cascade gets added" from
     // "how long the plain tail sustains" (decayGain). At 0.0f the tank is a
@@ -68,25 +68,30 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f),
         1.0f));
 
-    // Backs ShimmerReverbEngine::setShimmerSustain() -- see that method's
+    // Backs ShimmerReverbEngine::setShimmerFeedback() -- see that method's
     // header comment for its two effects (DattorroTank's recirculation cap,
-    // INVERTED, plus a direct gate on process()'s audible Width/decorrelation
-    // injection). Independently controls how present and long-lived the
-    // shimmer layer is, decoupled from both Decay (decayGain) and Shimmer
-    // Amount (shimmerFeedbackGain, the overall shimmer level).
+    // direct since 2026-10-24 -- it was inverted before -- plus a direct gate
+    // on process()'s audible Width/decorrelation injection). Shown as
+    // "Shimmer Feedback" since 2026-10-24; the ID was renamed from
+    // shimmerSustain to shimmerFeedback on 2026-10-25 (nothing has shipped;
+    // a saved state from before falls back to this default).
+    // Independently controls how present and long-lived the shimmer layer
+    // is, decoupled from both Decay (decayGain) and Shimmer Amount
+    // (shimmerAmountGain, the overall shimmer level).
     //
-    // Default 0.85f matches ShimmerReverbEngine::defaultShimmerSustainAmount
+    // Default (was 0.85f) matches ShimmerReverbEngine::defaultShimmerFeedbackAmount
     // -- a freshly-chosen default for this control's now-widened scope, NOT
     // a preserved match to any prior hardcoded constant (that guarantee was
     // dropped 2026-09-06 once this parameter's scope grew to also gate the
     // always-live Width path, which the old hardcoded behavior never touched
-    // at all -- see ShimmerReverbEngine.h's defaultShimmerSustainAmount
-    // comment).
+    // at all -- see ShimmerReverbEngine.h's defaultShimmerFeedbackAmount
+    // comment). 2026-10-24: 0.85f -> 0.55f with the un-inverted mapping
+    // (docs/shimmer-character-research.md section 7.1 item 2).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::shimmerSustain, 1 },
-        "Shimmer Sustain",
+        juce::ParameterID { ParamIDs::shimmerFeedback, 1 },
+        "Shimmer Feedback",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        0.85f));
+        0.55f));
 
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
     // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
@@ -155,6 +160,32 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
             juce::ParameterID { ParamIDs::highCut, 1 }, "High Cut", highCutRange, 20000.0f));
     }
 
+    // Shimmer Tone (see ParamIDs::shimmerTone): 1.5-10 kHz, default 5 kHz
+    // (ShimmerReverbEngine::defaultShimmerToneHz), skewed like the wet EQ
+    // corners so the range's geometric midpoint (~3.87 kHz) sits at the
+    // knob's centre. The top endpoint is Off -- the engine stops using the
+    // filter's output there (legacy path, no alias cap) -- so the value text
+    // says "Off" at 10 kHz, in the editor (SliderAttachment shows the
+    // parameter's own text) and in host automation lanes alike. The text
+    // carries its own " Hz" unit, so the editor sets no suffix. Text entry
+    // accepts "Off" (-> 10 kHz) or a number in Hz.
+    {
+        constexpr float minToneHz = 1500.0f, maxToneHz = 10000.0f;
+        juce::NormalisableRange<float> shimmerToneRange (minToneHz, maxToneHz);
+        shimmerToneRange.setSkewForCentre (3873.0f);
+        auto attributes = juce::AudioParameterFloatAttributes()
+                              .withStringFromValueFunction ([maxToneHz] (float value, int)
+                              {
+                                  return value >= maxToneHz ? juce::String ("Off") : juce::String (juce::roundToInt (value)) + " Hz";
+                              })
+                              .withValueFromStringFunction ([maxToneHz] (const juce::String& text)
+                              {
+                                  return text.trim().equalsIgnoreCase ("off") ? maxToneHz : text.getFloatValue();
+                              });
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::shimmerTone, 1 }, "Shimmer Tone", shimmerToneRange, 5000.0f, attributes));
+    }
+
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below
     // and PluginProcessor's smoothing wiring for why. Default matches
@@ -202,6 +233,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::infinite, 1 },
         "Infinite",
+        false));
+
+    // Formant Correction (see ParamIDs::formantCorrection). Default false
+    // matches ShimmerReverbEngine::defaultFormantCorrection: the corrector is
+    // numerically unstable on tonal input inside the feedback loop (measured
+    // 2026-10-25: ~59 dB of the 880 Hz octave removed after a +12 st shift
+    // of a 440 Hz sine, ~2.6e6 internal peaks clipped into broadband noise by
+    // the SafetyLimiter), so it is opt-in until the corrector itself is fixed
+    // -- see docs/shimmer-character-research.md. Raw 0/1; the engine
+    // crossfades the switch over 20 ms.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::formantCorrection, 1 },
+        "Formant Correction",
         false));
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and

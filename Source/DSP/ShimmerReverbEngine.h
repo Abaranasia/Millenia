@@ -107,7 +107,7 @@ public:
     void setSize (float newSize);
     void setModulation (float newModulation);
 
-    // Forwards to DattorroTank::setShimmerFeedbackGain() (see that method's
+    // Forwards to DattorroTank::setShimmerAmountGain() (see that method's
     // comment), clamped to [0, 1] here -- never amplifies above unity, so
     // Phase 4's runaway-safety margin (decayGain < 0.85) on the tank's OWN
     // natural recirculation is never affected by this parameter at all (it
@@ -122,22 +122,25 @@ public:
     // "Shimmer Sustain" task: clamped to [0, 1], same convention as
     // setShimmerAmount()/setWidth()/setFreezeAmount(). Controls how present
     // and how long-lived the shimmer layer is, independent of Decay
-    // (decayGain) and Shimmer Amount (shimmerFeedbackGain, the OVERALL
+    // (decayGain) and Shimmer Amount (shimmerAmountGain, the OVERALL
     // shimmer level). Two effects, both driven by this single value:
     //
-    // 1. Forwards to DattorroTank::setMaxShimmerBlendWeight(), INVERTED (see
-    // that method's comment) -- DELIBERATELY INVERTED from
-    // maxShimmerBlendWeight's own sense (2026-09-06, by-ear follow-up):
-    // measured behavior is that a HIGHER internal maxShimmerBlendWeight
-    // actually decays FASTER (more of the recirculating budget rides the
-    // externally-shifted, separately-delayed path, which loses energy every
-    // pass via destructive interference -- see
-    // Tests/Source/ShimmerReverbEngineTests.cpp's low-vs-high decay test for
-    // the measured numbers). So newAmount=1.0 (dial fully up, "maximum
-    // sustain") maps to maxShimmerBlendWeight=0.0 (shimmer content never
-    // re-enters the recirculating loop, so the tank's own natural, uncombed
-    // decay dominates -- genuinely the SLOWEST/most-sustained option), and
-    // newAmount=0.0 to maxShimmerBlendWeight=1.0 (fastest decay).
+    // 1. Forwards to DattorroTank::setMaxShimmerBlendWeight() DIRECTLY
+    // (maxShimmerBlendWeight = newAmount; at Amount 1, shimmerWeight =
+    // newAmount), so the dial is "Shimmer Feedback": how much of the loop is
+    // pitch-shifted and regenerated (2026-10-24, shimmer cascade slice 1,
+    // docs/shimmer-character-research.md section 7.1 item 2). From
+    // 2026-09-06 to 2026-10-24 it was INVERTED (1 - newAmount), because a
+    // higher maxShimmerBlendWeight measurably decayed faster. That loss was
+    // mostly the tank's LINEAR blend law (section 5, cause 2): weights that
+    // sum to 1 keep only plainWeight^2 + shimmerWeight^2 of the energy of
+    // two uncorrelated signals, and a +12 st copy is uncorrelated with the
+    // plain one. The equal-power law the engine now selects for shifts of a
+    // semitone or more (see pushShimmerBlendToTank()) keeps that energy, so
+    // the reason for the inversion is gone; ShimmerReverbEngineCascadeTests'
+    // T2 checks the tail length no longer depends on the share.
+    // setLegacyShimmerBlendForTesting() restores the old inverted mapping
+    // and linear law for tests.
     //
     // 2. ALSO gates process()'s Width/decorrelation sideShift injection
     // directly (2026-09-06, same-day widening after the by-ear report "I
@@ -152,7 +155,7 @@ public:
     // this dial down toward 0 produce an unmistakable, immediate reduction
     // in the shimmer's audible presence (collapsing to near-mono at 0.0f),
     // not just a subtle long-term tail-shape change.
-    void setShimmerSustain (float newAmount);
+    void setShimmerFeedback (float newAmount);
 
     // M/S width of the wet signal, clamped to [0, 2] (2026-10-11, docs/
     // reverb-space-research.md section 8.2): 0 = mono, 1 = the tank's
@@ -251,6 +254,46 @@ public:
     // rather than here.
     void setLoopLengthMs (float newLoopLengthMs);
 
+    // Formant Correction on/off (2026-10-25, see docs/shimmer-character-
+    // research.md and docs/reverb-dev-journal.md). Measured: on tonal input
+    // FormantEnvelopeCorrector is numerically unstable inside the loop --
+    // after a +12 st shift of a 440 Hz sine it removed ~59 dB of the 880 Hz
+    // octave, rang at 440 Hz with peaks ~2.6e6, and safetyLimiter clipped
+    // that into broadband noise, so the octave cascade never formed. With
+    // the corrector bypassed the cascade is clean (880 -> 1760 -> 3520 Hz,
+    // ~1 octave per 0.5 s). Default OFF (defaultFormantCorrection); fixing
+    // the corrector itself is a separate task. Switching is a per-sample
+    // linear crossfade (formantRampSeconds) between the raw shifted signal
+    // and the corrected one, on the primary AND quadrature paths; while the
+    // weight rests at exactly 0 the corrector is not run at all, so "off" is
+    // bit-identical to having no corrector in the chain. Survives prepare()/
+    // reset() like width/mix; reset() snaps the crossfade to its target.
+    void setFormantCorrection (bool shouldCorrect);
+
+    // Shimmer Tone (2026-10-25, shimmer cascade slice 1 step C, docs/
+    // shimmer-character-research.md section 7.1 item 3): a 4th-order
+    // low-pass (two cascaded 2nd-order TPT sections) on dryFeedback before it
+    // feeds the main shifter and the formant corrector's dry analysis.
+    // Clamped to [minShimmerToneHz, maxShimmerToneHz]; the top endpoint is
+    // Off. It doubles as the shifter's anti-alias filter: shifted content is
+    // f * ratio, so it folds above fs / (2 * ratio), and the effective cutoff
+    // is min(Tone, fs / (4 * max(ratio, 1)), 0.49 fs) -- one octave under the
+    // fold point (5512.5 Hz at +12 st, 2756.25 Hz at +24 st, 44.1 kHz).
+    // Downward shifts are not capped beyond ratio 1's fs / 4, which is above
+    // the Tone range from 40 kHz up. Same warm-filter pattern as the wet EQ
+    // (see lowCutActive): the filters always run, and at Off their output is
+    // unused, so Off is bit-identical to the engine before the filter and
+    // applies no alias cap (the legacy path). Not applied to unityShifter's
+    // input, so Freeze is untouched. Applied once per block; survives
+    // prepare()/reset() like width/mix.
+    void setShimmerTone (float newShimmerToneHz);
+
+    // Test-only introspection, same idiom: the cutoff process() applies to
+    // the Shimmer Tone filters for the current Tone/pitch/sample rate, and
+    // whether their output is used (false at Off).
+    float getShimmerToneCutoffHzForTesting() const noexcept { return computeShimmerToneCutoffHz(); }
+    bool isShimmerToneActiveForTesting() const noexcept { return shimmerToneHz < maxShimmerToneHz; }
+
     // Test-only introspection -- same "peek" idiom as DattorroTank::
     // peekFeedbackSignal() (which this just forwards) and LoopCapture::
     // peekCapturedLoopSample(). Added 2026-09-06 for the "Shimmer Amount +
@@ -282,6 +325,15 @@ public:
     // PluginProcessor; default false.
     void forceUnityShifterActiveForTesting (bool shouldForce) noexcept { unityShifterForcedActive = shouldForce; }
 
+    // Test-only switch, same idiom (2026-10-24, shimmer cascade slice 1):
+    // true restores the pre-2026-10-24 shimmer blend exactly -- the INVERTED
+    // 1 - x mapping of setShimmerFeedback() and the tank's linear blend law
+    // (equalPowerAmount 0) -- so T6 can prove today's engine still reproduces
+    // the old golden hashes, and T1/T2 can measure old against new in the
+    // same build. Re-pushes both to the tank at once. Never called by
+    // PluginProcessor; default false.
+    void setLegacyShimmerBlendForTesting (bool shouldUseLegacy);
+
     // Test-only introspection, same idiom (2026-10-11, stereo tank): the
     // last processed sample's raw tank left/right outputs, before Width.
     // With the tank now stereo, |L - R| at the output also carries the
@@ -304,6 +356,19 @@ private:
     // shifter; renamed once that ratio crossfade was replaced by the level
     // crossfade, since it no longer sets any crossfaded ratio.
     void applyPitchAndFreezeCrossfade();
+
+    // Pushes the shimmer blend to the tank (2026-10-24): maxShimmerBlendWeight
+    // from shimmerFeedbackAmount and the equal-power amount from
+    // pitchShiftSemitones, or the legacy inverted/linear pair. Called by
+    // prepare(), setShimmerFeedback(), applyPitchAndFreezeCrossfade() and
+    // setLegacyShimmerBlendForTesting(); two stores, no allocation.
+    void pushShimmerBlendToTank();
+
+    // Shimmer Tone's effective cutoff (see setShimmerTone()): min(Tone,
+    // shimmerToneAliasCapBaseHz / max(ratio, 1), maxFilterCutoffHz), ratio =
+    // 2^(pitchShiftSemitones / 12). Used by process() once per block and by
+    // getShimmerToneCutoffHzForTesting(); one std::pow, no allocation.
+    float computeShimmerToneCutoffHz() const noexcept;
 
     // Phase 9 Freeze LEVEL crossfade curve: unityWeight = freezeAmount^16 is
     // how much of the in-loop shimmer feedback comes from unityShifter (0
@@ -362,26 +427,47 @@ private:
     static constexpr float minHighCutHz = 1000.0f;
     static constexpr float maxHighCutHz = 20000.0f;
 
+    // Shimmer Tone range and default (see setShimmerTone()) -- must match
+    // Parameters.cpp. maxShimmerToneHz is the Off endpoint. 5 kHz is the
+    // research doc's starting point for the user's ear-tuning (section 7.3).
+    static constexpr float minShimmerToneHz = 1500.0f;
+    static constexpr float maxShimmerToneHz = 10000.0f;
+    static constexpr float defaultShimmerToneHz = 5000.0f;
+
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
     // wet, not bypassed, so existing tests/behavior are unchanged unless a
     // caller explicitly calls setMix()/setBypassed().
     static constexpr float defaultMix = 1.0f;
     static constexpr bool defaultBypassed = false;
 
-    // Matches DattorroTank::defaultShimmerFeedbackGain so "shimmer at full
+    // Formant Correction (see setFormantCorrection()): OFF by default since
+    // 2026-10-25 -- the corrector was always on before, and on tonal input
+    // it destroyed the octave cascade (measured, see that method's comment).
+    // The 20 ms crossfade is short enough to feel like a switch and long
+    // enough to keep the in-loop signal change click-free.
+    static constexpr bool defaultFormantCorrection = false;
+    static constexpr double formantRampSeconds = 0.02;
+
+    // Matches DattorroTank::defaultShimmerAmountGain so "shimmer at full
     // strength" is the out-of-the-box behavior, same convention as the
     // other defaults above.
     static constexpr float defaultShimmerAmount = 1.0f;
 
     // "Shimmer Sustain" task (2026-09-06, by-ear follow-up -- see
-    // setShimmerSustain()'s comment): 0.85f is a fresh, deliberately-chosen
+    // setShimmerFeedback()'s comment): 0.85f is a fresh, deliberately-chosen
     // default for this control's now-widened scope (both the tank
     // recirculation cap AND the audible width-injection gate below), NOT a
     // preserved bit-identical match to any prior hardcoded constant --
     // that guarantee was dropped on purpose once this parameter's scope
     // grew to also touch the always-live width path, which the OLD
     // hardcoded behavior never gated at all.
-    static constexpr float defaultShimmerSustainAmount = 0.85f;
+    //
+    // 2026-10-24 (shimmer cascade slice 1): 0.85f -> 0.55f with the
+    // un-inverted "Shimmer Feedback" mapping -- shimmerWeight 0.55 at Amount
+    // 1, up from the old effective 0.15 (docs/shimmer-character-research.md
+    // section 7.1 item 2: a starting point for the user's ear-tuning). The
+    // side-term gate gets 0.55 instead of 0.85 too.
+    static constexpr float defaultShimmerFeedbackAmount = 0.55f;
 
     DattorroTank tank;
     PitchShifter shifter;
@@ -424,6 +510,9 @@ private:
     float lastUnityFeedback = 0.0f;
     bool unityShifterForcedActive = false;
 
+    // See setLegacyShimmerBlendForTesting().
+    bool legacyShimmerBlend = false;
+
     DCBlocker feedbackDcBlocker;
     SafetyLimiter safetyLimiter;
 
@@ -447,6 +536,19 @@ private:
     // shared delay line -- see PitchShifter.h's class comment) -- see
     // FormantEnvelopeCorrector.h's own comment for the full rationale.
     FormantEnvelopeCorrector formantCorrector;
+
+    // Formant Correction crossfade (2026-10-25, see setFormantCorrection()):
+    // 0 = raw shifted signal, 1 = corrected. Target 0/1, ramped per sample
+    // over formantRampSeconds inside process(); reset() snaps it to the
+    // target. formantCorrectorActive is process()'s per-block "run the
+    // corrector" decision -- true while the target is 1 or the weight is
+    // still ramping. On its false -> true edge process() calls
+    // formantCorrector.reset() first (std::fill/array fill only, so
+    // allocation-free and audio-thread safe), so a re-engage never resumes
+    // from rings and LPC coefficients left over from the last engagement --
+    // the same idle-skip pattern as unityShifterActive above.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedFormantWeight { defaultFormantCorrection ? 1.0f : 0.0f };
+    bool formantCorrectorActive = false;
 
     // Phase 9 Freeze follow-up (2026-08-22, see FreezeLeveler.h): feed-forward
     // output-stage compensation for Freeze's measured amplitude decay --
@@ -486,22 +588,34 @@ private:
     bool lowCutActive = false;
     bool highCutActive = false;
 
+    // Shimmer Tone (see setShimmerTone()): two mono 2nd-order TPT lowpass
+    // sections in series (4th order, 24 dB/oct). shimmerToneActive is the
+    // per-block "not at the Off endpoint" decision and, like lowCutActive,
+    // gates only which signal the shifter gets: both sections run on every
+    // sample, so their state always tracks dryFeedback and activation
+    // continues from it instead of stepping from zero state.
+    // shimmerToneAliasCapBaseHz is fs / 4, set in prepare().
+    juce::dsp::StateVariableTPTFilter<float> shimmerToneFilterA, shimmerToneFilterB;
+    float shimmerToneHz = defaultShimmerToneHz;
+    float shimmerToneAliasCapBaseHz = 11025.0f;
+    bool shimmerToneActive = false;
+
     // Test-only state, see peekTankLeft()/peekTankRight().
     float lastTankLeft = 0.0f;
     float lastTankRight = 0.0f;
 
-    // Local copy of the value forwarded to DattorroTank::setShimmerFeedbackGain()
+    // Local copy of the value forwarded to DattorroTank::setShimmerAmountGain()
     // -- see setShimmerAmount()'s comment for why process()'s Width term
     // needs its own gating copy rather than trusting the tank alone.
     float shimmerAmount = defaultShimmerAmount;
 
-    // Local copy of setShimmerSustain()'s USER-FACING (not yet inverted)
+    // Local copy of setShimmerFeedback()'s USER-FACING (pre-mapping)
     // value -- same "process()'s Width term needs its own gating copy"
-    // reasoning as shimmerAmount immediately above, see setShimmerSustain()'s
+    // reasoning as shimmerAmount immediately above, see setShimmerFeedback()'s
     // comment for the full rationale (2026-09-06 widening: this now ALSO
     // gates the width-injection term, not just DattorroTank's recirculation
     // cap).
-    float shimmerSustainAmount = defaultShimmerSustainAmount;
+    float shimmerFeedbackAmount = defaultShimmerFeedbackAmount;
 
     // Phase 5: dry/wet mix (see setMix()) and bypass (see setBypassed()).
     // bypassed does not gate/skip any processing -- it only forces the
@@ -521,7 +635,7 @@ private:
 
     // Infinite mode (see setInfiniteAmount()): default 0.0f, i.e. off and
     // bit-identical to pre-Infinite behavior. Cached so prepare() can
-    // re-seed the tank, same pattern as shimmerSustainAmount.
+    // re-seed the tank, same pattern as shimmerFeedbackAmount.
     float infiniteAmount = 0.0f;
 
     // Freeze level crossfade weight (see applyPitchAndFreezeCrossfade()/

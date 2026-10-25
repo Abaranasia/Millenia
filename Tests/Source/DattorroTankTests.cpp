@@ -270,7 +270,7 @@ public:
             // "Shimmer Sustain" task (see Source/DSP/DattorroTank.h's comment
             // above maxShimmerBlendWeight): this constant just became a
             // runtime-adjustable, UNCLAMPED (same convention as
-            // setDecaySeconds()/setDamping()/setShimmerFeedbackGain()/
+            // setDecaySeconds()/setDamping()/setShimmerAmountGain()/
             // setFreezeAmount()) instance member via setMaxShimmerBlendWeight().
             // The header's own safety argument is that shimmerWeight+plainWeight
             // == 1.0 exactly for ANY value in [0, 1], so the combined feedback
@@ -350,6 +350,105 @@ public:
                             + ", full freeze (1.0) measured peak=" + juce::String (fullFreezePeak));
         }
 
+        //==============================================================================
+        // Shimmer cascade slice 1 (2026-10-24, docs/shimmer-character-research.md
+        // section 7.1 item 1): setShimmerBlendLaw(). The external feed is the
+        // tank's own feedbackFromB delayed by externalDelaySamples (100 ms)
+        // through a plain circular buffer -- a stand-in for the engine's
+        // shifter path (its grain pool lags ~80 ms) that is broadband and,
+        // on a noise tail, nearly uncorrelated with the undelayed copy, like
+        // a +12 st shift. Noise burst for burstSeconds, then silence.
+        // freezeFromSample (if >= 0) steps setFreezeAmount (1.0f) there.
+        auto runBlendLawScenario = [] (float equalPowerAmount, bool setLaw, double seconds, int freezeFromSample) -> std::vector<float>
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int externalDelaySamples = 4410;
+            constexpr double burstSeconds = 1.0;
+
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.reset();
+            tank.setMaxShimmerBlendWeight (0.5f);
+            if (setLaw)
+                tank.setShimmerBlendLaw (equalPowerAmount);
+
+            std::vector<float> delay ((size_t) externalDelaySamples, 0.0f);
+            size_t delayIndex = 0;
+            juce::Random random (27182818);
+
+            const int numSamples = (int) (seconds * sampleRate);
+            const int burstSamples = (int) (burstSeconds * sampleRate);
+            std::vector<float> out ((size_t) numSamples, 0.0f);
+
+            for (int n = 0; n < numSamples; ++n)
+            {
+                if (n == freezeFromSample)
+                    tank.setFreezeAmount (1.0f);
+
+                const float input = n < burstSamples ? random.nextFloat() * 0.6f - 0.3f : 0.0f;
+                const float external = delay[delayIndex];
+                out[(size_t) n] = tank.processSample (input, external);
+                delay[delayIndex] = tank.peekFeedbackSignal();
+                delayIndex = (delayIndex + 1) % delay.size();
+            }
+
+            return out;
+        };
+
+        auto rmsDbOver = [] (const std::vector<float>& x, double fromSeconds, double toSeconds) -> double
+        {
+            const size_t from = (size_t) (fromSeconds * 44100.0), to = juce::jmin (x.size(), (size_t) (toSeconds * 44100.0));
+            double sum = 0.0;
+            for (size_t i = from; i < to; ++i)
+                sum += (double) x[i] * (double) x[i];
+            return 10.0 * std::log10 (juce::jmax (1.0e-30, sum / (double) juce::jmax ((size_t) 1, to - from)));
+        };
+
+        beginTest ("setShimmerBlendLaw (0.0f) is bit-identical to an untouched tank (linear law), with a live external feed, before and after Freeze");
+        {
+            const int freezeFrom = (int) (3.0 * 44100.0);
+            const auto untouched = runBlendLawScenario (0.0f, false, 6.0, freezeFrom);
+            const auto explicitLinear = runBlendLawScenario (0.0f, true, 6.0, freezeFrom);
+            expect (untouched == explicitLinear, "setShimmerBlendLaw (0.0f) changed the output -- the linear law must be the old arithmetic exactly");
+        }
+
+        beginTest ("At Freeze 1 the equal-power law is inert: setShimmerBlendLaw (1.0f) is bit-identical to the linear law");
+        {
+            // The (1 - freezeAmount) factor in processSample(): when frozen the
+            // engine feeds an UNSHIFTED copy, correlated with feedbackFromB,
+            // and equal-power weights on correlated feeds sum above unity. So
+            // a fully frozen tank must not use them at all.
+            const auto linear = runBlendLawScenario (0.0f, true, 4.0, 0);
+            const auto equalPower = runBlendLawScenario (1.0f, true, 4.0, 0);
+            expect (linear == equalPower, "setShimmerBlendLaw (1.0f) changed the fully frozen output -- Freeze must force the linear law");
+        }
+
+        beginTest ("Equal-power law keeps more loop energy than the linear law when the external feed is uncorrelated");
+        {
+            // shimmerWeight 0.5 (Amount 1, cap 0.5): linear keeps 0.5^2 +
+            // 0.5^2 = 0.5 of the cross-feed energy per pass, equal-power
+            // 0.75 + 0.25 = 1.0, so the equal-power tail must be clearly
+            // louder a few seconds after the burst. Bounded too.
+            const auto linear = runBlendLawScenario (0.0f, true, 6.0, -1);
+            const auto equalPower = runBlendLawScenario (1.0f, true, 6.0, -1);
+            const double linearDb = rmsDbOver (linear, 3.0, 4.0);
+            const double equalPowerDb = rmsDbOver (equalPower, 3.0, 4.0);
+
+            float peak = 0.0f;
+            for (float v : equalPower)
+            {
+                expect (std::isfinite (v), "Non-finite sample with the equal-power law");
+                peak = juce::jmax (peak, std::abs (v));
+            }
+
+            logMessage ("Blend law, delayed-feedback tank, RMS 3-4 s: linear " + juce::String (linearDb, 2) + " dB, equal-power "
+                            + juce::String (equalPowerDb, 2) + " dB (gap " + juce::String (equalPowerDb - linearDb, 2)
+                            + " dB), equal-power peak " + juce::String (peak, 4));
+            expect (equalPowerDb > linearDb + 3.0, "Equal-power tail is not clearly longer than the linear one: linear "
+                                                       + juce::String (linearDb, 2) + " dB, equal-power " + juce::String (equalPowerDb, 2) + " dB");
+            expect (peak <= 10.0f, "Equal-power law exceeded the 10.0 bound: " + juce::String (peak, 4));
+        }
+
         beginTest ("Freeze sustains a captured tail indefinitely, unlike normal (non-frozen) processing which decays to silence");
         {
             // Phase 9: a short burst, then silence, run in parallel through
@@ -370,8 +469,8 @@ public:
 
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
 
-            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
-            // see setShimmerFeedbackGain()'s comment) would otherwise claim
+            // DattorroTank's own class default (shimmerAmountGain = 1.0f,
+            // see setShimmerAmountGain()'s comment) would otherwise claim
             // maxShimmerBlendWeight's share (0.85) of the recirculation
             // budget for an externalFeedback that's always 0.0 here (both
             // tanks are driven through the single-arg processSample()/
@@ -382,12 +481,12 @@ public:
             DattorroTank plainTank;
             plainTank.prepare (spec);
             plainTank.reset();
-            plainTank.setShimmerFeedbackGain (0.0f);
+            plainTank.setShimmerAmountGain (0.0f);
 
             DattorroTank frozenTank;
             frozenTank.prepare (spec);
             frozenTank.reset();
-            frozenTank.setShimmerFeedbackGain (0.0f);
+            frozenTank.setShimmerAmountGain (0.0f);
             frozenTank.setFreezeAmount (1.0f);
 
             juce::AudioBuffer<float> plainBuffer (numChannels, blockSize);
@@ -583,9 +682,9 @@ public:
         // "Infinite mode" section and DattorroTank::setInfiniteAmount()):
         // unlike Freeze, Infinite keeps feeding fresh input into a tank that
         // never decays, so new material layers on top of the sustained tail.
-        // T2-T4 below zero shimmerFeedbackGain on purpose: the single-arg
+        // T2-T4 below zero shimmerAmountGain on purpose: the single-arg
         // processSample() overload always passes externalFeedback=0.0f, so
-        // the class default (shimmerFeedbackGain=1.0f, i.e. shimmerWeight=0.85)
+        // the class default (shimmerAmountGain=1.0f, i.e. shimmerWeight=0.85)
         // would leave only a 0.15 plainWeight share of the loop recirculating
         // -- a tail that dies within a second no matter what Infinite does.
         // Zeroing it gives plainWeight=1.0, the exact "bare tank, unity decay,
@@ -664,7 +763,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, see the section comment above
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, see the section comment above
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -736,7 +835,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -804,7 +903,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -1036,7 +1135,7 @@ public:
         {
             DattorroTank tank;
             tank.prepare ({ sampleRate, 512, 2 });
-            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
             tank.setModulation (1.0f);
             tank.setDecaySeconds (ceilingDecaySeconds()); // g = 0.85 at every Size
             tank.reset();
@@ -1189,7 +1288,7 @@ private:
     {
         DattorroTank tank;
         tank.prepare ({ sampleRate, 512, 2 });
-        tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
+        tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
         tank.setModulation (0.0f);
         tank.setSize (size);
         tank.setDecaySeconds (rt60);
