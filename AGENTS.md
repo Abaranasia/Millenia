@@ -17,4 +17,5 @@ Project-scoped skills under `.claude/skills/`, applied automatically by trigger 
 - [docs/shimmer-reverb-implementation-plan.md](docs/shimmer-reverb-implementation-plan.md) — phased, checklist-level build plan for the shimmer reverb DSP and plugin shell
 - [docs/reverb-space-research.md](docs/reverb-space-research.md) — research on why the reverb sounds small: pre-slice-1 design facts, perceptual size cues, algorithm families, papers, open-source references, ranked improvement list
 - [docs/shimmer-character-research.md](docs/shimmer-character-research.md) — research on why the effect never sounded like a shimmer: current shimmer path facts, cascade-level model, how classic shimmers are built, ranked root causes, proposed slice 1 (blend law, Shimmer Tone, formant off)
+- [docs/project-audit-2026-11.md](docs/project-audit-2026-11.md) — overall project audit at `f694d79`: comparison against classic shimmer designs, prioritized fix list (buffer overrun, tail length, bypass, state migration), per-feature improvements
 - [docs/reverb-dev-journal.md](docs/reverb-dev-journal.md) — running log of what's actually been built against the implementation plan, phase by phase
