@@ -82,6 +82,12 @@ public:
     // second DattorroTank/delay line and cannot touch the already-tuned
     // recirculating loop above. See
     // docs/shimmer-reverb-implementation-plan.md's Phase 4 section.
+    //
+    // The block may be longer than the maximumBlockSize given to prepare()
+    // (hosts are allowed to do that): it is then processed in sub-blocks of
+    // at most that size, with the same result as the caller sending those
+    // sub-blocks one after another. Before prepare() the block is left
+    // untouched.
     void process (juce::dsp::AudioBlock<float>& block);
 
     // Phase 5 (see docs/shimmer-reverb-implementation-plan.md): forwarding
@@ -347,6 +353,11 @@ public:
     static constexpr float getShimmerSideGainForTesting() noexcept { return shimmerSideGain; }
 
 private:
+    // The body of process() for one block of at most
+    // monoScratch.getNumSamples() samples. Only called by process(), which
+    // splits longer blocks.
+    void processChunk (juce::dsp::AudioBlock<float>& block);
+
     // Applies pitchShiftSemitones to the main shifter (always the full user
     // value) and formantCorrector, and recomputes unityWeightTarget from
     // freezeAmount -- shared by prepare(), setPitchShiftSemitones(), and
@@ -701,8 +712,10 @@ private:
     // (see freezeUnityCrossfadeCurve's comment).
     float pitchShiftSemitones = defaultPitchShiftSemitones;
 
-    // Mono scratch buffer, pre-sized in prepare() so process() never
-    // allocates.
+    // Mono scratch buffer, sized to spec.maximumBlockSize in prepare() so
+    // process() never allocates. Its length is the largest block
+    // processChunk() can take; process() splits anything longer rather than
+    // resizing this on the audio thread.
     juce::AudioBuffer<float> monoScratch;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShimmerReverbEngine)

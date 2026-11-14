@@ -355,6 +355,36 @@ void ShimmerReverbEngine::applyPitchAndFreezeCrossfade()
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
 {
+    // Hosts may send more samples than the maximumBlockSize given to
+    // prepare(), and monoScratch is sized to exactly that. An oversized
+    // block is therefore processed in sub-blocks of at most the scratch
+    // capacity, which gives the same result as the caller sending those
+    // sub-blocks one after another. A block that fits takes a single
+    // processChunk() call on the original block, as before. No allocation:
+    // getSubBlock() only offsets the channel pointers.
+    const auto capacity = (size_t) monoScratch.getNumSamples();
+
+    // process() before prepare(): nothing is sized yet, leave the block alone.
+    if (capacity == 0)
+        return;
+
+    const auto numSamples = block.getNumSamples();
+
+    if (numSamples <= capacity)
+    {
+        processChunk (block);
+        return;
+    }
+
+    for (size_t offset = 0; offset < numSamples; offset += capacity)
+    {
+        auto chunk = block.getSubBlock (offset, juce::jmin (capacity, numSamples - offset));
+        processChunk (chunk);
+    }
+}
+
+void ShimmerReverbEngine::processChunk (juce::dsp::AudioBlock<float>& block)
+{
     const auto numSamples = block.getNumSamples();
     const auto numChannels = block.getNumChannels();
 

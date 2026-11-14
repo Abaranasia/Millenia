@@ -4862,3 +4862,135 @@ public:
 };
 
 static ShimmerReverbEngineToneTests shimmerReverbEngineToneTests;
+
+//==============================================================================
+// Oversized host blocks. A host may call process() with more samples than the
+// maximumBlockSize it passed to prepare(). The engine must then behave exactly
+// as if the caller had sent the same audio in prepared-size blocks, one after
+// another, and must not write past its pre-sized scratch buffer. Own class
+// (same .cpp, so no Projucer resave) so it runs in isolation via Main.cpp's
+// name filter ("OversizedBlock").
+class ShimmerReverbEngineOversizedBlockTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineOversizedBlockTests() : juce::UnitTest ("ShimmerReverbEngineOversizedBlockTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Oversized block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 4096);
+        }
+
+        beginTest ("Oversized block whose length is not a multiple of the prepared size matches prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 1000);
+        }
+
+        beginTest ("Oversized mono block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (1, 64, 1000);
+        }
+    }
+
+private:
+    // Non-default settings, applied after prepare() so the per-sample
+    // smoothers (pre-delay) and the per-block ramps (Freeze) are moving
+    // when processing starts. Mix below 1 keeps both dry and wet in the output.
+    static void configure (ShimmerReverbEngine& engine, int numChannels, int preparedBlockSize)
+    {
+        engine.prepare ({ 44100.0, (juce::uint32) preparedBlockSize, (juce::uint32) numChannels });
+        engine.setMix (0.6f);
+        engine.setWidth (1.3f);
+        engine.setPreDelayMs (20.0f);
+        engine.setLowCutHz (200.0f);
+        engine.setHighCutHz (8000.0f);
+        engine.setShimmerTone (3000.0f);
+        engine.setShimmerFeedback (0.8f);
+        engine.setDecaySeconds (4.0f);
+        engine.setPitchShiftSemitones (7.0f);
+        engine.setFreezeAmount (0.3f);
+    }
+
+    void expectOversizedMatchesChunked (int numChannels, int preparedBlockSize, int totalSamples)
+    {
+        juce::AudioBuffer<float> input (numChannels, totalSamples);
+        juce::Random random (20261114);
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < totalSamples; ++i)
+                input.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+        // Reference: the caller splits the audio into prepared-size blocks.
+        juce::AudioBuffer<float> chunkedOut;
+        chunkedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::AudioBuffer<float> chunk (numChannels, preparedBlockSize);
+
+            for (int offset = 0; offset < totalSamples; offset += preparedBlockSize)
+            {
+                const int length = juce::jmin (preparedBlockSize, totalSamples - offset);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunk.copyFrom (ch, 0, input, ch, offset, length);
+
+                juce::dsp::AudioBlock<float> block (chunk.getArrayOfWritePointers(), (size_t) numChannels, (size_t) length);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunkedOut.copyFrom (ch, offset, chunk, ch, 0, length);
+            }
+        }
+
+        // Under test: the same audio in ONE block, larger than the prepared size.
+        juce::AudioBuffer<float> oversizedOut;
+        oversizedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::dsp::AudioBlock<float> block (oversizedOut);
+            engine.process (block);
+        }
+
+        int numNonFinite = 0;
+        int numMismatches = 0;
+        int numChangedFromInput = 0;
+        int firstMismatch = -1;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float oversized = oversizedOut.getSample (ch, i);
+                const float chunked = chunkedOut.getSample (ch, i);
+
+                if (! std::isfinite (oversized) || ! std::isfinite (chunked))
+                    ++numNonFinite;
+
+                if (oversized != chunked)
+                {
+                    ++numMismatches;
+
+                    if (firstMismatch < 0)
+                        firstMismatch = i;
+                }
+
+                if (oversized != input.getSample (ch, i))
+                    ++numChangedFromInput;
+            }
+        }
+
+        expectEquals (numNonFinite, 0, "Non-finite samples in the output");
+        expectEquals (numMismatches, 0, "One " + juce::String (totalSamples) + "-sample block differs from "
+                                            + juce::String (preparedBlockSize) + "-sample blocks (first mismatch at sample "
+                                            + juce::String (firstMismatch) + ")");
+        expect (numChangedFromInput > totalSamples / 2, "The engine left the oversized block (almost) untouched: only "
+                                                            + juce::String (numChangedFromInput) + " samples changed");
+    }
+};
+
+static ShimmerReverbEngineOversizedBlockTests shimmerReverbEngineOversizedBlockTests;
