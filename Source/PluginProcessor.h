@@ -54,6 +54,11 @@ public:
     bool isMidiEffect() const override;
     double getTailLengthSeconds() const override;
 
+    // Exposes the "Bypass" parameter as the host-facing bypass control, see
+    // the definition for why processBlockBypassed() is deliberately not
+    // overridden.
+    juce::AudioProcessorParameter* getBypassParameter() const override;
+
     //==============================================================================
     int getNumPrograms() override;
     int getCurrentProgram() override;

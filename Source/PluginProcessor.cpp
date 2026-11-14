@@ -89,7 +89,37 @@ bool MilleniaAudioProcessor::isMidiEffect() const
 
 double MilleniaAudioProcessor::getTailLengthSeconds() const
 {
-    return 0.0;
+    // Host thread, not the audio thread: only reads the cached atomics.
+    // "Sustained" means the output does not decay on its own, so the host must
+    // not cut the tail (VST3 maps +infinity to kInfiniteTail):
+    //  - Infinite pins the tank's decay gain to exactly 1.0.
+    //  - Freeze at 0.9 and above pushes the tank gain to at least ~0.9 (the
+    //    gain is crossfaded toward 0.999 by the dial), an RT60 of ~24 s at
+    //    Size 1 even from the shortest Decay, longer than the finite estimate
+    //    ever gets. Below 0.9 the tail is finite but may exceed the estimate.
+    //  - Loop Mix above 0.001 (-60 dB) plays the captured loop forever.
+    const bool sustained = infiniteParam->load() > 0.5f
+                        || freezeParam->load() >= 0.9f
+                        || loopMixParam->load() > 0.001f;
+
+    return ShimmerReverbEngine::computeTailSeconds (decayParam->load(), sizeParam->load(),
+                                                    preDelayParam->load(), sustained);
+}
+
+juce::AudioProcessorParameter* MilleniaAudioProcessor::getBypassParameter() const
+{
+    // With a non-null bypass parameter the VST3 wrapper never calls
+    // processBlockBypassed(): it calls processBlock() and only exposes the
+    // parameter to the host with the kIsBypass flag
+    // (juce_audio_plugin_client_VST3.cpp:3728-3733, :920-921). JUCE's own
+    // header says the same (juce_AudioProcessor.h:947-957), and the other
+    // wrappers follow it (AU, AAX, VST2, LV2, Unity). processBlock() already
+    // reads this parameter and drives smoothedMix toward 0, so bypass is a
+    // click-free mix-to-dry with the tank still running and the tail ringing
+    // out. The dry path is undelayed, so no latency compensation is needed.
+    // The default processBlockBypassed() would hard-cut and freeze the tank,
+    // which is why it is not relied on and, being never called, not overridden.
+    return apvts.getParameter (ParamIDs::bypass);
 }
 
 int MilleniaAudioProcessor::getNumPrograms()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <limits>
 #include "DattorroTank.h"
 #include "PitchShifter.h"
 #include "DCBlocker.h"
@@ -89,6 +90,40 @@ public:
     // sub-blocks one after another. Before prepare() the block is left
     // untouched.
     void process (juce::dsp::AudioBlock<float>& block);
+
+    // Tail length to report to the host (PluginProcessor::
+    // getTailLengthSeconds()), in seconds; +infinity when `sustained`.
+    // Pure, host-thread only (not for processBlock). Finite case:
+    //     tail = preDelaySeconds + tailMargin * min (decay, cap (size))
+    // where cap (size) = DattorroTank::maxReachableRt60Seconds (size), the
+    // longest RT60 the tank's 0.85 per-half-loop gain clamp allows (~15.42 s
+    // at Size 1), so a Decay the clamp cannot honour does not inflate the
+    // estimate. tailMargin 1.15 covers the bare tank measuring 10-14 percent
+    // longer than its nominal RT60 (project audit, 2026-11), since -60 dB is
+    // measured from the early peak, not from the start of the decay.
+    // Inputs are clamped to their parameter ranges; NaN falls to the minimum.
+    //
+    // `sustained` is the caller's "output never decays" decision, see
+    // PluginProcessor::getTailLengthSeconds(): Infinite, near-full Freeze,
+    // or an engaged Loop Mix.
+    static double computeTailSeconds (float decaySeconds, float size, float preDelayMs, bool sustained) noexcept
+    {
+        if (sustained)
+            return std::numeric_limits<double>::infinity();
+
+        // "! (x >= lo)" also catches NaN, which jlimit would pass through.
+        auto clampToRange = [] (float x, float lo, float hi)
+        {
+            return ! (x >= lo) ? lo : (x > hi ? hi : x);
+        };
+
+        const float clampedDecay = clampToRange (decaySeconds, DattorroTank::minDecaySeconds, DattorroTank::maxDecaySeconds);
+        const float clampedSize = clampToRange (size, DattorroTank::minSize, DattorroTank::maxSize);
+        const float clampedPreDelayMs = clampToRange (preDelayMs, 0.0f, maxPreDelayMs);
+
+        const double rt60 = juce::jmin ((double) clampedDecay, DattorroTank::maxReachableRt60Seconds (clampedSize));
+        return 0.001 * (double) clampedPreDelayMs + tailMargin * rt60;
+    }
 
     // Phase 5 (see docs/shimmer-reverb-implementation-plan.md): forwarding
     // setters exposing the tunables Phases 2-4 already implemented inside
@@ -432,6 +467,9 @@ private:
 
     // Pre-delay and wet EQ ranges -- must match Parameters.cpp.
     static constexpr float maxPreDelayMs = 250.0f;
+
+    // See computeTailSeconds().
+    static constexpr double tailMargin = 1.15;
     static constexpr double preDelayRampSeconds = 0.05; // same 50ms as PluginProcessor's smoothers
     static constexpr float minLowCutHz = 20.0f;
     static constexpr float maxLowCutHz = 1000.0f;

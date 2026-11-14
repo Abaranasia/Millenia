@@ -31,9 +31,9 @@ The core design is right: the pitch shifter sits inside the reverb loop, which i
 
 | # | Severity | Status | Problem | Where |
 |---|---|---|---|---|
-| 1 | High | Confirmed | Buffer overrun: `process()` writes the host block into `monoScratch`, sized to the `prepareToPlay` hint, with no guard. The processor forwards the whole block. | `ShimmerReverbEngine.cpp:60`, `:361-378`; `PluginProcessor.cpp:341-342` |
-| 2 | Medium/high | Reported | `getTailLengthSeconds()` returns 0, so hosts may cut the tail on stop or offline render. | `PluginProcessor.cpp:90-93` |
-| 3 | Medium | Reported | No `getBypassParameter()`: host bypass hard-cuts and never touches the `bypass` parameter. Parameter bypass still runs the full chain. | `PluginProcessor.cpp`; `ShimmerReverbEngine.cpp:786-797` |
+| 1 | High | **Fixed** (`07c54d5`) | Buffer overrun: `process()` wrote the host block into `monoScratch`, sized to the `prepareToPlay` hint, with no guard. `process()` now splits oversized blocks into prepared-size chunks. | `ShimmerReverbEngine.cpp:60`, `:361-378`; `PluginProcessor.cpp:341-342` |
+| 2 | Medium/high | **Fixed** (this branch) | `getTailLengthSeconds()` returned 0. It now reports a finite tail from Decay, Size and pre-delay, and infinity when Infinite, Freeze (>= 0.9) or Loop Mix (> 0.001) is on. Known gap: for Freeze between 0 and 0.9 the real tail can exceed the finite estimate. | `PluginProcessor.cpp:90-93`; `ShimmerReverbEngine::computeTailSeconds` |
+| 3 | Medium | **Fixed** (this branch) | No `getBypassParameter()`. The processor now returns the `bypass` parameter; the VST3 wrapper then calls `processBlock()`, which already fades the mix to dry. Verified by build and JUCE source reading only, not in a host. | `PluginProcessor.cpp`; `ShimmerReverbEngine.cpp:786-797` |
 | 4 | High (mitigated) | Reported | Formant corrector is unstable on tonal input: no LPC regularisation, unbounded gain ratio. Only mitigated by defaulting to off. | `FormantEnvelopeCorrector.cpp:111-129`, `:243` |
 | 5 | Medium | Reported | No state migration: `shimmerSustain` → `shimmerFeedback` is unmapped and `schemaVersion` is written but never read. | `PluginProcessor.cpp:357-381`; `Parameters.cpp:76-77` |
 | 6 | Medium | Reported | Block-stepped parameters (mix, width, shimmer amount/feedback, decay, damping) give zipper steps that depend on block size. | `PluginProcessor.cpp:285-299` |
