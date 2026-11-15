@@ -87,15 +87,22 @@ void PitchShifter::reset()
 
 void PitchShifter::setPitchShiftSemitones (float semitones)
 {
+    // Lag semantics (audit fix 7): this only updates the ratio that the NEXT
+    // launched grain latches (Grain::ratio). Grains already alive keep
+    // gliding at the ratio they were launched with, so a change never
+    // displaces a live grain's read position (which, with one global ratio,
+    // jumped by age * (newRatio - oldRatio) samples at once -- a click). The
+    // new pitch is therefore fully audible up to ~one hop (~18ms at 44.1kHz)
+    // after the call, once the last old-ratio grain has crossfaded out.
     pitchRatio = std::pow (2.0f, semitones / 12.0f);
 }
 
-float PitchShifter::grainDelaySamples (int elapsed) const noexcept
+float PitchShifter::grainDelaySamples (int elapsed, float ratio) const noexcept
 {
     // currentDriftSamples is 0.0f unless Freeze is engaged (see
     // freezeDriftDepthMs's header comment) -- at freezeAmount=0.0f this is
     // bit-identical to the pre-existing formula.
-    return baseDelaySamples + currentDriftSamples - (float) elapsed * (pitchRatio - 1.0f);
+    return baseDelaySamples + currentDriftSamples - (float) elapsed * (ratio - 1.0f);
 }
 
 float PitchShifter::grainWindow (int elapsed) const noexcept
@@ -127,7 +134,10 @@ bool PitchShifter::buildAlignmentReferenceBuffer (const std::array<Grain, maxCon
     // spuriously bad offset. currentDriftSamples is 0.0f unless Freeze is
     // engaged (see freezeDriftDepthMs's header comment).
     const float outgoingBaseDelay = baseDelaySamples + currentDriftSamples + outgoing->baseDelayOffset;
-    const float outgoingCurrentDelay = outgoingBaseDelay - (float) outgoing->age * (pitchRatio - 1.0f);
+    // The outgoing grain is read at the ratio it latched at launch (which
+    // differs from pitchRatio right after a pitch change), so its current
+    // delay must use that ratio to match what it is actually playing.
+    const float outgoingCurrentDelay = outgoingBaseDelay - (float) outgoing->age * (outgoing->ratio - 1.0f);
 
     const int windowSamples = (int) alignmentReferenceBuffer.size();
 
@@ -394,7 +404,7 @@ float PitchShifter::processSample (float input)
     if (primarySamplesUntilLaunch <= 0)
     {
         primaryLastOffset = findAlignmentOffset (primaryGrains, primaryLastOffset, primaryAnchorScores.data());
-        primaryGrains[(size_t) primaryNextSlot] = { true, 0, primaryLastOffset };
+        primaryGrains[(size_t) primaryNextSlot] = { true, 0, primaryLastOffset, pitchRatio };
         primaryNextSlot = (primaryNextSlot + 1) % maxConcurrentGrainsPerGroup;
         primarySamplesUntilLaunch = hopSamples;
     }
@@ -407,7 +417,7 @@ float PitchShifter::processSample (float input)
         if (! grain.active)
             continue;
 
-        const float delaySamples = grainDelaySamples (grain.age) + grain.baseDelayOffset;
+        const float delaySamples = grainDelaySamples (grain.age, grain.ratio) + grain.baseDelayOffset;
         const float sample = delayLine.popSample (0, delaySamples, false);
         const float weight = grainWindow (grain.age);
 
@@ -434,7 +444,7 @@ float PitchShifter::processSample (float input)
     if (quadratureSamplesUntilLaunch <= 0)
     {
         quadratureLastOffset = findAlignmentOffset (quadratureGrains, quadratureLastOffset);
-        quadratureGrains[(size_t) quadratureNextSlot] = { true, 0, quadratureLastOffset };
+        quadratureGrains[(size_t) quadratureNextSlot] = { true, 0, quadratureLastOffset, pitchRatio };
         quadratureNextSlot = (quadratureNextSlot + 1) % maxConcurrentGrainsPerGroup;
         quadratureSamplesUntilLaunch = hopSamples;
     }
@@ -447,7 +457,7 @@ float PitchShifter::processSample (float input)
         if (! grain.active)
             continue;
 
-        const float delaySamples = grainDelaySamples (grain.age) + grain.baseDelayOffset;
+        const float delaySamples = grainDelaySamples (grain.age, grain.ratio) + grain.baseDelayOffset;
         const float sample = delayLine.popSample (0, delaySamples, false);
         const float weight = grainWindow (grain.age);
 

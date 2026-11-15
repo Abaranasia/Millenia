@@ -1579,6 +1579,141 @@ public:
             // specifically to remove that confound.
             runRealMaterialAlignmentDiagnostic (juce::File ("C:\\Etheral\\drone1.wav"));
         }
+
+        beginTest ("Mid-grain pitch step does not move live grains' read positions (no click/zipper)");
+        {
+            // Audit fix 7: setPitchShiftSemitones() used to overwrite the one
+            // global pitchRatio that every live grain's per-sample read delay
+            // (base - age * (ratio - 1)) depends on, so a ratio change at
+            // grain age A displaced every live grain's read position by
+            // A * (r1 - r0) samples in a single sample -- an audible
+            // click/zipper. Each grain now latches the ratio at launch, so a
+            // step only takes effect on the next grain launched (up to ~one
+            // hop later) and live grains keep gliding on their own ratio.
+            //
+            // Setup: 220Hz sine, +12st warm-up, then step to +7st. At 44.1kHz grainLength = 882, hop = 794, so the primary
+            // pool launches at 794k and the quadrature pool at 397 + 794k;
+            // the two step points below put one pool's live grain at age 460
+            // (mid-life) while the other pool is mid-crossfade. The metric is the largest
+            // sample-to-sample jump over the next 400 samples, per output,
+            // bounded by 1.5x the same metric from a constant +7st control.
+            constexpr double sampleRate = 44100.0;
+            constexpr double inputFreq = 220.0;
+            constexpr int measureSamples = 400;
+
+            struct Jumps { float primary = 0.0f; float quadrature = 0.0f; };
+
+            auto render = [&] (int stepAt, float startSemitones, float stepSemitones) -> Jumps
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (startSemitones);
+
+                double phase = 0.0;
+                const double phaseInc = juce::MathConstants<double>::twoPi * inputFreq / sampleRate;
+                auto nextInput = [&]
+                {
+                    const float x = (float) std::sin (phase) * 0.5f;
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi)
+                        phase -= juce::MathConstants<double>::twoPi;
+                    return x;
+                };
+
+                // Last pre-step outputs seed prev*, so the step instant's own
+                // sample-to-sample jump (the one a click lives in) is measured.
+                float prevPrimary = 0.0f, prevQuad = 0.0f;
+                for (int i = 0; i < stepAt; ++i)
+                {
+                    prevPrimary = shifter.processSample (nextInput());
+                    prevQuad = shifter.getQuadratureOutput();
+                }
+
+                shifter.setPitchShiftSemitones (stepSemitones);
+
+                Jumps jumps;
+                for (int i = 0; i < measureSamples; ++i)
+                {
+                    const float p = shifter.processSample (nextInput());
+                    const float q = shifter.getQuadratureOutput();
+                    jumps.primary = juce::jmax (jumps.primary, std::abs (p - prevPrimary));
+                    jumps.quadrature = juce::jmax (jumps.quadrature, std::abs (q - prevQuad));
+                    prevPrimary = p;
+                    prevQuad = q;
+                }
+                return jumps;
+            };
+
+            // 8400: primary grain mid-life (age 460), quadrature at ages 63 / 857.
+            // 8797: quadrature grain mid-life (age 460), primary at ages 63 / 857.
+            for (const int stepAt : { 8400, 8797 })
+            {
+                const Jumps control = render (stepAt, 7.0f, 7.0f);
+                const Jumps stepped = render (stepAt, 12.0f, 7.0f);
+                const float primaryBound = 1.5f * control.primary;
+                const float quadratureBound = 1.5f * control.quadrature;
+
+                logMessage ("Pitch step +12 -> +7st at sample " + juce::String (stepAt) + ": control(+7 constant) maxJump primary="
+                            + juce::String (control.primary, 5) + " quad=" + juce::String (control.quadrature, 5)
+                            + "; stepped maxJump primary=" + juce::String (stepped.primary, 5)
+                            + " quad=" + juce::String (stepped.quadrature, 5) + "; bounds primary="
+                            + juce::String (primaryBound, 5) + " quad=" + juce::String (quadratureBound, 5));
+
+                expect (stepped.primary < primaryBound, "stepAt=" + juce::String (stepAt) + ": primary output jumped by "
+                            + juce::String (stepped.primary, 5) + " after a mid-grain pitch step (bound "
+                            + juce::String (primaryBound, 5) + ")");
+                expect (stepped.quadrature < quadratureBound, "stepAt=" + juce::String (stepAt) + ": quadrature output jumped by "
+                            + juce::String (stepped.quadrature, 5) + " after a mid-grain pitch step (bound "
+                            + juce::String (quadratureBound, 5) + ")");
+            }
+        }
+
+        beginTest ("Constant-pitch output (primary + quadrature) is bit-identical to the pre-latched-ratio golden hash");
+        {
+            // Golden FNV-1a hash over the float bit patterns of both outputs
+            // for 20000 samples of a 220Hz sine at +12, +7 and -5 st
+            // (constant ratio per run), RECORDED on the code BEFORE the
+            // per-grain ratio latch (audit fix 7) was added. With no ratio
+            // change the latch must be an exact no-op.
+            juce::uint64 hash = 0xcbf29ce484222325ull;
+            auto mix = [&] (float v)
+            {
+                juce::uint32 bits = 0;
+                std::memcpy (&bits, &v, sizeof (bits));
+                for (int b = 0; b < 4; ++b)
+                {
+                    hash ^= (juce::uint64) ((bits >> (8 * b)) & 0xffu);
+                    hash *= 0x100000001b3ull;
+                }
+            };
+
+            for (const float semitones : { 12.0f, 7.0f, -5.0f })
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { 44100.0, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (semitones);
+
+                double phase = 0.0;
+                const double phaseInc = juce::MathConstants<double>::twoPi * 220.0 / 44100.0;
+                for (int i = 0; i < 20000; ++i)
+                {
+                    mix (shifter.processSample ((float) std::sin (phase) * 0.5f));
+                    mix (shifter.getQuadratureOutput());
+                    phase += phaseInc;
+                    if (phase >= juce::MathConstants<double>::twoPi)
+                        phase -= juce::MathConstants<double>::twoPi;
+                }
+            }
+
+            constexpr juce::uint64 expectedHash = 0xe833b7eedcdd4916ull;
+            logMessage ("PitchShifter constant-pitch FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
+            expect (hash == expectedHash, "Constant-pitch fingerprint changed: got " + juce::String::toHexString ((juce::int64) hash)
+                                              + ", expected " + juce::String::toHexString ((juce::int64) expectedHash));
+        }
     }
 };
 
