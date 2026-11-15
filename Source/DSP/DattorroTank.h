@@ -20,6 +20,16 @@
 // values converted from the paper's reference sample rate of 29761 Hz to
 // milliseconds (ms = samples / 29761 * 1000); prepare() converts ms to
 // actual samples at the live sample rate, same as ScratchSchroederTank.
+//
+// The tank's own figure-eight recirculating signal (feedbackFromB) is
+// readable externally via peekFeedbackSignal(), and processSample() has a
+// two-argument overload that accepts an externally-supplied recirculating
+// feedback value instead of always using feedbackFromB internally. This is
+// what lets ShimmerReverbEngine pitch-shift the tank's own sustain signal
+// before it re-enters the tank, per shimmer-reverb-architecture.md's
+// documented topology (tank output -> pitch shifter -> back into tank
+// input) — see docs/shimmer-reverb-implementation-plan.md's Phase 3/4
+// correction note for the root cause this fixes.
 class DattorroTank
 {
 public:
@@ -34,11 +44,42 @@ public:
     // written back to every output channel.
     void process (juce::dsp::AudioBlock<float>& block);
 
+    // Per-sample form of the same tank math as process(), for callers (e.g.
+    // ShimmerReverbEngine) that need to interleave this tank with another
+    // per-sample process (a pitch shifter in the feedback loop) rather than
+    // run it as a whole-block operation. Takes one mono input sample and the
+    // recirculating feedback signal to mix into branch A's input this pass,
+    // returns one mono output sample. Passing an externally-processed signal
+    // here (e.g. shifter.processSample(peekFeedbackSignal())) is what lets
+    // ShimmerReverbEngine pitch-shift the tank's own sustaining signal in
+    // place, per shimmer-reverb-architecture.md's documented topology (tank
+    // output -> pitch shifter -> back into tank input) — see
+    // docs/shimmer-reverb-implementation-plan.md's Phase 3/4 correction note.
+    float processSample (float input, float recirculatingFeedback);
+
+    // Convenience overload preserving the tank's own unshifted figure-eight
+    // cross-feed exactly as before: forwards feedbackFromB (branch B's own
+    // last output) as the recirculating feedback, so any caller that
+    // doesn't want external injection (e.g. process() below, or
+    // DattorroTankTests.cpp) gets identical behavior to before this
+    // overload existed.
+    float processSample (float input) { return processSample (input, feedbackFromB); }
+
     // Tunable points, exposed as plain setters for empirical tuning by ear.
     // Phase 5 wires these up to real APVTS parameters; this class owns no
     // parameter knowledge itself.
     void setDamping (float newDampingCoefficient);
     void setDecay (float newDecayGain);
+
+    // Read-only, non-destructive peek at the tank's own recirculating
+    // signal (branch B's output from the last processSample() call) without
+    // consuming or mutating anything. Callable any time after
+    // processSample(); lets ShimmerReverbEngine pitch-shift the tank's own
+    // sustain signal before feeding it back in via the two-argument
+    // processSample() overload above, instead of running a separate
+    // parallel feedback path (see docs/shimmer-reverb-implementation-plan.md
+    // Phase 3/4 correction note).
+    float peekFeedbackSignal() const noexcept { return feedbackFromB; }
 
 private:
     // Lagrange3rd (not Linear, unlike Phase 1's scratch tank) is required
@@ -130,16 +171,33 @@ private:
     // "sounds like a delay, not a reverb").
     static constexpr float defaultDampingCoefficient = 0.0005f;
 
-    // Bumped from 0.5f to 0.7f, then walked back down to 0.6f: a live
-    // listening pass after the 0.7f bump reported still hearing distinct
-    // spaced-out echoes -- 0.7f means the ~725ms full cross-feed round trip
-    // needs ~10 repeats to decay past audibility, i.e. a long, clearly
-    // countable train of discrete repeats, which made the discreteness
-    // *worse*, not better. 0.6f (still inside the architecture doc's
-    // 0.6-0.85 tuned range) roughly halves how many of those repeats stay
-    // audible; the real fix for smoothing out any one repeat is
-    // branchOutputTaps' density below, not this constant.
-    static constexpr float defaultDecayGain = 0.6f;
+    // Bumped from 0.5f to 0.7f, then walked back down to 0.6f during Phase 2
+    // (plain, unshifted tank): a live listening pass after the 0.7f bump
+    // reported still hearing distinct spaced-out echoes -- 0.7f means the
+    // ~725ms full cross-feed round trip needs ~10 repeats to decay past
+    // audibility, i.e. a long, clearly countable train of discrete repeats,
+    // which made the discreteness *worse*, not better at the time.
+    //
+    // Re-raised during Phase 3/4's structural fix (see
+    // docs/shimmer-reverb-implementation-plan.md): now that the pitch
+    // shifter sits inside this exact recirculation path (ShimmerReverbEngine
+    // shifts peekFeedbackSignal() before it re-enters via the two-argument
+    // processSample() overload), the Phase 2 concern above doesn't transfer
+    // directly -- each of those countable repeats is now progressively
+    // pitched up rather than an identical-pitch echo, so more distinct
+    // repeats surviving longer is closer to the intended ascending-shimmer
+    // character than to Phase 2's "sounds like a delay" complaint.
+    //
+    // 0.8f was tried first and rejected by ShimmerReverbEngineTests' decay-
+    // to-silence test: peak in the final second of an 8s silence window was
+    // 0.00245, over the 1e-3 safety margin -- not unbounded runaway (the
+    // separate 30s+ boundedness test still passed), but the tail genuinely
+    // outlasts that test's window, i.e. real margin was gone. Settled on
+    // 0.7f: still inside the architecture doc's documented 0.6-0.85 tuned
+    // range, meaningfully higher than Phase 2/3's 0.6f, and re-verified
+    // stable (bounded + decays to silence with real margin) with the
+    // shifter in the loop via ShimmerReverbEngineTests before shipping.
+    static constexpr float defaultDecayGain = 0.7f;
 
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
@@ -173,7 +231,14 @@ private:
     float decayGain = defaultDecayGain;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
-    // fed back into branch A's input this sample.
+    // fed back into branch A's input this sample by default (via the
+    // single-arg processSample() overload above). Also readable externally
+    // via peekFeedbackSignal() so ShimmerReverbEngine can pitch-shift this
+    // exact signal before it's fed back in through the two-argument
+    // processSample() overload, instead of running a separate, weaker
+    // parallel feedback path (see
+    // docs/shimmer-reverb-implementation-plan.md's Phase 3/4 correction
+    // note).
     float feedbackFromB = 0.0f;
 
     // Output tap offsets converted to samples at the live sample rate,

@@ -8,11 +8,23 @@
       <FILE id="tstMain" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
       <FILE id="tstDTT" name="DattorroTankTests.cpp" compile="1"
             resource="0" file="Source/DattorroTankTests.cpp"/>
+      <FILE id="tstPST" name="PitchShifterTests.cpp" compile="1"
+            resource="0" file="Source/PitchShifterTests.cpp"/>
+      <FILE id="tstSRT" name="ShimmerReverbEngineTests.cpp" compile="1"
+            resource="0" file="Source/ShimmerReverbEngineTests.cpp"/>
       <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
         <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
               file="../Source/DSP/DattorroTank.cpp"/>
         <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0"
               file="../Source/DSP/DattorroTank.h"/>
+        <FILE id="tstPSC" name="PitchShifter.cpp" compile="1" resource="0"
+              file="../Source/DSP/PitchShifter.cpp"/>
+        <FILE id="tstPSH" name="PitchShifter.h" compile="0" resource="0"
+              file="../Source/DSP/PitchShifter.h"/>
+        <FILE id="tstSRC" name="ShimmerReverbEngine.cpp" compile="1" resource="0"
+              file="../Source/DSP/ShimmerReverbEngine.cpp"/>
+        <FILE id="tstSRH" name="ShimmerReverbEngine.h" compile="0" resource="0"
+              file="../Source/DSP/ShimmerReverbEngine.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>

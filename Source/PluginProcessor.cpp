@@ -97,10 +97,8 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // initialisation that you need..
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
-    dattorroTank.prepare (spec);
-    dattorroTank.reset();
-
-    monoScratch.setSize (1, samplesPerBlock);
+    shimmerReverbEngine.prepare (spec);
+    shimmerReverbEngine.reset();
 }
 
 void MilleniaAudioProcessor::releaseResources()
@@ -150,39 +148,14 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // Phase 2 committed topology: the Dattorro tank is the sole, permanent
-    // reverb path (see docs/shimmer-reverb-implementation-plan.md, Phase 2).
-    // This is still 100% wet with no dry/wet mix yet — Phase 5 adds real
-    // parameters, including mix.
-    const auto numSamples = buffer.getNumSamples();
-
-    // Sum (or pass through) the input to mono in the pre-sized scratch buffer.
-    auto* monoData = monoScratch.getWritePointer (0);
-
-    if (totalNumInputChannels <= 1)
-    {
-        auto* inData = totalNumInputChannels == 1 ? buffer.getReadPointer (0) : nullptr;
-
-        for (int i = 0; i < numSamples; ++i)
-            monoData[i] = inData != nullptr ? inData[i] : 0.0f;
-    }
-    else
-    {
-        monoScratch.copyFrom (0, 0, buffer, 0, 0, numSamples);
-
-        for (int channel = 1; channel < totalNumInputChannels; ++channel)
-            monoScratch.addFrom (0, 0, buffer, channel, 0, numSamples);
-
-        monoScratch.applyGain (0, 0, numSamples, 1.0f / (float) totalNumInputChannels);
-    }
-
-    juce::dsp::AudioBlock<float> monoBlock (monoScratch);
-    monoBlock = monoBlock.getSubBlock (0, (size_t) numSamples);
-
-    dattorroTank.process (monoBlock);
-
-    for (int channel = 0; channel < totalNumOutputChannels; ++channel)
-        buffer.copyFrom (channel, 0, monoScratch, 0, 0, numSamples);
+    // Phase 3 committed topology: ShimmerReverbEngine (Dattorro tank +
+    // pitch shifter feedback loop) is the sole, permanent reverb path (see
+    // docs/shimmer-reverb-implementation-plan.md, Phase 3). This is still
+    // 100% wet with no dry/wet mix yet — Phase 5 adds real parameters,
+    // including mix. All mono-summing/processing/write-back happens inside
+    // ShimmerReverbEngine::process(); this method just forwards the block.
+    juce::dsp::AudioBlock<float> block (buffer);
+    shimmerReverbEngine.process (block);
 }
 
 //==============================================================================

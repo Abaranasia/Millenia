@@ -145,6 +145,46 @@ float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples)
     return tapped;
 }
 
+float DattorroTank::processSample (float input, float recirculatingFeedback)
+{
+    float diffused = input;
+
+    for (auto& stage : diffuserStages)
+        diffused = processAllpass (diffused, stage);
+
+    // Figure-eight cross-feed: the caller-supplied recirculating feedback
+    // (by default branch B's previous output, via the single-arg overload;
+    // or an externally pitch-shifted version of it, from
+    // ShimmerReverbEngine) feeds branch A, branch A's fresh output feeds
+    // branch B.
+    float inputToA = diffused + decayGain * recirculatingFeedback;
+    float tankA_out = processBranch (inputToA, branchA);
+
+    float inputToB = diffused + decayGain * tankA_out;
+    float tankB_out = processBranch (inputToB, branchB);
+
+    feedbackFromB = tankB_out;
+
+    // Real Dattorro output tap formula (see the outputTap* constants in
+    // the header): seven roughly-equal-weight taps with alternating
+    // signs, called after both processBranch() calls and after
+    // feedbackFromB is latched so they can never influence tankA_out,
+    // tankB_out, or the recirculating cross-feed -- output-only.
+    // tankA_out/tankB_out are used purely for recirculation now, not
+    // summed directly into the output.
+    float tankOut = outputScale * (
+          peekTap (branchB.delay1, outputTapBDelay1aSamples)
+        + peekTap (branchB.delay1, outputTapBDelay1bSamples)
+        - peekTap (branchB.allpass2.delayLine, outputTapBAllpass2Samples)
+        + peekTap (branchB.delay2, outputTapBDelay2Samples)
+        - peekTap (branchA.delay1, outputTapADelay1Samples)
+        - peekTap (branchA.allpass2.delayLine, outputTapAAllpass2Samples)
+        - peekTap (branchA.delay2, outputTapADelay2Samples)
+    );
+
+    return tankOut;
+}
+
 void DattorroTank::process (juce::dsp::AudioBlock<float>& block)
 {
     const auto numSamples = block.getNumSamples();
@@ -160,37 +200,7 @@ void DattorroTank::process (juce::dsp::AudioBlock<float>& block)
         if (numChannels > 1)
             monoIn /= (float) numChannels;
 
-        float diffused = monoIn;
-
-        for (auto& stage : diffuserStages)
-            diffused = processAllpass (diffused, stage);
-
-        // Figure-eight cross-feed: branch B's previous output feeds branch A,
-        // branch A's fresh output feeds branch B.
-        float inputToA = diffused + decayGain * feedbackFromB;
-        float tankA_out = processBranch (inputToA, branchA);
-
-        float inputToB = diffused + decayGain * tankA_out;
-        float tankB_out = processBranch (inputToB, branchB);
-
-        feedbackFromB = tankB_out;
-
-        // Real Dattorro output tap formula (see the outputTap* constants in
-        // the header): seven roughly-equal-weight taps with alternating
-        // signs, called after both processBranch() calls and after
-        // feedbackFromB is latched so they can never influence tankA_out,
-        // tankB_out, or the recirculating cross-feed -- output-only.
-        // tankA_out/tankB_out are used purely for recirculation now, not
-        // summed directly into the output.
-        float tankOut = outputScale * (
-              peekTap (branchB.delay1, outputTapBDelay1aSamples)
-            + peekTap (branchB.delay1, outputTapBDelay1bSamples)
-            - peekTap (branchB.allpass2.delayLine, outputTapBAllpass2Samples)
-            + peekTap (branchB.delay2, outputTapBDelay2Samples)
-            - peekTap (branchA.delay1, outputTapADelay1Samples)
-            - peekTap (branchA.allpass2.delayLine, outputTapAAllpass2Samples)
-            - peekTap (branchA.delay2, outputTapADelay2Samples)
-        );
+        float tankOut = processSample (monoIn);
 
         for (size_t ch = 0; ch < numChannels; ++ch)
             block.setSample ((int) ch, (int) i, tankOut);
