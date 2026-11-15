@@ -3965,10 +3965,11 @@ public:
     // 40 s of silence (same window and 1e-3 final-second threshold as
     // ShimmerReverbEngineTests' decay-to-silence test).
     void expectBoundedThenSilent (const juce::String& label, const std::function<void (ShimmerReverbEngine&)>& setup,
-                                  double loadSeconds, const std::function<float (int)>& source)
+                                  double loadSeconds, const std::function<float (int)>& source,
+                                  const std::function<void (ShimmerReverbEngine&, int)>& perBlock = {})
     {
         constexpr double silenceSeconds = 40.0;
-        const auto out = runSignal (setup, loadSeconds + silenceSeconds, source, (int) (loadSeconds * sampleRate));
+        const auto out = runSignal (setup, loadSeconds + silenceSeconds, source, (int) (loadSeconds * sampleRate), perBlock);
         const auto stats = SizeTests::peakOf (out);
         const float finalPeak = peakInSecond (out, loadSeconds + silenceSeconds - 1.0);
 
@@ -4137,12 +4138,14 @@ public:
         {
             for (float semitones : { 0.0f, 0.5f, -0.5f })
                 expectBoundedThenSilent ("T4 " + juce::String (semitones, 1) + " st",
-                                         [semitones] (ShimmerReverbEngine& e)
+                                         [] (ShimmerReverbEngine& e) { setShimmerWeight (e, 1.0f, false); },
+                                         180.0, noiseSource (4040 + (juce::int64) (semitones * 10.0f)),
+                                         // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                         [semitones] (ShimmerReverbEngine& e, int block)
                                          {
-                                             setShimmerWeight (e, 1.0f, false);
-                                             e.setPitchShiftSemitones (semitones);
-                                         },
-                                         180.0, noiseSource (4040 + (juce::int64) (semitones * 10.0f)));
+                                             if (block == 0)
+                                                 e.setPitchShiftSemitones (semitones);
+                                         });
         }
 
         beginTest ("Freeze guard: Freeze 1 at Shimmer Feedback 1.0 stays bounded and holds its level like the legacy path");
@@ -4728,11 +4731,16 @@ public:
                     return CascadeTests::runSignal ([&c, toneHz, amount] (ShimmerReverbEngine& e)
                                                     {
                                                         e.setModulation (0.0f);
-                                                        e.setPitchShiftSemitones (c.semitones);
                                                         e.setShimmerTone (toneHz);
                                                         e.setShimmerAmount (amount);
                                                     },
-                                                    2.0, FormantTests::sineSource (c.inputHz, 0.3f));
+                                                    2.0, FormantTests::sineSource (c.inputHz, 0.3f), std::numeric_limits<int>::max(),
+                                                    // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                                    [&c] (ShimmerReverbEngine& e, int block)
+                                                    {
+                                                        if (block == 0)
+                                                            e.setPitchShiftSemitones (c.semitones);
+                                                    });
                 };
 
                 const auto off = run (toneOffHz, 1.0f), capped = run (toneJustBelowOffHz, 1.0f), noShifter = run (toneOffHz, 0.0f);
@@ -4829,11 +4837,16 @@ public:
                 const auto out = CascadeTests::runSignal ([semitones] (ShimmerReverbEngine& e)
                                                           {
                                                               CascadeTests::setShimmerWeight (e, 1.0f, false);
-                                                              e.setPitchShiftSemitones (semitones);
                                                               e.setShimmerTone (1500.0f);
                                                           },
                                                           loadSeconds + silenceSeconds, CascadeTests::noiseSource (8080 + (juce::int64) semitones),
-                                                          (int) (loadSeconds * sampleRate));
+                                                          (int) (loadSeconds * sampleRate),
+                                                          // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                                          [semitones] (ShimmerReverbEngine& e, int block)
+                                                          {
+                                                              if (block == 0)
+                                                                  e.setPitchShiftSemitones (semitones);
+                                                          });
                 const auto stats = SizeTests::peakOf (out);
                 const float finalPeak = CascadeTests::peakInSecond (out, loadSeconds + silenceSeconds - 1.0);
                 const juce::String label ("Tone 1.5 kHz, " + juce::String (semitones, 0) + " st");
