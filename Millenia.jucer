@@ -12,6 +12,10 @@
       <FILE id="yuo7Hd" name="PluginEditor.cpp" compile="1" resource="0"
             file="Source/PluginEditor.cpp"/>
       <FILE id="CDCs3F" name="PluginEditor.h" compile="0" resource="0" file="Source/PluginEditor.h"/>
+      <FILE id="prmPC1" name="Parameters.cpp" compile="1" resource="0"
+            file="Source/Parameters.cpp"/>
+      <FILE id="prmPH1" name="Parameters.h" compile="0" resource="0"
+            file="Source/Parameters.h"/>
       <GROUP id="{A3E914B2-4C1A-4E2A-9C3D-1B7F6E2D5A80}" name="DSP">
         <FILE id="dspSRE1" name="ShimmerReverbEngine.cpp" compile="1" resource="0"
               file="Source/DSP/ShimmerReverbEngine.cpp"/>
