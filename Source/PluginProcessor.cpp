@@ -90,17 +90,16 @@ bool MilleniaAudioProcessor::isMidiEffect() const
 double MilleniaAudioProcessor::getTailLengthSeconds() const
 {
     // Host thread, not the audio thread: only reads the cached atomics.
-    // "Sustained" means the output does not decay on its own, so the host must
-    // not cut the tail (VST3 maps +infinity to kInfiniteTail):
-    //  - Infinite pins the tank's decay gain to exactly 1.0.
-    //  - Freeze at 0.9 and above pushes the tank gain to at least ~0.9 (the
-    //    gain is crossfaded toward 0.999 by the dial), an RT60 of ~24 s at
-    //    Size 1 even from the shortest Decay, longer than the finite estimate
-    //    ever gets. Below 0.9 the tail is finite but may exceed the estimate.
-    //  - Loop Mix above 0.001 (-60 dB) plays the captured loop forever.
-    const bool sustained = infiniteParam->load() > 0.5f
-                        || freezeParam->load() >= 0.9f
-                        || loopMixParam->load() > 0.001f;
+    // "Sustained" (see ShimmerReverbEngine::isTailSustained()) means the
+    // audible output does not decay on its own, so the host must not cut the
+    // tail. Bypass and Mix 0 mute the wet path, so they cancel it. When not
+    // sustained, the finite estimate is returned; it is finite and also
+    // covers the 50 ms fade of the wet signal on a bypass or Mix change.
+    const bool sustained = ShimmerReverbEngine::isTailSustained (bypassParam->load() > 0.5f,
+                                                                 mixParam->load(),
+                                                                 infiniteParam->load(),
+                                                                 freezeParam->load(),
+                                                                 loopMixParam->load());
 
     return ShimmerReverbEngine::computeTailSeconds (decayParam->load(), sizeParam->load(),
                                                     preDelayParam->load(), sustained);

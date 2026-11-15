@@ -5150,3 +5150,61 @@ public:
 };
 
 static ShimmerReverbEngineTailLengthTests shimmerReverbEngineTailLengthTests;
+
+// ShimmerReverbEngine::isTailSustained() decides when the host is told the tail
+// is infinite; Bypass and a silent Mix cancel it because the wet path is muted.
+class ShimmerReverbEngineTailSustainTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineTailSustainTests() : juce::UnitTest ("ShimmerReverbEngineTailSustainTests", "DSP") {}
+
+    void runTest() override
+    {
+        using Engine = ShimmerReverbEngine;
+
+        beginTest ("Each sustained condition alone makes the tail sustained");
+        {
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 0.0f, 0.0f), "Infinite 1.0 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.5f, 0.0f, 0.0f), "Infinite exactly 0.5 was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 0.51f, 0.0f, 0.0f), "Infinite 0.51 was not sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.9f, 0.0f), "Freeze 0.9 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.8999f, 0.0f), "Freeze 0.8999 was sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.002f), "Loop Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.001f), "Loop Mix exactly 0.001 was sustained");
+        }
+
+        beginTest ("Bypass cancels the sustained tail");
+        {
+            expect (! Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f), "Bypass with all modes engaged was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 1.0f, 1.0f), "All modes engaged without bypass was not sustained");
+        }
+
+        beginTest ("A silent Mix cancels the sustained tail");
+        {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+
+            expect (! Engine::isTailSustained (false, 0.0f, 1.0f, 1.0f, 1.0f), "Mix 0.0 was sustained");
+            expect (! Engine::isTailSustained (false, 0.001f, 1.0f, 1.0f, 1.0f), "Mix 0.001 was sustained");
+            expect (Engine::isTailSustained (false, 0.002f, 1.0f, 1.0f, 1.0f), "Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, nan, 1.0f, 1.0f, 1.0f), "NaN Mix was sustained");
+        }
+
+        beginTest ("Nothing engaged is not sustained");
+        {
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.0f), "Idle parameters were sustained");
+        }
+
+        beginTest ("Bypass with all modes engaged reports the finite estimate");
+        {
+            const bool sustained = Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f);
+            const double tail = Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, sustained);
+
+            expect (std::isfinite (tail), "Tail was not finite");
+            expectWithinAbsoluteError (tail, Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, false), 1.0e-12);
+        }
+    }
+};
+
+static ShimmerReverbEngineTailSustainTests shimmerReverbEngineTailSustainTests;
