@@ -113,7 +113,7 @@ juce::AudioProcessorParameter* MilleniaAudioProcessor::getBypassParameter() cons
     // (juce_audio_plugin_client_VST3.cpp:3728-3733, :920-921). JUCE's own
     // header says the same (juce_AudioProcessor.h:947-957), and the other
     // wrappers follow it (AU, AAX, VST2, LV2, Unity). processBlock() already
-    // reads this parameter and drives smoothedMix toward 0, so bypass is a
+    // reads this parameter and drives the mix smoother toward 0, so bypass is a
     // click-free mix-to-dry with the tank still running and the tail ringing
     // out. The dry path is undelayed, so no latency compensation is needed.
     // The default processBlockBypassed() would hard-cut and freeze the tank,
@@ -191,8 +191,8 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Freeze is now a LEVEL crossfade from the main shifter to a 0-semitone
     // unityShifter (see ShimmerReverbEngine::
     // applyPitchAndFreezeCrossfade()), and the
-    // engine ramps freeze per sample inside each block, so this block-rate
-    // 0.05s ramp no longer steps audibly on large buffers. Engram topic_key
+    // engine ramps freeze per sample inside each chunk, so the 0.05s smoother
+    // (stepped in 32-sample chunks) no longer steps audibly. Engram topic_key
     // millenia/freeze-toggle-pitch-artifact has the full investigation.
     // Every smoother (Freeze included) is reset to the 50 ms ramp and seeded
     // with the host's current values. Bypass folds into the mix seed too --
@@ -275,20 +275,22 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // every DSP-affecting value is now driven by an APVTS parameter, read
     // here via the cached atomics below (never apvts.getRawParameterValue()
     // by string -- that's a needless lookup on the audio thread) and pushed
-    // through per-block SmoothedValues for click-free automation. All
+    // through the EngineParameterSmoothing smoothers for click-free automation. All
     // mono-summing/processing/write-back still happens inside
     // ShimmerReverbEngine::process(); this method just drives its
     // forwarding setters and forwards the block.
     // Smoothed parameters (everything except the raw ones below) are pushed
-    // by EngineParameterSmoothing::process() at the bottom, in 32-sample
-    // chunks. Audit fix 6: they used to be skip()'d once per host block, so
-    // the zipper step scaled with the host block size.
+    // by EngineParameterSmoothing::process() at the bottom: it advances its 11
+    // smoothers in 32-sample chunks inside the host block and calls a setter
+    // only when its value changed (a full push is forced after prepare).
+    // Audit fix 6: they used to be skip()'d once per host block, so the
+    // zipper step scaled with the host block size.
     //
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
     // effective-mix override instantly with no smoothing (deliberately left
     // for PluginProcessor to smooth, per ShimmerReverbEngine.h's
-    // setBypassed() comment) -- if this smoothed mix via smoothedMix AND
+    // setBypassed() comment) -- if this smoothed mix via EngineParameterSmoothing AND
     // also called engine.setBypassed(), the instant override would fight the
     // smoothed value and reintroduce exactly the click this phase exists to
     // eliminate. Instead, bypass drives the SAME mix smoother toward 0,
@@ -310,9 +312,9 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     shimmerReverbEngine.setSize (sizeParam->load());
     shimmerReverbEngine.setModulation (modulationParam->load());
 
-    // Phase 9: Freeze goes through the chunked smoothers too (see
-    // EngineParameterSmoothing) -- originally a bool at the APVTS level (now a
-    // continuous float dial, 2026-08-22, see Parameters.cpp), but even a hard
+    // Freeze is not pushed here: it is one of the smoothed targets (see
+    // readSmoothingTargets()), stepped in 32-sample chunks by
+    // EngineParameterSmoothing like the other continuous values -- a hard
     // 0->1 jump on decayGain/dry-mute inside the tank would click.
 
     // Infinite mode: read RAW, no smoother here -- DattorroTank ramps the
@@ -343,7 +345,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     // Advances the smoothers and renders the block through the engine in
     // 32-sample chunks (the engine itself processes each chunk with constant
-    // block-rate parameters).
+    // parameters).
     juce::dsp::AudioBlock<float> block (buffer);
     engineSmoothing.process (shimmerReverbEngine, smoothingTargets, block);
 }

@@ -24,8 +24,9 @@ public:
         // directly: ext = limiter (rho * peekFeedbackSignal()), rho = 1.0 and
         // 0.7 (rho < 1 models a shifter plus corrector that return less than
         // unity gain). Reference L0 = output RMS over 2.3-3.3 s (the burst
-        // ends at 2 s and the rider latches 0.3 s later; 3-5 s is still
-        // building, which made the old early window an artifact).
+        // ends at 2 s and the rider latches 0.5 s later, at about 2.5 s, inside
+        // the window; 3-5 s is still building, which made the old early window
+        // an artifact).
         {
             struct HoldRun
             {

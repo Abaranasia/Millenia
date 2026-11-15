@@ -3999,7 +3999,8 @@ public:
         // weight 1 (plainWeight 0) or the tank alone. Reworked to the HOLD
         // criterion (2026-11-15, DattorroTank's hold-level rider): a 2 s
         // burst, then 60 s of silence; L0 = output RMS over 2.3-3.3 s (just
-        // after the rider latches; 3-5 s is still building), and the RMS at
+        // after the rider latches 0.5 s after the burst, at about 2.5 s; 3-5 s
+        // is still building), and the RMS at
         // 10-15, 30-35 and 55-60 s must stay within +-2 dB of L0 (+-3 dB for
         // the +12 st sine/chord, where the cascade makes the spectrum evolve
         // and the cap-and-alias losses are not level-proportional). No 1 s
