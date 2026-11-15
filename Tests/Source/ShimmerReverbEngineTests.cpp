@@ -3076,7 +3076,15 @@ public:
             // this hash covers the filter; with Tone Off the engine
             // reproduces the old arithmetic (T6's legacy hashes unchanged).
             // Same value in Debug and Release.
-            constexpr juce::uint64 expectedDefaultHash = 0x7149627bc88d4fcfull;
+            //
+            // 2026-11-15, re-recorded 7149627bc88d4fcf -> d0a32dcfc2df8430
+            // after the FormantEnvelopeCorrector LPC conditioning fix (audit
+            // fix 4: white-noise correction, lag window, reflection clamp,
+            // bandwidth expansion, gain-ratio clamp). legacySlice1Settings()
+            // runs with Formant Correction ON, so this run goes through the
+            // corrector and its numerics changed on purpose. The formant-OFF
+            // path is unchanged (its tests are untouched and still pass).
+            constexpr juce::uint64 expectedDefaultHash = 0xd0a32dcfc2df8430ull;
 
             for (bool forceUnityActive : { false, true })
             {
@@ -3265,7 +3273,11 @@ public:
             // 2026-10-25, deliberately replaced e30cadee8d7121fb ->
             // 380d36dfca706ba2 by Shimmer Tone's 5 kHz default (slice 1 step
             // C, see the mono-sum hash test). Same value in Debug and Release.
-            constexpr juce::uint64 expectedLeftHash = 0x380d36dfca706ba2ull;
+            // 2026-11-15, re-recorded 380d36dfca706ba2 -> 9ece884b8f1eb6b2
+            // after the FormantEnvelopeCorrector LPC conditioning fix (audit
+            // fix 4); legacySlice1Settings() has the corrector ON, see the
+            // mono-sum hash test.
+            constexpr juce::uint64 expectedLeftHash = 0x9ece884b8f1eb6b2ull;
             int rampStart = 0;
             std::vector<float> left, right;
             ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (false, 0.5, rampStart, &left, &right,
@@ -3985,8 +3997,16 @@ public:
             // before this slice (re-confirmed on the unmodified tree, Debug and
             // Release, 2026-10-24); both tests now assert the new default's
             // hashes instead.
-            constexpr juce::uint64 legacyMonoHash = 0x106b8609081503f9ull;
-            constexpr juce::uint64 legacyLeftHash = 0x918d1cec9419a789ull;
+            //
+            // 2026-11-15, re-recorded 106b8609081503f9 -> 5ad945c92eaae118
+            // (mono) and 918d1cec9419a789 -> f57207430acd5ac8 (left) after the
+            // FormantEnvelopeCorrector LPC conditioning fix (audit fix 4).
+            // legacySlice1Settings() runs with Formant Correction ON, so the
+            // legacy path now goes through the conditioned corrector. The old
+            // values pinned the unconditioned corrector's numerics; the
+            // formant-OFF path is unchanged.
+            constexpr juce::uint64 legacyMonoHash = 0x5ad945c92eaae118ull;
+            constexpr juce::uint64 legacyLeftHash = 0xf57207430acd5ac8ull;
 
             // 2026-10-25 (step C): Shimmer Tone Off too (its 10 kHz endpoint,
             // where the shifter gets the raw signal). Tone defaults to 5 kHz,

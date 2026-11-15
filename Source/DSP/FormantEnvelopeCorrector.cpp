@@ -20,6 +20,13 @@ void FormantEnvelopeCorrector::prepare (const juce::dsp::ProcessSpec& spec)
     windowedScratch.resize ((size_t) windowSamples);
     autocorrelationScratch.assign ((size_t) (lpcOrder + 1), 0.0);
 
+    // Gaussian lag window, w[k] = exp(-0.5 * (2*pi*f0*k/fs)^2); w[0] unused.
+    for (int k = 0; k <= lpcOrder; ++k)
+    {
+        const double x = juce::MathConstants<double>::twoPi * (double) lagWindowBandwidthHz * (double) k / spec.sampleRate;
+        lagWindow[(size_t) k] = std::exp (-0.5 * x * x);
+    }
+
     reset();
 }
 
@@ -92,7 +99,10 @@ double FormantEnvelopeCorrector::levinsonDurbin (const double* r, int order, dou
         double acc = r[i];
         for (int j = 1; j < i; ++j)
             acc += aOut[j] * r[i - j];
-        double k = -acc / err;
+        // Clamp BEFORE the coefficient update so the recursion is always
+        // applied completely with a strictly-stable reflection coefficient
+        // (|k| < 1 keeps err > 0), never abandoned half-built.
+        double k = juce::jlimit (-maxReflectionCoefficient, maxReflectionCoefficient, -acc / err);
 
         for (int j = 0; j <= order; ++j)
             prev[(size_t) j] = aOut[j];
@@ -124,14 +134,33 @@ void FormantEnvelopeCorrector::estimateLpcFit (const std::vector<float>& ring, s
         autocorrelationScratch[(size_t) lag] = sum;
     }
 
+    // Conditioning (audit fix 4): a pure tone makes the raw autocorrelation
+    // matrix singular, which put LPC poles/zeros on the unit circle.
+    autocorrelationScratch[0] *= 1.0 + whiteNoiseCorrection;
+    for (int lag = 1; lag <= lpcOrder; ++lag)
+        autocorrelationScratch[(size_t) lag] *= lagWindow[(size_t) lag];
+
     double err = levinsonDurbin (autocorrelationScratch.data(), lpcOrder, aOut.data());
     gainOut = std::sqrt (juce::jmax (1.0e-12, err));
+
+    // Bandwidth expansion: a[k] *= gamma^k pulls every root radially inward.
+    double gammaPower = 1.0;
+    for (int k = 1; k <= lpcOrder; ++k)
+    {
+        gammaPower *= bandwidthExpansionGamma;
+        aOut[(size_t) k] *= gammaPower;
+    }
 }
 
 void FormantEnvelopeCorrector::runAnalysis() noexcept
 {
     estimateLpcFit (dryRing, aDryIncoming, gainDryIncoming);
     estimateLpcFit (shiftedRing, aShiftedIncoming, gainShiftedIncoming);
+}
+
+double FormantEnvelopeCorrector::clampedGainRatio (double numerator, double denominator) noexcept
+{
+    return juce::jlimit (minGainRatio, maxGainRatio, numerator / juce::jmax (1.0e-12, denominator));
 }
 
 float FormantEnvelopeCorrector::applyTwoPassFilter (float shifted,
@@ -240,7 +269,7 @@ float FormantEnvelopeCorrector::processSample (float dry, float shifted) noexcep
     const float correctionBlend = getCorrectionBlendAmount();
 
     float correctedOutput;
-    float outgoingOutput = applyTwoPassFilter (shifted, aShifted, aDry, gainDry / gainShifted, whiteningHistory, resynthesisHistory);
+    float outgoingOutput = applyTwoPassFilter (shifted, aShifted, aDry, clampedGainRatio (gainDry, gainShifted), whiteningHistory, resynthesisHistory);
 
     if (crossfadeCounter >= crossfadeSamples)
     {
@@ -248,7 +277,7 @@ float FormantEnvelopeCorrector::processSample (float dry, float shifted) noexcep
     }
     else
     {
-        float incomingOutput = applyTwoPassFilter (shifted, aShiftedIncoming, aDryIncoming, gainDryIncoming / gainShiftedIncoming, whiteningHistoryIncoming, resynthesisHistoryIncoming);
+        float incomingOutput = applyTwoPassFilter (shifted, aShiftedIncoming, aDryIncoming, clampedGainRatio (gainDryIncoming, gainShiftedIncoming), whiteningHistoryIncoming, resynthesisHistoryIncoming);
 
         ++crossfadeCounter;
 
@@ -335,7 +364,7 @@ float FormantEnvelopeCorrector::processQuadratureSample (float shifted) noexcept
     {
         if (! quadratureCrossfadeSettled)
         {
-            correctedOutput = applyTwoPassFilter (shifted, aShiftedQuadratureIncoming, aDryIncoming, gainDryIncoming / gainShiftedQuadratureIncoming, quadratureWhiteningHistoryIncoming, quadratureResynthesisHistoryIncoming);
+            correctedOutput = applyTwoPassFilter (shifted, aShiftedQuadratureIncoming, aDryIncoming, clampedGainRatio (gainDryIncoming, gainShiftedQuadratureIncoming), quadratureWhiteningHistoryIncoming, quadratureResynthesisHistoryIncoming);
             quadratureWhiteningHistory = quadratureWhiteningHistoryIncoming;
             quadratureResynthesisHistory = quadratureResynthesisHistoryIncoming;
             aShiftedQuadrature = aShiftedQuadratureIncoming;
@@ -344,13 +373,13 @@ float FormantEnvelopeCorrector::processQuadratureSample (float shifted) noexcept
         }
         else
         {
-            correctedOutput = applyTwoPassFilter (shifted, aShiftedQuadrature, aDry, gainDry / gainShiftedQuadrature, quadratureWhiteningHistory, quadratureResynthesisHistory);
+            correctedOutput = applyTwoPassFilter (shifted, aShiftedQuadrature, aDry, clampedGainRatio (gainDry, gainShiftedQuadrature), quadratureWhiteningHistory, quadratureResynthesisHistory);
         }
     }
     else
     {
-        float outgoingOutput = applyTwoPassFilter (shifted, aShiftedQuadrature, aDry, gainDry / gainShiftedQuadrature, quadratureWhiteningHistory, quadratureResynthesisHistory);
-        float incomingOutput = applyTwoPassFilter (shifted, aShiftedQuadratureIncoming, aDryIncoming, gainDryIncoming / gainShiftedQuadratureIncoming, quadratureWhiteningHistoryIncoming, quadratureResynthesisHistoryIncoming);
+        float outgoingOutput = applyTwoPassFilter (shifted, aShiftedQuadrature, aDry, clampedGainRatio (gainDry, gainShiftedQuadrature), quadratureWhiteningHistory, quadratureResynthesisHistory);
+        float incomingOutput = applyTwoPassFilter (shifted, aShiftedQuadratureIncoming, aDryIncoming, clampedGainRatio (gainDryIncoming, gainShiftedQuadratureIncoming), quadratureWhiteningHistoryIncoming, quadratureResynthesisHistoryIncoming);
 
         // NOTE: do not re-increment crossfadeCounter here -- processSample()
         // already owns advancing it once per audio sample; this function only

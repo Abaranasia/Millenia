@@ -382,6 +382,61 @@ Notes on the measurements:
 - Whether the shorter broadband tail at high Shimmer Feedback with the Tone filter (−20% RT60 at 0.85) is acceptable by ear.
 - No APVTS round-trip test for `shimmerTone`: the test project has no `juce_audio_processors`, a documented gap. pluginval was not run.
 
+## 2026-11-15 — FormantEnvelopeCorrector LPC conditioning (audit fix 4)
+
+**Status: code complete, unit-tested in Debug. Not ear-verified. Formant Correction stays default off.**
+
+### Why
+
+Audit fix 4 of [`project-audit-2026-11.md`](./project-audit-2026-11.md). The corrector was numerically unstable on tonal input. Three root causes:
+
+- **Singular autocorrelation on tonal input.** A near-pure sine gives a near-singular autocorrelation matrix, so Levinson-Durbin returned an ill-conditioned LPC fit.
+- **Poles and zeros on the unit circle.** The fitted envelope filters had no margin, so they rang instead of decaying.
+- **Unbounded gain ratio.** The correction gain (target envelope over source envelope) had no limit, so a deep notch in one envelope became a huge gain or cut in the ratio.
+
+The failure in the measured case was not a blow-up. It was an octave notch: after a +12 st shift of 440 Hz the 880 Hz octave sat at −68.43 dB.
+
+### What changed
+
+Conditioning constants in `FormantEnvelopeCorrector`:
+
+| Constant | Value |
+|---|---|
+| `whiteNoiseCorrection` | 1e-4 |
+| `lagWindowBandwidthHz` | 30 |
+| `maxReflectionCoefficient` | 0.995 |
+| `bandwidthExpansionGamma` | 0.98 |
+| Gain ratio clamp | 0.1 to 10 |
+
+### Measured
+
+| Check | Result |
+|---|---|
+| 880 Hz octave level, corrected, before / after fix | −68.43 dB / −8.22 dB (uncorrected reference −6.02 dB) |
+| 440 Hz residual | −85 dB |
+| Peak in the test run | 0.39 |
+| Stereo-width margin | thin: 45.4% against the 45% floor |
+
+The stereo-width margin is the one to watch. A small change to the corrector could push it under the floor.
+
+### Goldens re-recorded
+
+Seven assertions failed after the fix. All run through `ShimmerReverbEngineFreezeCrossfadeTests::legacySlice1Settings()`, which has Formant Correction ON, so they pinned the old corrector numerics. They were re-recorded from the failure output, deliberately:
+
+| Test | Old | New |
+|---|---|---|
+| FreezeCrossfade default (Freeze 0), mono, 2 assertions | `7149627bc88d4fcf` | `d0a32dcfc2df8430` |
+| Space, Width = 1 left channel | `380d36dfca706ba2` | `9ece884b8f1eb6b2` |
+| Cascade T6 legacy mono, 2 assertions | `106b8609081503f9` | `5ad945c92eaae118` |
+| Cascade T6 legacy left, 2 assertions | `918d1cec9419a789` | `f57207430acd5ac8` |
+
+No other golden changed. The formant-OFF path is unchanged: the default-off tests still pass bit-identically and were not touched.
+
+### Still open
+
+- Ear check of Formant Correction on, now that it is stable. Whether to flip the default is a separate decision.
+- The thin stereo-width margin (45.4% vs 45%).
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against
