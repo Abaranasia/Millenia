@@ -656,6 +656,65 @@ private:
     static constexpr float levelReleaseSeconds = 0.5f;
     static constexpr float levelGainSmoothingSeconds = 0.1f;
 
+    // (c2) Hold-level rider (2026-11-15, audit fix 8). The rider above only
+    // CUTS, so a tail below the ceiling was left to whatever the loop did
+    // (swell to ~-14 dB from a quiet source, or decay to nothing at small
+    // shifts). With Infinite on the tail must hold the level it was played
+    // at. While input plays, a target T tracks a mean-|x| envelope of the
+    // OUTPUT taps (mean of the left and right sets). Once the INPUT envelope
+    // has stayed under holdInputGate for holdLatchSeconds T is latched, and
+    // a two-sided regulator steers the envelope back to T:
+    //   g = clamp (gI * (T / env)^holdProportionalExponent, holdGainMin, holdGainMax)
+    // gI is a slow log-domain integrator (holdIntegralSeconds, clamped to the
+    // same bounds = anti-windup, and not integrated upward while the ceiling
+    // cut is active) that removes the steady-state error. The proportional
+    // exponent stays below 1 because the plant is an integrator in the log
+    // domain with a one-pass delay. The boost bound is small on purpose: g
+    // scales the loop gain on every pass, a +12 dB cap would run away. Boost
+    // is scaled by (1 - freezeAmount); the cut (g < 1) is kept, and the
+    // ceiling cut (levelCeiling, on feedbackFromB) always wins over a boost.
+    // T is fixed at latch time and never re-tracks a decayed tail, so the
+    // noise floor is never amplified: boost is also off when env < T *
+    // holdBoostFloorRatio, and a dead-silent start has nothing to latch.
+    // Input resuming above the gate unlatches and T re-tracks;
+    // infiniteAmount reaching 0 resets everything. Updated every
+    // holdUpdateInterval samples (log2/exp2 are not per-sample).
+    //
+    // Why the OUTPUT taps and not feedbackFromB (which the ceiling cut uses):
+    // right after a burst the energy is unevenly spread over the lines, so
+    // output/feedbackFromB drifts by ~3 dB while the tail settles. A target
+    // captured on feedbackFromB held a tail 3.4 dB below the output level
+    // just after the latch (tank probe, weight 0.55, rho 1.0). For the same
+    // reason T is NOT clamped to levelCeiling (different units); the cut
+    // always wins in processSample()'s min() instead.
+    //
+    // Tuned 2026-11-15 on the Infinite hold probes (DattorroTankTests: 7
+    // coherent-copy cases + release/re-engage/Freeze; ShimmerReverbEngine-
+    // CascadeTests: 9 engine cases). L0 = output RMS over 2.3-3.3 s, "dev" =
+    // worst RMS deviation from L0 at 10-15/30-35/55-60 s, "win" = worst 1 s
+    // RMS window above L0 (bounds: dev 2 dB, win 3 dB):
+    //   env 0.5 s on feedbackFromB, k 0.25, latch 0.3 -> tank quiet dev -3.5 dB (see above)
+    //   env 0.15 s on output, k 0.25, latch 0.3 -> tank dev -1.7 / win 1.6; engine +0.5 st noise
+    //                                              dev +2.2 / win 5.5 (T taken at the transient peak)
+    //   same, gMax 1.2 or tau 10 s                  -> engine win still 5.2 / 5.5 (no help; tau 20 s: chord -3.4 dB)
+    //   latch 0.5, k 0.25                           -> engine only +0.5 st noise win 4.0
+    //   latch 0.8, k 0.25                           -> engine all pass; tank win 3.5 / 3.2 (T taken late, tail still swelling)
+    //   latch 0.8, k 0.5                            -> engine dev <= 1.4 / win <= 2.1; tank dev 0.2 / win 2.5
+    //   latch 0.5, k 0.5 (CHOSEN)                   -> engine dev <= 1.3 (2.5 on the +12 st chord) / win <= 2.4;
+    //                                                  tank dev <= 1.0 / win <= 1.5
+    //   latch 0.5, k 0.7                            -> same quality, chord -2.3; not worth the extra loop gain
+    static constexpr float holdInputGate = 3.1623e-4f;       // -70 dBFS
+    static constexpr float holdInputEnvelopeSeconds = 0.05f; // input follower
+    static constexpr float holdLatchSeconds = 0.5f;          // input quiet this long => latch T
+    static constexpr float holdEnvelopeSeconds = 0.15f;      // symmetric mean-|x| follower of the output taps
+    static constexpr float holdProportionalExponent = 0.5f;  // k
+    static constexpr float holdGainMin = 0.5f;
+    static constexpr float holdGainMax = 1.41f;              // ~ +3 dB
+    static constexpr float holdIntegralSeconds = 5.0f;       // tau of gI
+    static constexpr float holdBoostFloorRatio = 1.0e-3f;    // no boost when env < T * this
+    static constexpr float holdMinTarget = 1.0e-6f;          // below this there is nothing to latch
+    static constexpr int holdUpdateInterval = 32;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -759,6 +818,24 @@ private:
     float levelAttackCoeff = 0.0f;
     float levelReleaseCoeff = 0.0f;
     float levelGainCoeff = 0.0f;
+
+    // Hold-level rider state (see the hold* constants). holdRegulatorGain is
+    // exactly 1.0f whenever the rider is inactive.
+    void updateHoldRegulator (float infiniteAmount);
+    float inputEnvelope = 0.0f;
+    float holdEnvelope = 0.0f;
+    float lastOutputAbs = 0.0f;          // 0.5 * (|left| + |right|) of the previous sample
+    float holdInputCoeff = 0.0f;
+    float holdEnvelopeCoeff = 0.0f;
+    float holdIntegralStep = 0.0f;       // holdUpdateInterval / (fs * tau)
+    int holdLatchSamples = 0;
+    int holdQuietSamples = 0;
+    int holdCounter = 0;
+    bool holdLatched = false;
+    float holdTarget = 0.0f;
+    float holdLog2Target = 0.0f;
+    float holdLog2Integral = 0.0f;
+    float holdRegulatorGain = 1.0f;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the

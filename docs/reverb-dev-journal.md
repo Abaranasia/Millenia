@@ -437,6 +437,92 @@ No other golden changed. The formant-OFF path is unchanged: the default-off test
 - Ear check of Formant Correction on, now that it is stable. Whether to flip the default is a separate decision.
 - The thin stereo-width margin (45.4% vs 45%).
 
+## 2026-11-15 — Infinite holds the level it was played at (audit fix 8)
+
+**Status: code complete, unit-tested (Release and Debug full suites pass, no golden changed). Not ear-verified.** The first pass of this entry only measured the problem (equal-power blend plus Infinite: quiet sources swelled +8 to +13 dB, small shifts died). The user then decided the contract: with Infinite on the tail must HOLD THE LEVEL IT WAS PLAYED AT, not settle at a fixed ceiling, not decay, not swell. That is now implemented as a hold-level rider on top of the existing level rider.
+
+### What was built
+
+`DattorroTank::processSample()` plus `updateHoldRegulator()`. The existing rider (follower on `|feedbackFromB|`, cut above `levelCeiling` 0.25) is untouched. New, all gated on `infiniteAmount > 0`:
+
+- Target T tracks a mean-|x| follower of the OUTPUT taps (`0.5 * (|left| + |right|)`, tau 0.15 s) while the input envelope (50 ms follower on `|input|`) is above -70 dBFS.
+- Once the input has stayed under the gate for 0.5 s, T is latched. Input above the gate unlatches it and T re-tracks.
+- Latched, a regulator runs every 32 samples (log2/exp2, no per-sample pow): `g = clamp(gI * (T/env)^k, 0.5, 1.41)`. `gI` is a log-domain integrator (tau 5 s), clamped to the same bounds, not integrated upward while the ceiling cut is active. `g` becomes the target of the existing 100 ms level-gain smoother, so the ceiling cut (`min`) always wins over a boost.
+- Boost scaled by `(1 - freezeAmount)`. No boost when `env < T * 1e-3`. `env <= 1e-9` leaves `g = 1`, so a dead-silent start stays exactly 0. No latch if T < 1e-6.
+- `infiniteAmount` reaching 0 resets T, latch and integrator. Release keeps the existing 0.2 s ramp on `(levelGain - 1)`. Re-engage captures a fresh T.
+- `levelGainEffective = 1.0f + infiniteAmount * (levelGain - 1.0f)` is unchanged, so Infinite = 0 is bit-identical.
+
+Constants (all in the header with a tuning table): gate 3.16e-4, input follower 0.05 s, latch 0.5 s, output follower 0.15 s, k 0.5, gMin 0.5, gMax 1.41, integral tau 5 s, boost floor ratio 1e-3, min target 1e-6, update interval 32.
+
+### Deviations from the approved design (all measured)
+
+| Design said | Implemented | Why |
+|---|---|---|
+| Measure the slow envelope of `feedbackFromB`, T clamped to `levelCeiling` | Mean of the output taps, 0.15 s; no clamp, the ceiling cut wins in `min()` | On `feedbackFromB` the held tail sat 3.4 dB below the output level just after the latch (the output/feedbackFromB ratio drifts ~3 dB while energy spreads over the lines). Units of the ceiling are feedbackFromB's, so T cannot be clamped to it. |
+| Latch after ~300 ms | 0.5 s | At 0.3 s T was taken while the tail was still moving: engine +0.5 st noise overshot +5.5 dB and settled +2.2 dB. |
+| k ~0.25 | 0.5 | With a later latch, k 0.25 let the tank tail overshoot 3.2 to 3.5 dB after the latch. k 0.5 cut that to <= 1.5 dB. No ringing seen. |
+
+Tried and dropped: gMax 1.2 (no help), integral tau 10 s and 20 s (chord at +12 st fell to -3.4 dB), latch 0.8 (tank overshoot), k 0.7 (no better than 0.5).
+
+### Before and after
+
+Reference L0 = output RMS over 2.3-3.3 s. Values are dB relative to L0 at 10-15 / 30-35 / 55-60 s, and the worst 1 s RMS window above L0 from 3 s on. "Before" is the same test run on the DSP at HEAD (no hold rider), Release.
+
+Tank probe, coherent external copy (SafetyLimiter on the copy, 2 s noise burst, 60 s silence):
+
+| Weight | rho | Burst | Before: 10-15 / 30-35 / 55-60 s | Before: worst window | After: 10-15 / 30-35 / 55-60 s | After: worst window |
+|---|---|---|---|---|---|---|
+| 0.55 | 1.0 | 0.05 | +3.35 / +3.43 / +3.59 | +3.80 | -0.89 / -0.91 / -0.91 | +1.35 |
+| 0.55 | 0.7 | 0.05 | +5.48 / +5.57 / +5.73 | +5.82 | -0.53 / -0.54 / -0.54 | +0.85 |
+| 0.707 | 1.0 | 0.05 | +2.97 / +3.06 / +3.21 | +3.28 | -0.95 / -0.97 / -0.97 | +1.43 |
+| 0.707 | 0.7 | 0.05 | +5.72 / +5.80 / +5.96 | +6.02 | -0.49 / -0.50 / -0.50 | +0.78 |
+| 0.55 | 1.0 | 0.30 | +1.27 / +1.37 / +1.51 | +1.55 | -0.28 / -0.30 / -0.31 | +1.34 |
+| 0.55 | 0.7 | 0.30 | +1.40 / +1.49 / +1.64 | +1.70 | -0.21 / -0.21 / -0.22 | +1.19 |
+| 0.707 | 0.7 | 0.30 | +1.41 / +1.51 / +1.66 | +1.73 | -0.20 / -0.20 / -0.20 | +1.11 |
+
+Limiter fraction (last 20 s) is 0.000% after (was 0.010-0.012% on the rho 1.0 cases). Peak after 2.3 s is <= 1.47 (was <= 1.77). The burst peak (before the latch, regulator inactive) is unchanged: 2.1353 for weight 0.55 / rho 1.0 / burst 0.30, so the "peak <= 2.0" bound is asserted from 2.3 s on and the burst itself is pinned at 2.2.
+
+Engine, shift applied per block (partial weight, 2 s burst, 60 s silence):
+
+| Case | Before: 10-15 / 30-35 / 55-60 s | Before: worst window | After: 10-15 / 30-35 / 55-60 s | After: worst window | Bound |
+|---|---|---|---|---|---|
+| w0.55, +0.5 st, noise 0.05 | -17.95 / -31.60 / -73.24 | -4.24 | +1.30 / +0.95 / +0.34 | +2.44 | 2 dB |
+| w0.55, +1 st, 440 Hz sine | +2.05 / +9.47 / +7.57 | +10.98 | +0.54 / +0.26 / -0.41 | +1.24 | 2 dB |
+| w0.55, +12 st, noise 0.05 | -11.05 / +0.21 / +8.37 | +8.63 | +0.43 / +0.29 / +0.29 | +0.74 | 2 dB |
+| w0.55, +12 st, sawtooth chord | -2.89 / -10.13 / -3.16 | +0.15 | -0.12 / -2.49 / -1.66 | +0.28 | **3 dB** |
+| w0.7, +1 st, noise 0.05 | +9.95 / +8.01 / +10.76 | +14.03 | +0.50 / +0.31 / +0.72 | +1.50 | 2 dB |
+| w0.7, +12 st, 440 Hz sine | -13.62 / -28.03 / -6.99 | -0.77 | -0.81 / -0.48 / -0.68 | +0.43 | 3 dB |
+| w0.7, +0.5 st, 440 Hz sine | -29.00 / -88.20 / -108.78 | -3.40 | +0.68 / +0.51 / +0.56 | +1.21 | 2 dB |
+| w0.55, +1 st, noise 0.3 | +2.42 / +2.53 / -0.89 | +3.54 | +0.41 / +0.16 / +0.39 | +1.70 | 2 dB |
+| w0.55, +12 st, noise 0.3 | -12.00 / -1.66 / +0.50 | +0.95 | +0.22 / -0.09 / +0.02 | +0.62 | 2 dB |
+
+The bound is +-2 dB except the two +12 st tonal cases, widened to +-3 dB because the cascade makes the spectrum evolve and part of the loss is the Shimmer Tone alias cap, which is not level-proportional. Measured, only the chord needs it (-2.49 dB at 30-35 s); the +12 st sine (w0.7) is within 0.81 dB and could go back to +-2 dB. Peak is <= 1.75 everywhere.
+
+### Dedicated cases
+
+- Release mid-hold (tank): max sample step 0.91 during release vs 1.14 while held (no click); tail falls from -13.9 dB to -53.8 dB by 18-20 s. Engine: 0.075 vs 0.131; -21.4 dB to -91.8 dB.
+- Re-engage (tank): after a release at 5 s and a decay to -30.1 dB, re-engaging at 9 s holds -29.7 / -29.7 dB (20-25 / 30-35 s), a NEW target 16.5 dB below the first (L0 -13.2 dB).
+- Infinite + Freeze 1.0: tank peak 0.49; engine (Freeze engaged at 3 s) peak 0.38, RMS -22.5 dB to -26.0 dB. Both bounded, boost off.
+- Dead silence: tank (30 s) and engine (20 s, +1 st) output is exactly 0.
+- Existing tests: T3 (tank, burst then silence) now holds, +0.19 dB over 28 s (was -0.30 dB); its bound was tightened from +-3 dB to +-1 dB. Layering (second burst raises level) +1.67 dB (was +2.34 dB). T2 (180 s noise, peak 1.6877) and T5 (engine 120 s: 1.5982 / 1.7186, -10.23 / -10.17 dB; chord 180 s: 1.3263) are bit-for-bit the same numbers as at HEAD, because the regulator never latches while input plays.
+- Cascade T4 (near-unity guard, 0 / +0.5 / -0.5 st): peaks 1.5326 / 1.7683 / 1.6761, silent after 40 s. It now truly runs at those shifts since its pitch is pushed per block 0; no assertion changed.
+
+### Golden hashes
+
+ShimmerReverbEngine, Cascade T6, FreezeCrossfade, Space and DattorroTank "Infinite OFF is bit-identical" all unchanged and passing.
+
+### Surprises
+
+- `ShimmerReverbEngine::prepare()` re-seeds `pitchShiftSemitones` to +12 st. A `setPitchShiftSemitones()` made in a `runSignal` setup lambda runs before `prepare()` and is discarded; the tests push shift (and Freeze) from the first `perBlock` call.
+- Freeze at block 0 captures an empty loop and the engine output is exactly 0, which tests nothing; the Freeze case engages at 3 s.
+- Without the regulator the tank swells even at weight 0.55 / rho 1.0 (+3.4 dB): the "still building" 3-5 s window of the first measurement was real, not an artifact. L0 at 2.3-3.3 s is itself mid-swell; the held level is the level at the latch, which sits between the post-burst peak and the dip (engine +0.5 st dips -3 dB at 3-5 s before recovering).
+- Boost instability: none observed. gMax 1.41 was never the limiting factor.
+
+### Still open
+
+- Whether a held tail that sits slightly below the post-burst peak (about -1 dB) is what the user wants by ear.
+- Burst peak 2.1353 in the loud tank probe (weight 0.55, rho 1.0): present before this change, the regulator is inactive while input plays.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

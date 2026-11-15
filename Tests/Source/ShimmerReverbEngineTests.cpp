@@ -3987,6 +3987,215 @@ public:
         return [random] (int) { return random->nextFloat() * 0.6f - 0.3f; };
     }
 
+    void runInfiniteHoldTests()
+    {
+        // Audit fix 8 (docs/project-audit-2026-11.md, 2026-11-15): Infinite
+        // with a PARTIAL shimmer weight and a small-to-moderate shift. With
+        // Infinite on the loop gain is pinned near 1.0 and the equal-power law
+        // gives a per-pass amplitude plainWeight + shimmerWeight (up to
+        // ~1.385 at weight 0.55) when the shifted copy is coherent with the
+        // tank's own feedback, which is plausible at 0.5-1 st; only the level
+        // rider and SafetyLimiter bound it. Existing Infinite coverage uses
+        // weight 1 (plainWeight 0) or the tank alone. Reworked to the HOLD
+        // criterion (2026-11-15, DattorroTank's hold-level rider): a 2 s
+        // burst, then 60 s of silence; L0 = output RMS over 2.3-3.3 s (just
+        // after the rider latches; 3-5 s is still building), and the RMS at
+        // 10-15, 30-35 and 55-60 s must stay within +-2 dB of L0 (+-3 dB for
+        // the +12 st sine/chord, where the cascade makes the spectrum evolve
+        // and the cap-and-alias losses are not level-proportional). No 1 s
+        // RMS window may exceed L0 + 3 dB, peak <= 2.0. (The limiter fraction
+        // is not observable here; DattorroTankTests probes it at tank level.)
+        {
+            // source: 0 noise 0.05, 1 sine, 2 chord, 3 noise 0.3 (loud)
+            struct InfiniteCase { const char* name; float weight; float semitones; int source; double tolDb; };
+            const InfiniteCase cases[] = {
+                { "weight 0.55, +0.5 st, noise 0.05", 0.55f, 0.5f, 0, 2.0 },
+                { "weight 0.55, +1 st, 440 Hz sine",  0.55f, 1.0f, 1, 2.0 },
+                { "weight 0.55, +12 st, noise 0.05",  0.55f, 12.0f, 0, 2.0 },
+                { "weight 0.55, +12 st, sawtooth chord", 0.55f, 12.0f, 2, 3.0 },
+                { "weight 0.7, +1 st, noise 0.05",    0.7f, 1.0f, 0, 2.0 },
+                { "weight 0.7, +12 st, 440 Hz sine",  0.7f, 12.0f, 1, 3.0 },
+                { "weight 0.7, +0.5 st, 440 Hz sine", 0.7f, 0.5f, 1, 2.0 },
+                { "weight 0.55, +1 st, noise 0.3 (loud)",  0.55f, 1.0f, 3, 2.0 },
+                { "weight 0.55, +12 st, noise 0.3 (loud)", 0.55f, 12.0f, 3, 2.0 },
+            };
+
+            for (const auto& c : cases)
+            {
+                beginTest (juce::String ("Infinite holds its level, partial shimmer weight (") + c.name + "): 2 s burst then 60 s silence, within +-"
+                           + juce::String (c.tolDb, 0) + " dB of L0");
+
+                std::function<float (int)> source;
+                if (c.source == 0 || c.source == 3)
+                {
+                    auto random = std::make_shared<juce::Random> (8080);
+                    const float amp = c.source == 0 ? 0.05f : 0.3f;
+                    source = [random, amp] (int) { return (random->nextFloat() * 2.0f - 1.0f) * amp; };
+                }
+                else if (c.source == 1)
+                {
+                    source = [] (int n) { return 0.05f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * n / sampleRate); };
+                }
+                else
+                {
+                    source = [] (int n)
+                    {
+                        float sum = 0.0f;
+                        for (double hz : { 130.81, 164.81, 196.00 })
+                            sum += 0.1f * (float) (2.0 * std::fmod (hz * n / sampleRate, 1.0) - 1.0);
+                        return sum;
+                    };
+                }
+
+                // The shift is pushed from the first perBlock call, NOT from the
+                // setup lambda: prepare() re-seeds pitchShiftSemitones to its
+                // +12 st default, so a setPitchShiftSemitones() made before
+                // prepare() is silently discarded (measured 2026-11-15: seven
+                // "different shift" runs produced bit-identical output).
+                const float weight = c.weight, semitones = c.semitones;
+                const auto out = runSignal ([weight] (ShimmerReverbEngine& e)
+                                            {
+                                                setShimmerWeight (e, weight, false);
+                                                e.setInfiniteAmount (1.0f);
+                                            },
+                                            62.0, source, (int) (2.0 * sampleRate),
+                                            [semitones] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (semitones);
+                                            });
+                const auto stats = SizeTests::peakOf (out);
+                float peakAfter5s = 0.0f;
+                for (int second = 5; second < 62; ++second)
+                    peakAfter5s = juce::jmax (peakAfter5s, peakInSecond (out, second));
+                const double l0 = rmsDb (out, 2.3, 3.3);
+                const double d10 = rmsDb (out, 10.0, 15.0) - l0, d30 = rmsDb (out, 30.0, 35.0) - l0, d55 = rmsDb (out, 55.0, 60.0) - l0;
+                double maxWindow = -1.0e9;
+                for (int s = 3; s + 1 <= 61; ++s)
+                    maxWindow = juce::jmax (maxWindow, rmsDb (out, (double) s, (double) s + 1.0) - l0);
+
+                logMessage (juce::String ("MEASURE engine hold, ") + c.name + ": L0(2.3-3.3s)=" + juce::String (l0, 2)
+                            + " dB, vs L0: 10-15s=" + juce::String (d10, 2) + " 30-35s=" + juce::String (d30, 2) + " 55-60s=" + juce::String (d55, 2)
+                            + " dB, max 1 s window=" + juce::String (maxWindow, 2) + " dB, peak=" + juce::String (stats.peak, 4)
+                            + ", peakAfter5s=" + juce::String (peakAfter5s, 4));
+
+                expectEquals (stats.numNonFinite, 0, "Non-finite output");
+                expect (stats.peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (stats.peak, 4));
+                expect (l0 > -60.0, "Tail already near-silent at 2.3-3.3 s: " + juce::String (l0, 2) + " dB");
+                expect (std::abs (d10) <= c.tolDb, "10-15 s RMS off L0 by " + juce::String (d10, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (std::abs (d30) <= c.tolDb, "30-35 s RMS off L0 by " + juce::String (d30, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (std::abs (d55) <= c.tolDb, "55-60 s RMS off L0 by " + juce::String (d55, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (maxWindow <= 3.0, "A 1 s RMS window exceeded L0 + 3 dB (" + juce::String (maxWindow, 2) + " dB)");
+            }
+
+            // Engine-level dedicated cases: dead silence, Freeze, release.
+            auto noise005 = [] (juce::int64 seed)
+            {
+                auto random = std::make_shared<juce::Random> (seed);
+                return std::function<float (int)> ([random] (int) { return random->nextFloat() * 0.1f - 0.05f; });
+            };
+            auto infiniteSetup = [] (float freeze)
+            {
+                return [freeze] (ShimmerReverbEngine& e)
+                {
+                    setShimmerWeight (e, 0.55f, false);
+                    e.setInfiniteAmount (1.0f);
+                    e.setFreezeAmount (freeze);
+                };
+            };
+            auto pitchAtBlock0 = [] (float semitones)
+            {
+                return [semitones] (ShimmerReverbEngine& e, int block)
+                {
+                    if (block == 0)
+                        e.setPitchShiftSemitones (semitones);
+                };
+            };
+
+            beginTest ("Infinite from dead silence (engine, +1 st): output stays exactly 0");
+            {
+                const auto out = runSignal (infiniteSetup (0.0f), 20.0, [] (int) { return 0.0f; }, 0, pitchAtBlock0 (1.0f));
+                size_t nonZero = 0;
+                for (size_t i = 0; i < out.left.size(); ++i)
+                    if (out.left[i] != 0.0f || out.right[i] != 0.0f)
+                        ++nonZero;
+                expectEquals ((int) nonZero, 0, "Dead-silent start produced non-zero output samples");
+            }
+
+            beginTest ("Infinite + Freeze 1.0 engaged at 3 s (engine, +12 st, noise 0.05): finite and bounded, peak <= 2.0");
+            {
+                // Freeze engages at 3 s, once the burst (0-2 s) is in the loop:
+                // freezing at block 0 captures an empty loop and the output is
+                // exactly 0 (measured), which would test nothing.
+                const int freezeBlock = (int) (3.0 * sampleRate / blockSize);
+                const auto out = runSignal (infiniteSetup (0.0f), 62.0, noise005 (8081), (int) (2.0 * sampleRate),
+                                            [freezeBlock] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (12.0f);
+                                                if (block == freezeBlock)
+                                                    e.setFreezeAmount (1.0f);
+                                            });
+                const auto stats = SizeTests::peakOf (out);
+                logMessage ("MEASURE engine Infinite+Freeze: peak=" + juce::String (stats.peak, 4) + ", RMS dB 2.3-3.3s=" + juce::String (rmsDb (out, 2.3, 3.3), 2)
+                            + ", 55-60s=" + juce::String (rmsDb (out, 55.0, 60.0), 2));
+                expectEquals (stats.numNonFinite, 0, "Non-finite output");
+                expect (stats.peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (stats.peak, 4));
+            }
+
+            beginTest ("Infinite release mid-hold (engine, +1 st): decays, no click (no sample step above the held level's own)");
+            {
+                const int releaseBlock = (int) (10.0 * sampleRate / blockSize);
+                const auto out = runSignal (infiniteSetup (0.0f), 24.0, noise005 (8082), (int) (2.0 * sampleRate),
+                                            [releaseBlock] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (1.0f);
+                                                if (block == releaseBlock)
+                                                    e.setInfiniteAmount (0.0f);
+                                            });
+                auto maxStep = [&out] (double from, double to)
+                {
+                    float m = 0.0f;
+                    for (size_t i = (size_t) (from * sampleRate); i < (size_t) (to * sampleRate); ++i)
+                        m = juce::jmax (m, std::abs (out.left[i] - out.left[i - 1]), std::abs (out.right[i] - out.right[i - 1]));
+                    return m;
+                };
+                const float heldStep = maxStep (8.0, 10.0), releaseStep = maxStep (10.0, 12.0);
+                const double heldDb = rmsDb (out, 8.0, 10.0), decayedDb = rmsDb (out, 20.0, 24.0);
+                logMessage ("MEASURE engine release: max step held=" + juce::String (heldStep, 5) + ", during release=" + juce::String (releaseStep, 5)
+                            + "; RMS held=" + juce::String (heldDb, 2) + " dB, 20-24 s=" + juce::String (decayedDb, 2) + " dB");
+                expect (releaseStep <= heldStep * 1.25f, "Release produced a click: max step " + juce::String (releaseStep, 5)
+                                                             + " vs held " + juce::String (heldStep, 5));
+                expect (decayedDb < heldDb - 6.0, "Tail did not decay after release (" + juce::String (decayedDb - heldDb, 2) + " dB)");
+            }
+
+            // Measurement-only control, no assertions: the same run on the
+            // legacy path (linear law, weight 0.55) isolates how much of any
+            // swell above comes from the equal-power law rather than from
+            // Infinite's level rider settling a quiet source.
+            beginTest ("Infinite + partial shimmer weight: legacy linear-law control (weight 0.55, +12 st, noise 0.05), measurement only");
+            {
+                auto random = std::make_shared<juce::Random> (8080);
+                const auto out = runSignal ([] (ShimmerReverbEngine& e)
+                                            {
+                                                setShimmerWeight (e, 0.55f, true);
+                                                e.setInfiniteAmount (1.0f);
+                                            },
+                                            62.0, [random] (int) { return random->nextFloat() * 0.1f - 0.05f; }, (int) (2.0 * sampleRate),
+                                            [] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (12.0f);
+                                            });
+                logMessage ("MEASURE engine legacy control, weight 0.55, +12 st, noise 0.05: RMS dB 3-5s=" + juce::String (rmsDb (out, 3.0, 5.0), 2)
+                            + ", 10-15s=" + juce::String (rmsDb (out, 10.0, 15.0), 2) + ", 25-30s=" + juce::String (rmsDb (out, 25.0, 30.0), 2)
+                            + ", 55-60s=" + juce::String (rmsDb (out, 55.0, 60.0), 2) + ", peak=" + juce::String (SizeTests::peakOf (out).peak, 4));
+                expectEquals (SizeTests::peakOf (out).numNonFinite, 0, "Non-finite output");
+            }
+        }
+    }
+
     void runTest() override
     {
         beginTest ("T6: the legacy path reproduces the pre-slice golden hashes bit-for-bit (old default Sustain 0.85)");
@@ -4301,6 +4510,8 @@ public:
             expectEquals (stats.numNonFinite, 0, "Non-finite output under harmonic stress");
             expect (stats.peak <= 10.0f, "Harmonic stress exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
         }
+
+        runInfiniteHoldTests();
     }
 };
 
