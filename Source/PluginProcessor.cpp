@@ -397,16 +397,13 @@ void MilleniaAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void MilleniaAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // hasType() is checked against apvts.state.getType(), i.e. the exact
-    // "PARAMETERS" identifier passed to the apvts constructor above -- a
-    // corrupt/foreign state blob (wrong root tag) is rejected rather than
-    // blindly loaded via replaceState().
+    // StateSchema::applyState() rejects a foreign root tag (checked against
+    // apvts.state.getType(), the "PARAMETERS" identifier passed to the apvts
+    // constructor) and any state stamped with a NEWER schemaVersion than this
+    // build knows, leaving current state untouched. Older/unversioned states
+    // load as-is (no value migration, by decision).
     if (auto xmlState = getXmlFromBinary (data, sizeInBytes))
-    {
-        auto state = juce::ValueTree::fromXml (*xmlState);
-        if (state.isValid() && state.hasType (apvts.state.getType()))
-            apvts.replaceState (state);
-    }
+        StateSchema::applyState (apvts, juce::ValueTree::fromXml (*xmlState));
 }
 
 //==============================================================================

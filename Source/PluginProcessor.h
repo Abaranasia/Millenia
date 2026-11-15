@@ -11,6 +11,7 @@
 #include <JuceHeader.h>
 #include "DSP/ShimmerReverbEngine.h"
 #include "Parameters.h"
+#include "StateSchema.h"
 
 //==============================================================================
 /**
@@ -173,11 +174,12 @@ private:
     // processBlock()'s comment).
     juce::SmoothedValue<float> smoothedFreeze;
 
-    // Schema v1 -- the first version ever; no migration logic exists yet.
-    // A future schema bump needs an explicit migration branch in
-    // setStateInformation() that reads the OLD version's property layout
-    // before calling apvts.replaceState(), not a silent overwrite.
-    static constexpr int currentSchemaVersion = 1;
+    // Schema v1 -- the first version ever (see StateSchema.h). The
+    // "schemaVersion" property is read on load: a state stamped with a NEWER
+    // version than this is rejected. Older/unversioned states load without
+    // value migration. A future bump must add an explicit migration step
+    // (reading the OLD layout) before apvts.replaceState().
+    static constexpr int currentSchemaVersion = StateSchema::currentVersion;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)
 };
