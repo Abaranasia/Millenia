@@ -22,6 +22,8 @@
             file="Source/LoopCaptureTests.cpp"/>
       <FILE id="tstSST" name="StateSchemaTests.cpp" compile="1" resource="0"
             file="Source/StateSchemaTests.cpp"/>
+      <FILE id="tstEPS" name="EngineParameterSmoothingTests.cpp" compile="1"
+            resource="0" file="Source/EngineParameterSmoothingTests.cpp"/>
       <GROUP id="{3D4E5F60-7182-93A4-B5C6-D7E8F9011223}" name="App">
         <FILE id="tstPRM" name="Parameters.cpp" compile="1" resource="0" file="../Source/Parameters.cpp"/>
         <FILE id="tstPRH" name="Parameters.h" compile="0" resource="0" file="../Source/Parameters.h"/>

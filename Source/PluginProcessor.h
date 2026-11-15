@@ -10,6 +10,7 @@
 
 #include <JuceHeader.h>
 #include "DSP/ShimmerReverbEngine.h"
+#include "EngineParameterSmoothing.h"
 #include "Parameters.h"
 #include "StateSchema.h"
 
@@ -152,27 +153,19 @@ private:
     std::atomic<float>* sizeParam = nullptr;
     std::atomic<float>* modulationParam = nullptr;
 
-    // Phase 5: one smoother per continuous parameter, driven from the cached
-    // atomics above and .skip()'d once per block in processBlock() before
-    // pushing into shimmerReverbEngine -- see that method's comment for why
-    // bypass has no smoother of its own (it drives smoothedMix instead).
-    juce::SmoothedValue<float> smoothedPitchShift;
-    juce::SmoothedValue<float> smoothedDecay;
-    juce::SmoothedValue<float> smoothedShimmerAmount;
-    juce::SmoothedValue<float> smoothedShimmerFeedback;
-    juce::SmoothedValue<float> smoothedDamping;
-    juce::SmoothedValue<float> smoothedWidth;
-    juce::SmoothedValue<float> smoothedMix;
-    juce::SmoothedValue<float> smoothedLowCut;
-    juce::SmoothedValue<float> smoothedHighCut;
-    juce::SmoothedValue<float> smoothedShimmerTone;
+    // Phase 5 / audit fix 6: one 50 ms linear smoother per continuous
+    // parameter (pitch shift, decay, shimmer amount/feedback, damping, width,
+    // mix, low/high cut, shimmer tone, and Freeze -- Phase 9: even a hard 0->1
+    // jump on decayGain/dry-mute would click), now owned by
+    // EngineParameterSmoothing, which advances them in fixed 32-sample chunks
+    // inside the host block so the zipper step does not scale with the host
+    // block size. Bypass has no smoother of its own: it drives the mix
+    // smoother toward 0 (see processBlock()'s comment).
+    EngineParameterSmoothing engineSmoothing;
 
-    // Phase 9: Freeze gets the exact same click-free smoothing treatment as
-    // every other continuous parameter here -- even a hard 0->1 jump on
-    // decayGain/dry-mute inside the tank would click, same reasoning as
-    // bypass driving smoothedMix instead of a hard switch (see
-    // processBlock()'s comment).
-    juce::SmoothedValue<float> smoothedFreeze;
+    // Builds the smoothing targets from the cached atomics (bypass folded
+    // into mix). Audio thread safe: atomic loads only.
+    EngineParameterSmoothing::Targets readSmoothingTargets() const noexcept;
 
     // Schema v1 -- the first version ever (see StateSchema.h). The
     // "schemaVersion" property is read on load: a state stamped with a NEWER
