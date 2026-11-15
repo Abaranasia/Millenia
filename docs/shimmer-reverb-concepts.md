@@ -67,6 +67,7 @@ Real-time pitch shifting inside a feedback loop has two competing approaches:
 - Freeverb (public domain reference tank) — [source](https://github.com/sinshu/freeverb), [walkthrough](https://ccrma.stanford.edu/~jos/pasp/Freeverb.html)
 - Chowdhury-DSP/chowdsp_utils — JUCE module with a Dattorro-style FDN reverb and a ring-buffer pitch shifter — [github.com/Chowdhury-DSP/chowdsp_utils](https://github.com/Chowdhury-DSP/chowdsp_utils)
 - Airwindows `Galactic` (feedback reverb + quadrature pitch-shift stereo widening, shimmer-adjacent) — [github.com/airwindows/airwindows](https://github.com/airwindows/airwindows)
+- [`reverb-design-research-notes.md`](./reverb-design-research-notes.md) — annotated bibliography of the foundational reverb papers (Schroeder, Gerzon, Moorer, Jot, Gardner, Dattorro, ...) plus the Eno/Lanois shimmer origin story
 - ADC21, Geraint Luff, "Let's Write a Reverb" — [talk](https://www.youtube.com/watch?v=6ZK2Goiyotk), [code](https://github.com/Signalsmith-Audio/reverb-example-code)
 - ADC22, Geraint Luff, "Four Ways To Write A Pitch-Shifter" — [talk](https://www.youtube.com/watch?v=fJUmmcGKZMI), [code](https://github.com/Signalsmith-Audio/pitch-time-example-code)
 - JUCE tutorial: [DSP module introduction](https://docs.juce.com/master/tutorial_dsp_introduction.html), [delay lines & feedback](https://docs.juce.com/master/tutorial_dsp_delay_line.html)

@@ -5,6 +5,7 @@ This is the phased, checklist-level build plan for Millenia's shimmer reverb DSP
 - [`shimmer-reverb-concepts.md`](./shimmer-reverb-concepts.md) — conceptual guide, tank/shifter rationale, roadmap sketch
 - [`../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md`](../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md) — JUCE class mapping, starting parameter values, pitfall→mitigation table, real-time safety rules
 - [`shimmer-reverb-open-source-survey.md`](./shimmer-reverb-open-source-survey.md) — eight external reference implementations, used here only as inspiration/cross-checks, not as a reason to change topology
+- [`reverb-design-research-notes.md`](./reverb-design-research-notes.md) — academic-paper bibliography and the Eno/Lanois shimmer origin story, background reading only
 
 **Committed, non-negotiable for this plan**: Dattorro plate tank topology, dual-delay-line crossfade pitch shifter inserted at the tank's feedback junction, bipolar shift range −24..+24 semitones, hand-written `juce::dsp::DelayLine` + manual read/write (never `juce::dsp::ProcessorChain`) for anything inside the feedback loop.
 
@@ -248,3 +249,4 @@ These are genuinely unresolved by the three source docs; flagging them honestly 
 - [`shimmer-reverb-concepts.md`](./shimmer-reverb-concepts.md)
 - [`../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md`](../.claude/skills/juce-plugin-dev/references/shimmer-reverb-architecture.md)
 - [`shimmer-reverb-open-source-survey.md`](./shimmer-reverb-open-source-survey.md)
+- [`reverb-design-research-notes.md`](./reverb-design-research-notes.md)
