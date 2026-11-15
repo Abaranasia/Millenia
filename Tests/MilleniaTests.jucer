@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<JUCERPROJECT id="MTst01" name="MilleniaTests" projectType="consoleapp" useAppConfig="0"
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" companyName="Altera"
+              companyWebsite="www.alteraorbe.com">
+  <MAINGROUP id="tGrpMn" name="MilleniaTests">
+    <GROUP id="{1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901}" name="Source">
+      <FILE id="tstMain" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
+      <FILE id="tstDTT" name="DattorroTankTests.cpp" compile="1"
+            resource="0" file="Source/DattorroTankTests.cpp"/>
+      <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
+        <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
+              file="../Source/DSP/DattorroTank.cpp"/>
+        <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0"
+              file="../Source/DSP/DattorroTank.h"/>
+      </GROUP>
+    </GROUP>
+  </MAINGROUP>
+  <MODULES>
+    <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_audio_formats" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_core" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_dsp" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+  </MODULES>
+  <EXPORTFORMATS>
+    <VS2026 targetFolder="Builds/VisualStudio2026">
+      <CONFIGURATIONS>
+        <CONFIGURATION isDebug="1" name="Debug" targetName="MilleniaTests"/>
+        <CONFIGURATION isDebug="0" name="Release" targetName="MilleniaTests"/>
+      </CONFIGURATIONS>
+      <MODULEPATHS>
+        <MODULEPATH id="juce_audio_basics" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_audio_formats" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_core" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_dsp" path="../../Projucer/modules"/>
+      </MODULEPATHS>
+    </VS2026>
+  </EXPORTFORMATS>
+  <JUCEOPTIONS/>
+</JUCERPROJECT>

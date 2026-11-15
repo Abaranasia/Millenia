@@ -19,7 +19,7 @@ Do not build the feedback loop with `juce::dsp::ProcessorChain` — it is strict
 
 | Stage | JUCE class | Notes |
 |---|---|---|
-| Input/tank diffusion allpass | `juce::dsp::IIR::Filter<float>` + `IIR::Coefficients<float>::makeAllPass()` | Transposed Direct Form II; `prepare()` before use, coefficient changes not auto-smoothed |
+| Input/tank diffusion allpass | Hand-rolled Schroeder allpass: `juce::dsp::DelayLine<float, Lagrange3rd>` + manual feedback/feedforward (`y[n] = -g*x[n] + delayed; delayLine.pushSample(x[n] + g*delayed)`) | **Not** `IIR::Filter::makeAllPass()` — that's a frequency-domain biquad (phase shift, no meaningful time delay) and cannot produce Dattorro's diffusion (spreading a transient across a 100–900 sample delay). Same structure as `ScratchSchroederTank::processAllpass` |
 | Tank delay lines | `juce::dsp::DelayLine<float, DelayLineInterpolationTypes::Lagrange3rd>` | Lagrange3rd required — modulation-safe, low coloration; `Linear` is cheaper but dulls the signal, `Thiran` is phase-inaccurate |
 | Pitch shifter | Hand-rolled: own circular buffer + two read pointers at rate = pitch ratio, crossfade near wrap discontinuities | `juce::LagrangeInterpolator`/`CatmullRomInterpolator` can supply the fractional-read interpolation; reset interpolator state on discontinuities |
 | Damping filter (in feedback path) | `juce::dsp::IIR::Filter<float>` one-pole low-pass | Placed inside the loop, not just at output, to shape the decaying spectrum like Dattorro's design |
