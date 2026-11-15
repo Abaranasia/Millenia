@@ -29,6 +29,8 @@
               file="Source/DSP/DCBlocker.h"/>
         <FILE id="dspLIM1" name="SafetyLimiter.h" compile="0" resource="0"
               file="Source/DSP/SafetyLimiter.h"/>
+        <FILE id="dspLIM2" name="SafetyLimiter.cpp" compile="1" resource="0"
+              file="Source/DSP/SafetyLimiter.cpp"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>

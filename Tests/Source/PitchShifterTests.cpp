@@ -132,6 +132,48 @@ public:
                                                  + juce::String (maxRms) + ") -- check the two voices' grainPhase "
                                                  "offset in reset()");
         }
+
+        beginTest ("Quadrature output stays finite and bounded at extreme and default shift values");
+        {
+            // Mirrors the boundedness test above, but also checks
+            // getQuadratureOutput() -- the Phase 4 decorrelation voice pair
+            // (C/D) reads the exact same delayLine at voiceDelaySamples(0.25)/
+            // (0.75), which the header's baseDelayGrainMultiple/
+            // maxDelayExtraGrainMultiple margin comments claim already cover
+            // (derived for phase spanning the full [0,1] range, not just the
+            // 0.0/0.5 phases the primary pair happens to use) -- this test is
+            // what would catch it if that claim were wrong.
+            constexpr double sampleRate = 44100.0;
+            constexpr int numSamples = (int) (sampleRate * 5); // ~5s per shift value
+
+            for (float semitones : { -24.0f, 12.0f, 24.0f })
+            {
+                PitchShifter shifter;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                shifter.prepare (spec);
+                shifter.reset();
+                shifter.setPitchShiftSemitones (semitones);
+
+                juce::Random random (98765 + (int) semitones);
+
+                float maxPeak = 0.0f;
+
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    float input = random.nextFloat() * 0.6f - 0.3f;
+                    shifter.processSample (input);
+                    float quadrature = shifter.getQuadratureOutput();
+
+                    expect (std::isfinite (quadrature), "Non-finite quadrature output at semitones=" + juce::String (semitones)
+                                                              + ", sample " + juce::String (i));
+                    maxPeak = juce::jmax (maxPeak, std::abs (quadrature));
+                }
+
+                expect (maxPeak <= 10.0f, "Quadrature output exceeded safety bound of 10.0 at semitones=" + juce::String (semitones)
+                                               + " (peak: " + juce::String (maxPeak) + ")");
+            }
+        }
+
     }
 };
 
