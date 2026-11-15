@@ -8,6 +8,10 @@ void PitchShifter::prepare (const juce::dsp::ProcessSpec& spec)
     grainLengthSamples = grainLengthMs * 0.001f * (float) spec.sampleRate;
     baseDelaySamples = grainLengthSamples * baseDelayGrainMultiple;
 
+    grainLengthSamplesInt = juce::roundToInt (grainLengthSamples);
+    hopSamples = juce::jmax (1, juce::roundToInt (grainLengthSamples * (1.0f - crossfadeFraction)));
+    crossfadeSamplesInt = juce::jmax (1, juce::roundToInt (grainLengthSamples * crossfadeFraction));
+
     auto neededSamples = baseDelaySamples + grainLengthSamples * maxDelayExtraGrainMultiple;
     delayLine.setMaximumDelayInSamples (juce::roundToInt (neededSamples) + 1);
 
@@ -30,18 +34,24 @@ void PitchShifter::reset()
     // processSample() still has a valid value to use after this call.
     delayLine.reset();
 
-    // Primary group: 4 equally-spaced phases 0.0/0.25/0.5/0.75 -- see
-    // PitchShifter.h's class-level comment for why 4 equally-spaced phases
-    // (any starting point) always satisfy the COLA constant-sum identity.
-    for (int k = 0; k < numVoicesPerGroup; ++k)
-        primaryVoices[(size_t) k].grainPhase = (float) k * 0.25f;
+    for (auto& grain : primaryGrains)
+        grain = Grain {};
 
-    // Quadrature group: same 4 equally-spaced phases, offset by 0.125 (half
-    // of the primary group's own 0.25 inter-voice spacing) -- see the
-    // class-level comment for why this generalizes the old 0.25 quadrature
-    // offset from the old 2-voice primary pair's 0.5 spacing.
-    for (int k = 0; k < numVoicesPerGroup; ++k)
-        quadratureVoices[(size_t) k].grainPhase = 0.125f + (float) k * 0.25f;
+    for (auto& grain : quadratureGrains)
+        grain = Grain {};
+
+    primaryNextSlot = 0;
+    quadratureNextSlot = 0;
+
+    // Primary pool launches its first grain on the very first
+    // processSample() call.
+    primarySamplesUntilLaunch = 0;
+
+    // Quadrature pool is staggered by half a hop relative to primary -- this
+    // is what keeps the quadrature output decorrelated from the primary
+    // output despite reading the same shared delay line (see the
+    // class-level comment's "grain-pool layout" section).
+    quadratureSamplesUntilLaunch = hopSamples / 2;
 }
 
 void PitchShifter::setPitchShiftSemitones (float semitones)
@@ -49,14 +59,21 @@ void PitchShifter::setPitchShiftSemitones (float semitones)
     pitchRatio = std::pow (2.0f, semitones / 12.0f);
 }
 
-float PitchShifter::voiceDelaySamples (float phase) const noexcept
+float PitchShifter::grainDelaySamples (int elapsed) const noexcept
 {
-    return baseDelaySamples - phase * grainLengthSamples * (pitchRatio - 1.0f);
+    return baseDelaySamples - (float) elapsed * (pitchRatio - 1.0f);
 }
 
-float PitchShifter::hannEnvelope (float phase) noexcept
+float PitchShifter::grainWindow (int elapsed) const noexcept
 {
-    return 0.5f * (1.0f - std::cos (2.0f * juce::MathConstants<float>::pi * phase));
+    if (elapsed < crossfadeSamplesInt)
+        return 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * (float) elapsed / (float) crossfadeSamplesInt));
+
+    const int samplesFromEnd = grainLengthSamplesInt - elapsed;
+    if (samplesFromEnd < crossfadeSamplesInt)
+        return 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * (float) samplesFromEnd / (float) crossfadeSamplesInt));
+
+    return 1.0f;
 }
 
 float PitchShifter::processSample (float input)
@@ -66,68 +83,96 @@ float PitchShifter::processSample (float input)
     // advancing in lockstep (JUCE's DelayLine assumes this one push/pop
     // pair per sample -- see juce_DelayLine.cpp). The pop's return value is
     // discarded; its only purpose is that advancement. The explicit-offset
-    // peeks below (8 of them, one per voice across both groups) ride on top
-    // of that steadily-advancing base, the same mechanism
-    // DattorroTank::peekTap() already relies on.
+    // peeks below ride on top of that steadily-advancing base, the same
+    // mechanism DattorroTank::peekTap() already relies on.
     delayLine.pushSample (0, input);
     delayLine.popSample (0);
 
-    // No interpolator-reset step is needed here at any voice's grain wrap:
+    // No interpolator-reset step is needed here at any grain's launch:
     // DelayLine<Lagrange3rd>'s interpolation carries no history/state
     // between calls (unlike e.g. Thiran) -- each read is a pure function of
     // the *current* delay value and the four nearby buffer samples (see
-    // juce_DelayLine.cpp's interpolateSample(), Lagrange3rd branch). Jumping
-    // a voice's delay value discontinuously between samples therefore
-    // produces a perfectly valid interpolated read every time; the
-    // content-discontinuity that jump causes is masked by the Hann envelope
-    // below being exactly zero at that same instant.
+    // juce_DelayLine.cpp's interpolateSample(), Lagrange3rd branch).
 
-    // Primary group: 4 voices, same role as the old voiceA/voiceB pair.
-    // Weighted sum is normalized by 2.0/numVoicesPerGroup = 0.5 to restore
-    // unity gain -- see PitchShifter.h's class-level comment for the full
-    // COLA derivation and an explicit warning about why this factor matters.
-    float primarySum = 0.0f;
-    for (int k = 0; k < numVoicesPerGroup; ++k)
+    // Primary pool: launch on schedule, accumulate the weighted sum over
+    // every currently-active grain, then normalize by the live weight sum
+    // (see the class-level comment for why this per-sample normalization
+    // replaces the old fixed COLA-derived constant).
+    if (primarySamplesUntilLaunch <= 0)
     {
-        const float phase = primaryVoices[(size_t) k].grainPhase;
-        const float delaySamples = voiceDelaySamples (phase);
+        primaryGrains[(size_t) primaryNextSlot] = { true, 0 };
+        primaryNextSlot = (primaryNextSlot + 1) % maxConcurrentGrainsPerGroup;
+        primarySamplesUntilLaunch = hopSamples;
+    }
+
+    float primaryWeightedSum = 0.0f;
+    float primaryWeightSum = 0.0f;
+
+    for (auto& grain : primaryGrains)
+    {
+        if (! grain.active)
+            continue;
+
+        const float delaySamples = grainDelaySamples (grain.age);
         const float sample = delayLine.popSample (0, delaySamples, false);
-        primarySum += sample * hannEnvelope (phase);
-    }
-    const float output = 0.5f * primarySum; // 2.0f / numVoicesPerGroup, N=4
+        const float weight = grainWindow (grain.age);
 
-    // Quadrature group: same Hann-crossfade and normalization math as the
-    // primary group, just applied to the phase-offset voices that feed
-    // ShimmerReverbEngine's stereo-width path -- reads the exact same
-    // delayLine at this same instant (the push/pop above already advanced
-    // the shared line for this sample, nothing extra needed here).
-    float quadratureSum = 0.0f;
-    for (int k = 0; k < numVoicesPerGroup; ++k)
+        primaryWeightedSum += sample * weight;
+        primaryWeightSum += weight;
+    }
+
+    const float output = primaryWeightSum > 1.0e-6f ? primaryWeightedSum / primaryWeightSum : 0.0f;
+
+    for (auto& grain : primaryGrains)
     {
-        const float phase = quadratureVoices[(size_t) k].grainPhase;
-        const float delaySamples = voiceDelaySamples (phase);
+        if (! grain.active)
+            continue;
+
+        grain.age += 1;
+        if (grain.age >= grainLengthSamplesInt)
+            grain.active = false;
+    }
+
+    primarySamplesUntilLaunch -= 1;
+
+    // Quadrature pool: identical mechanism, staggered launch schedule, same
+    // shared delayLine read at this same instant.
+    if (quadratureSamplesUntilLaunch <= 0)
+    {
+        quadratureGrains[(size_t) quadratureNextSlot] = { true, 0 };
+        quadratureNextSlot = (quadratureNextSlot + 1) % maxConcurrentGrainsPerGroup;
+        quadratureSamplesUntilLaunch = hopSamples;
+    }
+
+    float quadratureWeightedSum = 0.0f;
+    float quadratureWeightSum = 0.0f;
+
+    for (auto& grain : quadratureGrains)
+    {
+        if (! grain.active)
+            continue;
+
+        const float delaySamples = grainDelaySamples (grain.age);
         const float sample = delayLine.popSample (0, delaySamples, false);
-        quadratureSum += sample * hannEnvelope (phase);
-    }
-    quadratureOutput = 0.5f * quadratureSum; // same normalization as above
+        const float weight = grainWindow (grain.age);
 
-    // Wrap via subtraction (not modulo-by-reassignment) to avoid floating
-    // point drift; every voice in both groups increments at the identical
-    // rate and wraps the same way, so each voice's fixed starting-phase
-    // offset (set in reset()) is maintained automatically.
-    for (int k = 0; k < numVoicesPerGroup; ++k)
-    {
-        primaryVoices[(size_t) k].grainPhase += 1.0f / grainLengthSamples;
-        if (primaryVoices[(size_t) k].grainPhase >= 1.0f)
-            primaryVoices[(size_t) k].grainPhase -= 1.0f;
+        quadratureWeightedSum += sample * weight;
+        quadratureWeightSum += weight;
     }
 
-    for (int k = 0; k < numVoicesPerGroup; ++k)
+    quadratureOutput = quadratureWeightSum > 1.0e-6f ? quadratureWeightedSum / quadratureWeightSum : 0.0f;
+
+    for (auto& grain : quadratureGrains)
     {
-        quadratureVoices[(size_t) k].grainPhase += 1.0f / grainLengthSamples;
-        if (quadratureVoices[(size_t) k].grainPhase >= 1.0f)
-            quadratureVoices[(size_t) k].grainPhase -= 1.0f;
+        if (! grain.active)
+            continue;
+
+        grain.age += 1;
+        if (grain.age >= grainLengthSamplesInt)
+            grain.active = false;
     }
+
+    quadratureSamplesUntilLaunch -= 1;
 
     return output;
 }

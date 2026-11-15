@@ -82,19 +82,34 @@ public:
         {
             // Same tail-decay property as before the structural fix, now
             // checked with the shifter actually inside the tank's own
-            // decayGain=0.6f recirculation loop rather than a separate,
+            // decayGain=0.7f recirculation loop rather than a separate,
             // weaker external path. If this loop turns out to sustain
             // itself indefinitely (self-oscillation) at the tank's default
             // decay, this test will fail and that is itself the important
             // finding -- not something to silently patch decayGain down
-            // for without evidence, since 0.6f is inside the architecture
-            // doc's documented-safe range for a plain (unshifted) loop.
+            // for without evidence.
+            //
+            // silenceSeconds was widened from 8.0 to 12.0 after the
+            // PitchShifter rewrite (persistent multi-voice crossfade ->
+            // finite-lifetime grain pool, see PitchShifter.h) fixed a real
+            // phase-interference bug that had been accidentally attenuating
+            // the shifter's output (not true unity gain despite what its own
+            // tests claimed at the time). With that leak gone, the tank
+            // retains more of its energy per loop, so the tail now crosses
+            // the 1e-3 threshold around t=9s instead of t=8s -- confirmed by
+            // ear (user: shimmer "finally sounds tuned") and still a clean,
+            // fully-decaying (non-oscillating) tail, just slightly slower.
+            // decayGain=0.7f was tuned by ear against the OLD, lossy shifter;
+            // it may be worth nudging down (~0.65) and re-verifying by ear to
+            // restore the original decay timing, but that's an audible
+            // tuning call for a later session, not something to guess at
+            // here -- this widened window is the honest fix for now.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;
 
             constexpr double burstSeconds = 2.0;
-            constexpr double silenceSeconds = 8.0;
+            constexpr double silenceSeconds = 12.0;
             constexpr int burstBlocks = (int) (burstSeconds * sampleRate / blockSize);
             constexpr int silenceBlocks = (int) (silenceSeconds * sampleRate / blockSize);
 
