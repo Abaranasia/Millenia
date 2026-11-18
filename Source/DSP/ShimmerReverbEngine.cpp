@@ -38,15 +38,19 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     // its own hardcoded default (0.85f) -- unlike pitchShiftSemitones above,
     // tank.prepare()/reset() never touches it, so an untouched
     // ShimmerReverbEngine's tank stayed at THAT stale default forever unless
-    // setShimmerSustain() happened to be called at least once. Re-push the
-    // CURRENT shimmerSustainAmount (the member-initializer default, or a
+    // setShimmerFeedback() happened to be called at least once. Re-push the
+    // CURRENT shimmerFeedbackAmount (the member-initializer default, or a
     // caller's prior customization surviving a re-prepare, e.g. a host
-    // sample-rate change) through the same inverted mapping
-    // setShimmerSustain() itself uses, so an untouched engine's tank actually
-    // reflects the intended default instead of silently diverging from it.
-    tank.setMaxShimmerBlendWeight (1.0f - shimmerSustainAmount);
+    // sample-rate change) through the same mapping setShimmerFeedback()
+    // itself uses, so an untouched engine's tank actually reflects the
+    // intended default instead of silently diverging from it. Since
+    // 2026-10-24 the same call also re-seeds the tank's blend law from
+    // pitchShiftSemitones. applyPitchAndFreezeCrossfade() above already
+    // pushed both; this explicit re-seed is kept (two stores) so the fix
+    // this comment records cannot silently regress if that call moves.
+    pushShimmerBlendToTank();
 
-    // Infinite mode: same re-seed reasoning as shimmerSustainAmount above --
+    // Infinite mode: same re-seed reasoning as shimmerFeedbackAmount above --
     // push the cached value so the tank reflects it after a re-prepare.
     // DattorroTank::reset() snaps its ramp to this target rather than
     // ramping, so a host sample-rate change while Infinite is on does not
@@ -63,6 +67,12 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     preDelayLine.prepare ({ spec.sampleRate, spec.maximumBlockSize, 1 });
     smoothedPreDelayMs.reset (spec.sampleRate, preDelayRampSeconds);
 
+    // Formant Correction crossfade: same survive-a-re-prepare rule -- the
+    // smoother's reset() keeps the target a caller set with
+    // setFormantCorrection() (before or after an earlier prepare()) and
+    // snaps the current weight to it.
+    smoothedFormantWeight.reset (spec.sampleRate, formantRampSeconds);
+
     // Wet EQ: always two channels (wetLeft/wetRight), whatever the block's
     // channel count. Cutoffs above ~0.49 fs would break the TPT prewarp,
     // so they are capped at that for low sample rates.
@@ -72,6 +82,16 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     lowCutFilter.prepare (stereoSpec);
     highCutFilter.prepare (stereoSpec);
     maxFilterCutoffHz = (float) (0.49 * spec.sampleRate);
+
+    // Shimmer Tone (see setShimmerTone()): mono, on dryFeedback. shimmerToneHz
+    // itself is NOT re-assigned here (same survive-a-re-prepare rule as
+    // width/mix); only the sample-rate-dependent alias cap base is.
+    const juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
+    shimmerToneFilterA.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+    shimmerToneFilterB.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+    shimmerToneFilterA.prepare (monoSpec);
+    shimmerToneFilterB.prepare (monoSpec);
+    shimmerToneAliasCapBaseHz = (float) (0.25 * spec.sampleRate);
 
     // mix/bypassed/width are NOT re-applied here (unlike the
     // pitch shift line above): they already have correct member-
@@ -103,6 +123,9 @@ void ShimmerReverbEngine::reset()
     highCutFilter.reset();
     lowCutActive = false;
     highCutActive = false;
+    shimmerToneFilterA.reset();
+    shimmerToneFilterB.reset();
+    shimmerToneActive = false;
 
     // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
     // comment): unityShifter was just cleared above, so mark it idle --
@@ -116,6 +139,13 @@ void ShimmerReverbEngine::reset()
     // DattorroTank::reset()'s Infinite ramp.
     processedFreezeAmount = freezeAmount;
     unityWeight = unityWeightTarget;
+
+    // Formant Correction: snap the crossfade to its target, and mark the
+    // corrector idle (it was just cleared above) so process() decides afresh
+    // -- if correction is on, the next block takes the idle -> active edge
+    // and clears it once more (redundant, harmless), same as unityShifter.
+    smoothedFormantWeight.setCurrentAndTargetValue (smoothedFormantWeight.getTargetValue());
+    formantCorrectorActive = false;
 }
 
 void ShimmerReverbEngine::setPitchShiftSemitones (float semitones)
@@ -150,21 +180,43 @@ void ShimmerReverbEngine::setDamping (float newDamping)
 void ShimmerReverbEngine::setShimmerAmount (float newShimmerAmount)
 {
     shimmerAmount = juce::jlimit (0.0f, 1.0f, newShimmerAmount);
-    tank.setShimmerFeedbackGain (shimmerAmount);
+    tank.setShimmerAmountGain (shimmerAmount);
 }
 
-void ShimmerReverbEngine::setShimmerSustain (float newAmount)
+void ShimmerReverbEngine::setShimmerFeedback (float newAmount)
 {
     // Cached locally so process()'s Width/decorrelation term can gate on it
     // directly too -- see this method's header comment for why (same
     // "process() needs its own gating copy" reasoning as shimmerAmount).
-    shimmerSustainAmount = juce::jlimit (0.0f, 1.0f, newAmount);
+    shimmerFeedbackAmount = juce::jlimit (0.0f, 1.0f, newAmount);
 
-    // Inverted mapping to DattorroTank -- see this method's header comment
-    // for why: higher shimmerSustainAmount (more user-facing "sustain") means
-    // LOWER maxShimmerBlendWeight (less of the lossy, separately-delayed
-    // shimmer path recirculating).
-    tank.setMaxShimmerBlendWeight (1.0f - shimmerSustainAmount);
+    // Direct (un-inverted since 2026-10-24) mapping to DattorroTank -- see
+    // this method's header comment and pushShimmerBlendToTank().
+    pushShimmerBlendToTank();
+}
+
+void ShimmerReverbEngine::setLegacyShimmerBlendForTesting (bool shouldUseLegacy)
+{
+    legacyShimmerBlend = shouldUseLegacy;
+    pushShimmerBlendToTank();
+}
+
+void ShimmerReverbEngine::pushShimmerBlendToTank()
+{
+    // Shimmer cascade slice 1 (2026-10-24, docs/shimmer-character-research.md
+    // section 7.1 items 1 and 2). Mapping: Shimmer Feedback x IS the cap on
+    // the recirculating shifted share (maxShimmerBlendWeight = x; at Amount
+    // 1.0, shimmerWeight = x). Blend law: equal-power once the shift is a
+    // semitone or more, where the shifted copy is uncorrelated with the
+    // plain one; linear at |st| <= 0.5, where the copies correlate and
+    // equal-power weights would sum above unity; a linear ramp between
+    // (|st| 0.5 -> 1). The legacy switch restores the inverted 1 - x mapping
+    // and the linear law exactly (T6's golden hashes).
+    const float equalPowerAmount = legacyShimmerBlend
+                                       ? 0.0f
+                                       : juce::jlimit (0.0f, 1.0f, (std::abs (pitchShiftSemitones) - 0.5f) / 0.5f);
+    tank.setMaxShimmerBlendWeight (legacyShimmerBlend ? 1.0f - shimmerFeedbackAmount : shimmerFeedbackAmount);
+    tank.setShimmerBlendLaw (equalPowerAmount);
 }
 
 void ShimmerReverbEngine::setWidth (float newWidth)
@@ -185,6 +237,21 @@ void ShimmerReverbEngine::setLowCutHz (float newLowCutHz)
 void ShimmerReverbEngine::setHighCutHz (float newHighCutHz)
 {
     highCutHz = juce::jlimit (minHighCutHz, maxHighCutHz, newHighCutHz);
+}
+
+void ShimmerReverbEngine::setShimmerTone (float newShimmerToneHz)
+{
+    shimmerToneHz = juce::jlimit (minShimmerToneHz, maxShimmerToneHz, newShimmerToneHz);
+}
+
+float ShimmerReverbEngine::computeShimmerToneCutoffHz() const noexcept
+{
+    // ratio = 2^(st / 12); max(ratio, 1) leaves downward shifts at ratio 1's
+    // fs / 4 cap. +12 st gives std::pow (2, 1) = 2 exactly, so the cap at
+    // 44.1 kHz is exactly 5512.5 Hz.
+    const float ratio = std::pow (2.0f, pitchShiftSemitones / 12.0f);
+    const float aliasCapHz = shimmerToneAliasCapBaseHz / juce::jmax (ratio, 1.0f);
+    return juce::jmin (shimmerToneHz, aliasCapHz, maxFilterCutoffHz);
 }
 
 void ShimmerReverbEngine::setMix (float newMix)
@@ -237,6 +304,14 @@ void ShimmerReverbEngine::setLoopLengthMs (float newLoopLengthMs)
     loopCapture.setLoopLengthMs (newLoopLengthMs);
 }
 
+void ShimmerReverbEngine::setFormantCorrection (bool shouldCorrect)
+{
+    // Target only: process() ramps the weight per sample (formantRampSeconds)
+    // and reset() snaps it. Called every block by PluginProcessor; an
+    // unchanged target leaves a ramp in progress untouched.
+    smoothedFormantWeight.setTargetValue (shouldCorrect ? 1.0f : 0.0f);
+}
+
 void ShimmerReverbEngine::applyPitchAndFreezeCrossfade()
 {
     // Freeze = a LEVEL crossfade between two shifters, never a ratio glide
@@ -273,6 +348,9 @@ void ShimmerReverbEngine::applyPitchAndFreezeCrossfade()
     // the corrector entirely: a 0-semitone shift has no formant
     // displacement to correct.
     formantCorrector.setPitchShiftSemitones (pitchShiftSemitones);
+
+    // The tank's blend law follows the shift (see pushShimmerBlendToTank()).
+    pushShimmerBlendToTank();
 }
 
 void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
@@ -336,6 +414,21 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         unityShifter.reset();
     unityShifterActive = unityNeeded;
 
+    // Formant Correction idle skip (2026-10-25, see setFormantCorrection()
+    // and formantCorrectorActive's header comment): decided once per block,
+    // same pattern as the unity shifter above. Needed while the target is 1
+    // or the crossfade weight is still ramping (a ramp down to 0 keeps it
+    // running until the weight lands). While idle the corrector is not run
+    // at all and the raw shifted signal is used as is -- bit-identical to no
+    // corrector in the chain. The idle -> active edge clears it first
+    // (FormantEnvelopeCorrector::reset() only std::fill()s pre-sized rings
+    // and fills fixed arrays: allocation-free, audio-thread safe), so a
+    // re-engage starts from the same clean state prepare() leaves.
+    const bool formantNeeded = smoothedFormantWeight.isSmoothing() || smoothedFormantWeight.getTargetValue() > 0.0f;
+    if (formantNeeded && ! formantCorrectorActive)
+        formantCorrector.reset();
+    formantCorrectorActive = formantNeeded;
+
     // Wet EQ, decided once per block (see lowCutActive's header comment).
     // Both filters run on every sample whatever this decides; only their
     // OUTPUT is gated. While inactive each sits at its own endpoint cutoff
@@ -347,6 +440,19 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
     highCutActive = highCutHz < maxHighCutHz;
     lowCutFilter.setCutoffFrequency (juce::jmin (lowCutHz, maxFilterCutoffHz));
     highCutFilter.setCutoffFrequency (juce::jmin (highCutHz, maxFilterCutoffHz));
+
+    // Shimmer Tone, decided once per block, same warm-filter pattern as the
+    // wet EQ above (see shimmerToneActive's header comment). At Off the
+    // sections still run, at the alias-capped 10 kHz endpoint, and their
+    // output is unused -- bit-identical to no filter, and no alias cap (the
+    // legacy path). Recomputed every block, so a Tone or pitch change lands
+    // within one block, like the wet EQ cutoffs.
+    shimmerToneActive = shimmerToneHz < maxShimmerToneHz;
+    {
+        const float shimmerToneCutoffHz = computeShimmerToneCutoffHz();
+        shimmerToneFilterA.setCutoffFrequency (shimmerToneCutoffHz);
+        shimmerToneFilterB.setCutoffFrequency (shimmerToneCutoffHz);
+    }
 
     for (size_t i = 0; i < numSamples; ++i)
     {
@@ -370,7 +476,16 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // weak side-loop competing with the tank's own unshifted decayGain
         // recirculation.
         float dryFeedback = tank.peekFeedbackSignal();
-        float shiftedFeedback = shifter.processSample (dryFeedback);
+
+        // Shimmer Tone (2026-10-25, see setShimmerTone()): the main shifter
+        // and the formant corrector's dry analysis get the low-passed signal
+        // while active; unityShifter below always gets the raw dryFeedback,
+        // so Freeze is untouched. Both sections run on every sample either
+        // way (warm state); at Off shifterInput IS dryFeedback, so the shifter
+        // sees exactly what it saw before this filter existed.
+        const float toneFiltered = shimmerToneFilterB.processSample (0, shimmerToneFilterA.processSample (0, dryFeedback));
+        const float shifterInput = shimmerToneActive ? toneFiltered : dryFeedback;
+        float shiftedFeedback = shifter.processSample (shifterInput);
 
         // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()).
         // History: unityShifter first ran EVERY sample, even at
@@ -405,7 +520,23 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // immediately after the shift and before DC blocking/limiting, so it
         // shapes exactly the signal that's about to re-enter the tank -- same
         // position in the chain SpectralTiltCompensator occupied.
-        shiftedFeedback = formantCorrector.processSample (dryFeedback, shiftedFeedback);
+        //
+        // 2026-10-25: behind the Formant Correction toggle (default off, see
+        // setFormantCorrection() for the measured instability). Linear
+        // crossfade raw -> corrected by formantWeight, ramped per sample;
+        // the quadrature path below uses the same weight at the same chain
+        // position. At formantWeight == 1 the blend is the corrected sample
+        // exactly (0 * raw + 1 * corrected), so "on" is bit-identical to the
+        // always-on corrector; at 0 the raw sample is used directly, never
+        // 0 * corrected, so a non-finite corrector output mid-ramp-out
+        // cannot leak through.
+        const float formantWeight = formantCorrectorActive ? smoothedFormantWeight.getNextValue() : 0.0f;
+        if (formantCorrectorActive)
+        {
+            const float corrected = formantCorrector.processSample (shifterInput, shiftedFeedback);
+            if (formantWeight > 0.0f)
+                shiftedFeedback = (1.0f - formantWeight) * shiftedFeedback + formantWeight * corrected;
+        }
 
         // Freeze level crossfade, primary path. LINEAR, not equal-power: the
         // blend's amplitude can never exceed the larger of its two inputs, so
@@ -449,7 +580,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         const float tankInput = preDelayNowMs > 0.0f ? preDelayed : monoData[i];
 
         // The shimmerAmount gain now lives inside DattorroTank itself (see
-        // setShimmerFeedbackGain()) -- it scales safeFeedback as an
+        // setShimmerAmountGain()) -- it scales safeFeedback as an
         // ADDITIVE term layered on top of the tank's own natural
         // decayGain-scaled recirculation, not a replacement for it. This is
         // NOT the Width direct-injection term below (safeFeedback/
@@ -489,7 +620,14 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // formantCorrector's dry-signal analysis from the primary call
         // above (dry genuinely is one shared signal between the two grain
         // pools, unlike their actual shifted output).
-        quadratureRaw = formantCorrector.processQuadratureSample (quadratureRaw);
+        // Same Formant Correction gate and crossfade weight as the primary
+        // path above (one getNextValue() per sample, taken there).
+        if (formantCorrectorActive)
+        {
+            const float correctedQuadrature = formantCorrector.processQuadratureSample (quadratureRaw);
+            if (formantWeight > 0.0f)
+                quadratureRaw = (1.0f - formantWeight) * quadratureRaw + formantWeight * correctedQuadrature;
+        }
 
         // Same linear freeze crossfade as the primary path, at the same point
         // in the chain (after formant correction, before DC blocking), so
@@ -533,10 +671,10 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // mean no shimmer character anywhere in the output, not just in the
         // tank's recirculating budget.
         // "Shimmer Sustain" task (2026-09-06 widening, see
-        // setShimmerSustain()'s comment, effect 2): gated by
-        // shimmerSustainAmount too, same multiplicative-gate convention
+        // setShimmerFeedback()'s comment, effect 2): gated by
+        // shimmerFeedbackAmount too, same multiplicative-gate convention
         // shimmerAmount already established here (2026-08-21) -- at
-        // shimmerSustainAmount=0.0f the shimmer side term is exactly 0, same
+        // shimmerFeedbackAmount=0.0f the shimmer side term is exactly 0, same
         // gate shimmerAmount=0.0f produces (the tank's own L/R stereo, added
         // 2026-10-11, is unaffected by either gate).
         // Safety net, 2026-09-06 ("Shimmer Sustain" glitch investigation):
@@ -564,7 +702,7 @@ void ShimmerReverbEngine::process (juce::dsp::AudioBlock<float>& block)
         // operation (typical sideShift magnitude is well under its 0.8f
         // threshold) and only engages during the pathological case.
         float sideShift = safetyLimiter.processSample (safeFeedback - quadratureSafe);
-        const float shimmerSide = shimmerSideGain * shimmerAmount * shimmerSustainAmount * 0.5f * sideShift;
+        const float shimmerSide = shimmerSideGain * shimmerAmount * shimmerFeedbackAmount * 0.5f * sideShift;
         lastTankLeft = tankOut;
         lastTankRight = tankRight;
 

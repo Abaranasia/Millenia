@@ -85,7 +85,7 @@ private:
     std::atomic<float>* pitchShiftParam = nullptr;
     std::atomic<float>* decayParam      = nullptr;
     std::atomic<float>* shimmerAmountParam = nullptr;
-    std::atomic<float>* shimmerSustainParam = nullptr;
+    std::atomic<float>* shimmerFeedbackParam = nullptr;
     std::atomic<float>* dampingParam    = nullptr;
     std::atomic<float>* widthParam      = nullptr;
     std::atomic<float>* mixParam        = nullptr;
@@ -102,6 +102,11 @@ private:
     // hard 0/1 -- DattorroTank owns the sample-accurate ramp, same "DSP owns
     // its own smoothing" convention as loopMixParam below.
     std::atomic<float>* infiniteParam   = nullptr;
+
+    // Formant Correction (see ParamIDs::formantCorrection): bool read RAW
+    // every block, same as infiniteParam -- the engine owns the 20 ms
+    // crossfade.
+    std::atomic<float>* formantCorrectionParam = nullptr;
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Mix --
     // additive, fully independent of freezeParam above. loopMixParam is read
@@ -129,6 +134,10 @@ private:
     std::atomic<float>* lowCutParam = nullptr;
     std::atomic<float>* highCutParam = nullptr;
 
+    // Shimmer Tone (see ParamIDs::shimmerTone): a block-rate smoother like
+    // lowCut/highCut -- the engine also updates this cutoff once per block.
+    std::atomic<float>* shimmerToneParam = nullptr;
+
     // Slice 2 (docs/reverb-space-research.md section 9). decayParam (above)
     // goes through a block-rate smoother like the other continuous values;
     // size and modulation are read RAW because DattorroTank glides both per
@@ -144,12 +153,13 @@ private:
     juce::SmoothedValue<float> smoothedPitchShift;
     juce::SmoothedValue<float> smoothedDecay;
     juce::SmoothedValue<float> smoothedShimmerAmount;
-    juce::SmoothedValue<float> smoothedShimmerSustain;
+    juce::SmoothedValue<float> smoothedShimmerFeedback;
     juce::SmoothedValue<float> smoothedDamping;
     juce::SmoothedValue<float> smoothedWidth;
     juce::SmoothedValue<float> smoothedMix;
     juce::SmoothedValue<float> smoothedLowCut;
     juce::SmoothedValue<float> smoothedHighCut;
+    juce::SmoothedValue<float> smoothedShimmerTone;
 
     // Phase 9: Freeze gets the exact same click-free smoothing treatment as
     // every other continuous parameter here -- even a hard 0->1 jump on

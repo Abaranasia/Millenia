@@ -36,9 +36,9 @@ private:
 
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
-    juce::Slider pitchShiftSlider, decaySlider, shimmerAmountSlider, shimmerSustainSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
+    juce::Slider pitchShiftSlider, decaySlider, shimmerAmountSlider, shimmerFeedbackSlider, shimmerToneSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
     juce::Slider preDelaySlider, lowCutSlider, highCutSlider, sizeSlider, modulationSlider;
-    juce::Label  pitchShiftLabel,  decayLabel,  shimmerAmountLabel,  shimmerSustainLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
+    juce::Label  pitchShiftLabel,  decayLabel,  shimmerAmountLabel,  shimmerFeedbackLabel,  shimmerToneLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
     juce::Label  preDelayLabel,  lowCutLabel,  highCutLabel,  sizeLabel,  modulationLabel;
 
     // Shows the Decay knob's tooltip (the RT60 ceiling note).
@@ -66,6 +66,11 @@ private:
     // pattern as bypassButton. Sits in the top bar left of freezeQuickToggle.
     juce::ToggleButton infiniteToggle { "Infinite" };
 
+    // Formant Correction (see ParamIDs::formantCorrection): APVTS-attached
+    // bool toggle (formantCorrectionAttachment below), same pattern as
+    // infiniteToggle. Sits in the top bar left of infiniteToggle.
+    juce::ToggleButton formantCorrectionToggle { "Formant Correction" };
+
     juce::TextButton presetNeg12Button { "-12 st" };
     juce::TextButton preset0Button  { "0 st" };
     juce::TextButton preset7Button  { "+7 st" };
@@ -78,13 +83,15 @@ private:
     std::unique_ptr<SliderAttachment> pitchShiftAttachment;
     std::unique_ptr<SliderAttachment> decayAttachment;
     std::unique_ptr<SliderAttachment> shimmerAmountAttachment;
-    std::unique_ptr<SliderAttachment> shimmerSustainAttachment;
+    std::unique_ptr<SliderAttachment> shimmerFeedbackAttachment;
+    std::unique_ptr<SliderAttachment> shimmerToneAttachment;
     std::unique_ptr<SliderAttachment> dampingAttachment;
     std::unique_ptr<SliderAttachment> widthAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> freezeAttachment;
     std::unique_ptr<ButtonAttachment> bypassAttachment;
     std::unique_ptr<ButtonAttachment> infiniteAttachment;
+    std::unique_ptr<ButtonAttachment> formantCorrectionAttachment;
 
     // Phase 10 Loop Freeze / Loop Mix.
     std::unique_ptr<SliderAttachment> loopLengthAttachment;

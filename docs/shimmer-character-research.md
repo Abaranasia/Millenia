@@ -1,6 +1,8 @@
 # Shimmer Character Research — Why Millenia Never Sounded Like a Shimmer
 
 Status: research written 2026-10-24. No DSP code changed. Agenda item 2 (item 1 was [`reverb-space-research.md`](./reverb-space-research.md)).
+
+Update 2026-10-25: slice 1 steps B and D shipped (`9e6b0fb`). After step B alone, the user still heard almost no shimmer. A measurement then showed that `FormantEnvelopeCorrector` is unstable on tonal input: after a +12 st shift of a 440 Hz sine it removes about 59 dB of the 880 Hz octave and rings at 440 Hz. So step D's formant toggle (default off) is a required fix, not an option. Identifiers were renamed in `9c68bc6`: `shimmerSustain` is now `shimmerFeedback` (parameter ID, setter and members), and the tank's Amount gain `shimmerFeedbackGain` is now `shimmerAmountGain`. This doc keeps the pre-rename names. See [`reverb-dev-journal.md`](./reverb-dev-journal.md).
 Scope: the shimmer path. That covers `PitchShifter`, `FormantEnvelopeCorrector`, the shimmer blend inside `DattorroTank`, and the parameters that drive them. The reverb core is covered by item 1.
 
 Line numbers are as of 2026-10-24. Comments in `Source/` are being edited at the same time, so lines may drift. Symbol names are stable.
