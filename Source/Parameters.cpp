@@ -73,8 +73,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // direct since 2026-10-24 -- it was inverted before -- plus a direct gate
     // on process()'s audible Width/decorrelation injection). Shown as
     // "Shimmer Feedback" since 2026-10-24; the ID was renamed from
-    // shimmerSustain to shimmerFeedback on 2026-10-25 (nothing has shipped;
-    // a saved state from before falls back to this default).
+    // shimmerSustain to shimmerFeedback on 2026-10-25. Old states carrying
+    // the removed IDs (shimmerSustain, feedback, loopFreeze) are NOT
+    // migrated, by decision (nothing has shipped): APVTS ignores the unknown
+    // IDs and the new ones keep their defaults, e.g. this one stays at 0.55.
     // Independently controls how present and long-lived the shimmer layer
     // is, decoupled from both Decay (decayGain) and Shimmer Amount
     // (shimmerAmountGain, the overall shimmer level).

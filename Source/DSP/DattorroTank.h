@@ -141,6 +141,16 @@ public:
     // ~15.4 s at 1, ~30.8 s at 2 (where the 20 s Decay maximum binds first).
     static constexpr float maxDecayGain = 0.85f;
 
+    // The longest RT60 the decay-gain clamp lets the tank reach at `size`:
+    // solving g = 10^(-3 * L_half * size / RT60) for the clamped g =
+    // maxDecayGain gives RT60 = -3 * L_half * size / log10 (maxDecayGain),
+    // ~15.42 s at Size 1. A Decay above this has no further effect. Used by
+    // ShimmerReverbEngine::computeTailSeconds(); not for the audio thread.
+    static double maxReachableRt60Seconds (float size) noexcept
+    {
+        return -3.0 * halfLoopSeconds * (double) size / std::log10 ((double) maxDecayGain);
+    }
+
     // Crossfade weight (0..1) controlling how much of the tank's fixed
     // recirculation budget (see maxShimmerBlendWeight and processSample())
     // goes to the externally-supplied signal vs. the tank's own natural

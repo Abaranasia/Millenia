@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <limits>
 #include "DattorroTank.h"
 #include "PitchShifter.h"
 #include "DCBlocker.h"
@@ -82,7 +83,71 @@ public:
     // second DattorroTank/delay line and cannot touch the already-tuned
     // recirculating loop above. See
     // docs/shimmer-reverb-implementation-plan.md's Phase 4 section.
+    //
+    // The block may be longer than the maximumBlockSize given to prepare()
+    // (hosts are allowed to do that): it is then processed in sub-blocks of
+    // at most that size, with the same result as the caller sending those
+    // sub-blocks one after another. Before prepare() the block is left
+    // untouched.
     void process (juce::dsp::AudioBlock<float>& block);
+
+    // Tail length to report to the host (PluginProcessor::
+    // getTailLengthSeconds()), in seconds; +infinity when `sustained`.
+    // Pure, host-thread only (not for processBlock). Finite case:
+    //     tail = preDelaySeconds + tailMargin * min (decay, cap (size))
+    // where cap (size) = DattorroTank::maxReachableRt60Seconds (size), the
+    // longest RT60 the tank's 0.85 per-half-loop gain clamp allows (~15.42 s
+    // at Size 1), so a Decay the clamp cannot honour does not inflate the
+    // estimate. tailMargin 1.15 covers the bare tank measuring 10-14 percent
+    // longer than its nominal RT60 (docs/shimmer-character-research.md line
+    // 95 and docs/reverb-dev-journal.md line 273), since -60 dB is measured
+    // from the early peak, not from the start of the decay. The full engine
+    // measured shorter than nominal (6.2 s for 7 s, docs/project-audit-2026-11.md
+    // line 70), so the margin is conservative.
+    // Inputs are clamped to their parameter ranges; NaN falls to the minimum.
+    //
+    // `sustained` is the caller's "output never decays" decision, see
+    // isTailSustained().
+    static double computeTailSeconds (float decaySeconds, float size, float preDelayMs, bool sustained) noexcept
+    {
+        if (sustained)
+            return std::numeric_limits<double>::infinity();
+
+        // "! (x >= lo)" also catches NaN, which jlimit would pass through.
+        auto clampToRange = [] (float x, float lo, float hi)
+        {
+            return ! (x >= lo) ? lo : (x > hi ? hi : x);
+        };
+
+        const float clampedDecay = clampToRange (decaySeconds, DattorroTank::minDecaySeconds, DattorroTank::maxDecaySeconds);
+        const float clampedSize = clampToRange (size, DattorroTank::minSize, DattorroTank::maxSize);
+        const float clampedPreDelayMs = clampToRange (preDelayMs, 0.0f, maxPreDelayMs);
+
+        const double rt60 = juce::jmin ((double) clampedDecay, DattorroTank::maxReachableRt60Seconds (clampedSize));
+        return 0.001 * (double) clampedPreDelayMs + tailMargin * rt60;
+    }
+
+    // Whether the host must be told the tail never ends (VST3 maps +infinity
+    // to kInfiniteTail). Pure, host-thread only. `mix` is the raw Mix
+    // parameter. Bypass and a silent Mix (0, or NaN) mute the wet path, so
+    // nothing sustains audibly and the tail is not infinite. Otherwise the
+    // output does not decay on its own when:
+    //  - Infinite pins the tank's decay gain to exactly 1.0.
+    //  - Freeze at 0.9 and above pushes the tank gain to at least ~0.9 (the
+    //    gain is crossfaded toward 0.999 by the dial), an RT60 of ~24 s at
+    //    Size 1 even from the shortest Decay, longer than the finite estimate
+    //    ever gets. Below 0.9 the tail is finite but may exceed the estimate.
+    //  - Loop Mix above 0.001 (-60 dB) plays the captured loop forever.
+    static bool isTailSustained (bool bypassed, float mix, float infiniteParam,
+                                 float freezeParam, float loopMixParam) noexcept
+    {
+        if (bypassed || ! (mix > silentMixThreshold))
+            return false;
+
+        return infiniteParam > sustainedInfiniteThreshold
+            || freezeParam >= sustainedFreezeThreshold
+            || loopMixParam > sustainedLoopMixThreshold;
+    }
 
     // Phase 5 (see docs/shimmer-reverb-implementation-plan.md): forwarding
     // setters exposing the tunables Phases 2-4 already implemented inside
@@ -347,6 +412,11 @@ public:
     static constexpr float getShimmerSideGainForTesting() noexcept { return shimmerSideGain; }
 
 private:
+    // The body of process() for one block of at most
+    // monoScratch.getNumSamples() samples. Only called by process(), which
+    // splits longer blocks.
+    void processChunk (juce::dsp::AudioBlock<float>& block);
+
     // Applies pitchShiftSemitones to the main shifter (always the full user
     // value) and formantCorrector, and recomputes unityWeightTarget from
     // freezeAmount -- shared by prepare(), setPitchShiftSemitones(), and
@@ -421,6 +491,15 @@ private:
 
     // Pre-delay and wet EQ ranges -- must match Parameters.cpp.
     static constexpr float maxPreDelayMs = 250.0f;
+
+    // See computeTailSeconds().
+    static constexpr double tailMargin = 1.15;
+
+    // See isTailSustained().
+    static constexpr float sustainedInfiniteThreshold = 0.5f;
+    static constexpr float sustainedFreezeThreshold = 0.9f;
+    static constexpr float sustainedLoopMixThreshold = 0.001f;
+    static constexpr float silentMixThreshold = 0.001f;
     static constexpr double preDelayRampSeconds = 0.05; // same 50ms as PluginProcessor's smoothers
     static constexpr float minLowCutHz = 20.0f;
     static constexpr float maxLowCutHz = 1000.0f;
@@ -701,8 +780,10 @@ private:
     // (see freezeUnityCrossfadeCurve's comment).
     float pitchShiftSemitones = defaultPitchShiftSemitones;
 
-    // Mono scratch buffer, pre-sized in prepare() so process() never
-    // allocates.
+    // Mono scratch buffer, sized to spec.maximumBlockSize in prepare() so
+    // process() never allocates. Its length is the largest block
+    // processChunk() can take; process() splits anything longer rather than
+    // resizing this on the audio thread.
     juce::AudioBuffer<float> monoScratch;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ShimmerReverbEngine)

@@ -4862,3 +4862,349 @@ public:
 };
 
 static ShimmerReverbEngineToneTests shimmerReverbEngineToneTests;
+
+//==============================================================================
+// Oversized host blocks. A host may call process() with more samples than the
+// maximumBlockSize it passed to prepare(). The engine must then behave exactly
+// as if the caller had sent the same audio in prepared-size blocks, one after
+// another, and must not write past its pre-sized scratch buffer. Own class
+// (same .cpp, so no Projucer resave) so it runs in isolation via Main.cpp's
+// name filter ("OversizedBlock").
+class ShimmerReverbEngineOversizedBlockTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineOversizedBlockTests() : juce::UnitTest ("ShimmerReverbEngineOversizedBlockTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Oversized block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 4096);
+        }
+
+        beginTest ("Oversized block whose length is not a multiple of the prepared size matches prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 1000);
+        }
+
+        beginTest ("Oversized mono block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (1, 64, 1000);
+        }
+    }
+
+private:
+    // Non-default settings, applied after prepare() so the per-sample
+    // smoothers (pre-delay) and the per-block ramps (Freeze) are moving
+    // when processing starts. Mix below 1 keeps both dry and wet in the output.
+    static void configure (ShimmerReverbEngine& engine, int numChannels, int preparedBlockSize)
+    {
+        engine.prepare ({ 44100.0, (juce::uint32) preparedBlockSize, (juce::uint32) numChannels });
+        engine.setMix (0.6f);
+        engine.setWidth (1.3f);
+        engine.setPreDelayMs (20.0f);
+        engine.setLowCutHz (200.0f);
+        engine.setHighCutHz (8000.0f);
+        engine.setShimmerTone (3000.0f);
+        engine.setShimmerFeedback (0.8f);
+        engine.setDecaySeconds (4.0f);
+        engine.setPitchShiftSemitones (7.0f);
+        engine.setFreezeAmount (0.3f);
+    }
+
+    void expectOversizedMatchesChunked (int numChannels, int preparedBlockSize, int totalSamples)
+    {
+        juce::AudioBuffer<float> input (numChannels, totalSamples);
+        juce::Random random (20261114);
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < totalSamples; ++i)
+                input.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+        // Reference: the caller splits the audio into prepared-size blocks.
+        juce::AudioBuffer<float> chunkedOut;
+        chunkedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::AudioBuffer<float> chunk (numChannels, preparedBlockSize);
+
+            for (int offset = 0; offset < totalSamples; offset += preparedBlockSize)
+            {
+                const int length = juce::jmin (preparedBlockSize, totalSamples - offset);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunk.copyFrom (ch, 0, input, ch, offset, length);
+
+                juce::dsp::AudioBlock<float> block (chunk.getArrayOfWritePointers(), (size_t) numChannels, (size_t) length);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunkedOut.copyFrom (ch, offset, chunk, ch, 0, length);
+            }
+        }
+
+        // Under test: the same audio in ONE block, larger than the prepared size.
+        juce::AudioBuffer<float> oversizedOut;
+        oversizedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::dsp::AudioBlock<float> block (oversizedOut);
+            engine.process (block);
+        }
+
+        int numNonFinite = 0;
+        int numMismatches = 0;
+        int numChangedFromInput = 0;
+        int firstMismatch = -1;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float oversized = oversizedOut.getSample (ch, i);
+                const float chunked = chunkedOut.getSample (ch, i);
+
+                if (! std::isfinite (oversized) || ! std::isfinite (chunked))
+                    ++numNonFinite;
+
+                if (oversized != chunked)
+                {
+                    ++numMismatches;
+
+                    if (firstMismatch < 0)
+                        firstMismatch = i;
+                }
+
+                if (oversized != input.getSample (ch, i))
+                    ++numChangedFromInput;
+            }
+        }
+
+        expectEquals (numNonFinite, 0, "Non-finite samples in the output");
+        expectEquals (numMismatches, 0, "One " + juce::String (totalSamples) + "-sample block differs from "
+                                            + juce::String (preparedBlockSize) + "-sample blocks (first mismatch at sample "
+                                            + juce::String (firstMismatch) + ")");
+        expect (numChangedFromInput > totalSamples / 2, "The engine left the oversized block (almost) untouched: only "
+                                                            + juce::String (numChangedFromInput) + " samples changed");
+    }
+};
+
+static ShimmerReverbEngineOversizedBlockTests shimmerReverbEngineOversizedBlockTests;
+
+// Host tail length (audit 2026-11): ShimmerReverbEngine::computeTailSeconds()
+// is the pure function PluginProcessor::getTailLengthSeconds() forwards to.
+class ShimmerReverbEngineTailLengthTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineTailLengthTests() : juce::UnitTest ("ShimmerReverbEngineTailLengthTests", "DSP") {}
+
+    void runTest() override
+    {
+        // The tank clamps its per-half-loop gain at 0.85, so its RT60 never
+        // exceeds -3 * 0.3627 * size / log10 (0.85) = ~15.42 * size seconds.
+        const double capAtSizeOne = DattorroTank::maxReachableRt60Seconds (1.0f);
+        constexpr double margin = 1.15;
+
+        beginTest ("Default decay (7 s, size 1, no pre-delay) gives about 1.15 * 7 s");
+        {
+            const double tail = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (tail, margin * 7.0, 1.0e-6);
+        }
+
+        beginTest ("Pre-delay adds to the tail");
+        {
+            const double without = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, false);
+            const double with250 = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 250.0f, false);
+            expectWithinAbsoluteError (with250 - without, 0.25, 1.0e-6);
+        }
+
+        beginTest ("Tail grows with decay");
+        {
+            const double shortTail = ShimmerReverbEngine::computeTailSeconds (2.0f, 1.0f, 0.0f, false);
+            const double longTail = ShimmerReverbEngine::computeTailSeconds (6.0f, 1.0f, 0.0f, false);
+            expect (longTail > shortTail, "Tail did not grow with decay");
+        }
+
+        beginTest ("The 0.85 gain clamp caps the tail below the requested decay");
+        {
+            // Size 0.5: cap = 15.42 * 0.5 = ~7.71 s, so 20 s is cut to it.
+            const double atHalf = ShimmerReverbEngine::computeTailSeconds (20.0f, 0.5f, 0.0f, false);
+            expectWithinAbsoluteError (atHalf, margin * 0.5 * capAtSizeOne, 1.0e-6);
+            expect (atHalf < margin * 20.0 * 0.5, "Tail was not capped at size 0.5");
+            expectWithinAbsoluteError (atHalf, margin * 15.42 * 0.5, 0.05);
+
+            // Size 1: cap = ~15.42 s, so 20 s is cut to it too.
+            const double atOne = ShimmerReverbEngine::computeTailSeconds (20.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (atOne, margin * capAtSizeOne, 1.0e-6);
+            expectWithinAbsoluteError (atOne, margin * 15.42, 0.05);
+        }
+
+        beginTest ("Size scales the cap");
+        {
+            const double small = ShimmerReverbEngine::computeTailSeconds (20.0f, 0.5f, 0.0f, false);
+            const double medium = ShimmerReverbEngine::computeTailSeconds (20.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (medium, 2.0 * small, 1.0e-6);
+
+            // Size 2: the cap (~30.8 s) is above the 20 s Decay maximum, so Decay binds.
+            const double large = ShimmerReverbEngine::computeTailSeconds (20.0f, 2.0f, 0.0f, false);
+            expectWithinAbsoluteError (large, margin * 20.0, 1.0e-6);
+        }
+
+        beginTest ("Sustained returns +infinity");
+        {
+            const double tail = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, true);
+            expect (std::isinf (tail) && tail > 0.0, "Sustained tail is not +infinity");
+        }
+
+        beginTest ("The result is never NaN or negative over the full parameter ranges");
+        {
+            int numBad = 0;
+
+            for (float decay = 0.3f; decay <= 20.0f; decay += 0.7f)
+                for (float size = 0.5f; size <= 2.0f; size += 0.25f)
+                    for (float preDelay = 0.0f; preDelay <= 250.0f; preDelay += 25.0f)
+                    {
+                        const double tail = ShimmerReverbEngine::computeTailSeconds (decay, size, preDelay, false);
+                        if (std::isnan (tail) || tail < 0.0 || std::isinf (tail))
+                            ++numBad;
+                    }
+
+            // Out-of-range and non-finite inputs are clamped, not propagated.
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            for (double tail : { ShimmerReverbEngine::computeTailSeconds (nan, 1.0f, 0.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (7.0f, nan, 0.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, nan, false),
+                                 ShimmerReverbEngine::computeTailSeconds (-5.0f, -1.0f, -10.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (1.0e9f, 1.0e9f, 1.0e9f, false) })
+                if (std::isnan (tail) || tail < 0.0 || std::isinf (tail))
+                    ++numBad;
+
+            expectEquals (numBad, 0, "Non-finite or negative tail estimates");
+        }
+
+        beginTest ("The engine's output is below -60 dB of its early peak once the estimated tail has passed");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            const float decay = 7.0f;
+            const double tailSeconds = ShimmerReverbEngine::computeTailSeconds (decay, 1.0f, 0.0f, false);
+
+            ShimmerReverbEngine engine;
+            engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            engine.reset();
+            engine.setDecaySeconds (decay);
+            engine.setSize (1.0f);
+            engine.setShimmerAmount (0.0f);
+
+            const int totalSamples = (int) ((tailSeconds + 3.0) * sampleRate);
+            const int tailStart = (int) (tailSeconds * sampleRate);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            float earlyPeak = 0.0f, latePeak = 0.0f;
+            double lateSquares = 0.0;
+            int lateCount = 0;
+
+            for (int done = 0; done < totalSamples; done += blockSize)
+            {
+                buffer.clear();
+                if (done == 0)
+                {
+                    buffer.setSample (0, 0, 1.0f);
+                    buffer.setSample (1, 0, 1.0f);
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int i = 0; i < blockSize; ++i)
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        const float v = std::abs (buffer.getSample (ch, i));
+                        const int index = done + i;
+
+                        if (index < (int) sampleRate)
+                            earlyPeak = juce::jmax (earlyPeak, v);
+
+                        if (index >= tailStart)
+                        {
+                            latePeak = juce::jmax (latePeak, v);
+                            lateSquares += (double) v * v;
+                            ++lateCount;
+                        }
+                    }
+            }
+
+            const double lateRms = std::sqrt (lateSquares / (double) juce::jmax (1, lateCount));
+            const double peakDb = 20.0 * std::log10 (juce::jmax (1.0e-30, (double) latePeak / (double) juce::jmax (1.0e-30f, earlyPeak)));
+            const double rmsDb = 20.0 * std::log10 (juce::jmax (1.0e-30, lateRms / (double) juce::jmax (1.0e-30f, earlyPeak)));
+            logMessage ("Tail " + juce::String (tailSeconds, 3) + " s: early peak " + juce::String (earlyPeak, 5)
+                        + ", late peak " + juce::String (latePeak, 7) + " (" + juce::String (peakDb, 2)
+                        + " dB), late RMS " + juce::String (lateRms, 8) + " (" + juce::String (rmsDb, 2) + " dB)");
+            expect (earlyPeak > 0.0f, "No early output");
+            expect (peakDb < -60.0, "Output after the estimated tail is only " + juce::String (peakDb, 2) + " dB below the early peak");
+        }
+    }
+};
+
+static ShimmerReverbEngineTailLengthTests shimmerReverbEngineTailLengthTests;
+
+// ShimmerReverbEngine::isTailSustained() decides when the host is told the tail
+// is infinite; Bypass and a silent Mix cancel it because the wet path is muted.
+class ShimmerReverbEngineTailSustainTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineTailSustainTests() : juce::UnitTest ("ShimmerReverbEngineTailSustainTests", "DSP") {}
+
+    void runTest() override
+    {
+        using Engine = ShimmerReverbEngine;
+
+        beginTest ("Each sustained condition alone makes the tail sustained");
+        {
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 0.0f, 0.0f), "Infinite 1.0 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.5f, 0.0f, 0.0f), "Infinite exactly 0.5 was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 0.51f, 0.0f, 0.0f), "Infinite 0.51 was not sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.9f, 0.0f), "Freeze 0.9 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.8999f, 0.0f), "Freeze 0.8999 was sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.002f), "Loop Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.001f), "Loop Mix exactly 0.001 was sustained");
+        }
+
+        beginTest ("Bypass cancels the sustained tail");
+        {
+            expect (! Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f), "Bypass with all modes engaged was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 1.0f, 1.0f), "All modes engaged without bypass was not sustained");
+        }
+
+        beginTest ("A silent Mix cancels the sustained tail");
+        {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+
+            expect (! Engine::isTailSustained (false, 0.0f, 1.0f, 1.0f, 1.0f), "Mix 0.0 was sustained");
+            expect (! Engine::isTailSustained (false, 0.001f, 1.0f, 1.0f, 1.0f), "Mix 0.001 was sustained");
+            expect (Engine::isTailSustained (false, 0.002f, 1.0f, 1.0f, 1.0f), "Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, nan, 1.0f, 1.0f, 1.0f), "NaN Mix was sustained");
+        }
+
+        beginTest ("Nothing engaged is not sustained");
+        {
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.0f), "Idle parameters were sustained");
+        }
+
+        beginTest ("Bypass with all modes engaged reports the finite estimate");
+        {
+            const bool sustained = Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f);
+            const double tail = Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, sustained);
+
+            expect (std::isfinite (tail), "Tail was not finite");
+            expectWithinAbsoluteError (tail, Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, false), 1.0e-12);
+        }
+    }
+};
+
+static ShimmerReverbEngineTailSustainTests shimmerReverbEngineTailSustainTests;

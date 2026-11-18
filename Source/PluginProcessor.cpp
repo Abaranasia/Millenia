@@ -89,7 +89,36 @@ bool MilleniaAudioProcessor::isMidiEffect() const
 
 double MilleniaAudioProcessor::getTailLengthSeconds() const
 {
-    return 0.0;
+    // Host thread, not the audio thread: only reads the cached atomics.
+    // "Sustained" (see ShimmerReverbEngine::isTailSustained()) means the
+    // audible output does not decay on its own, so the host must not cut the
+    // tail. Bypass and Mix 0 mute the wet path, so they cancel it. When not
+    // sustained, the finite estimate is returned; it is finite and also
+    // covers the 50 ms fade of the wet signal on a bypass or Mix change.
+    const bool sustained = ShimmerReverbEngine::isTailSustained (bypassParam->load() > 0.5f,
+                                                                 mixParam->load(),
+                                                                 infiniteParam->load(),
+                                                                 freezeParam->load(),
+                                                                 loopMixParam->load());
+
+    return ShimmerReverbEngine::computeTailSeconds (decayParam->load(), sizeParam->load(),
+                                                    preDelayParam->load(), sustained);
+}
+
+juce::AudioProcessorParameter* MilleniaAudioProcessor::getBypassParameter() const
+{
+    // With a non-null bypass parameter the VST3 wrapper never calls
+    // processBlockBypassed(): it calls processBlock() and only exposes the
+    // parameter to the host with the kIsBypass flag
+    // (juce_audio_plugin_client_VST3.cpp:3728-3733, :920-921). JUCE's own
+    // header says the same (juce_AudioProcessor.h:947-957), and the other
+    // wrappers follow it (AU, AAX, VST2, LV2, Unity). processBlock() already
+    // reads this parameter and drives smoothedMix toward 0, so bypass is a
+    // click-free mix-to-dry with the tank still running and the tail ringing
+    // out. The dry path is undelayed, so no latency compensation is needed.
+    // The default processBlockBypassed() would hard-cut and freeze the tank,
+    // which is why it is not relied on and, being never called, not overridden.
+    return apvts.getParameter (ParamIDs::bypass);
 }
 
 int MilleniaAudioProcessor::getNumPrograms()
@@ -368,16 +397,13 @@ void MilleniaAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void MilleniaAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // hasType() is checked against apvts.state.getType(), i.e. the exact
-    // "PARAMETERS" identifier passed to the apvts constructor above -- a
-    // corrupt/foreign state blob (wrong root tag) is rejected rather than
-    // blindly loaded via replaceState().
+    // StateSchema::applyState() rejects a foreign root tag (checked against
+    // apvts.state.getType(), the "PARAMETERS" identifier passed to the apvts
+    // constructor) and any state stamped with a NEWER schemaVersion than this
+    // build knows, leaving current state untouched. Older/unversioned states
+    // load as-is (no value migration, by decision).
     if (auto xmlState = getXmlFromBinary (data, sizeInBytes))
-    {
-        auto state = juce::ValueTree::fromXml (*xmlState);
-        if (state.isValid() && state.hasType (apvts.state.getType()))
-            apvts.replaceState (state);
-    }
+        StateSchema::applyState (apvts, juce::ValueTree::fromXml (*xmlState));
 }
 
 //==============================================================================
