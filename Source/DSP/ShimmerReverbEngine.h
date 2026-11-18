@@ -339,25 +339,24 @@ public:
     // shimmer-character-research.md section 7.1 item 3): a 4th-order
     // low-pass (two cascaded 2nd-order TPT sections) on dryFeedback before it
     // feeds the main shifter and the formant corrector's dry analysis.
-    // Clamped to [minShimmerToneHz, maxShimmerToneHz]; the top endpoint is
-    // Off. It doubles as the shifter's anti-alias filter: shifted content is
-    // f * ratio, so it folds above fs / (2 * ratio), and the effective cutoff
-    // is min(Tone, fs / (4 * max(ratio, 1)), 0.49 fs) -- one octave under the
-    // fold point (5512.5 Hz at +12 st, 2756.25 Hz at +24 st, 44.1 kHz).
-    // Downward shifts are not capped beyond ratio 1's fs / 4, which is above
-    // the Tone range from 40 kHz up. Same warm-filter pattern as the wet EQ
-    // (see lowCutActive): the filters always run, and at Off their output is
-    // unused, so Off is bit-identical to the engine before the filter and
-    // applies no alias cap (the legacy path). Not applied to unityShifter's
-    // input, so Freeze is untouched. Applied once per block; survives
-    // prepare()/reset() like width/mix.
+    // Clamped to [minShimmerToneHz, maxShimmerToneHz]. It doubles as the
+    // shifter's anti-alias filter: shifted content is f * ratio, so it folds
+    // above fs / (2 * ratio), and the alias cap is fs / (4 * max(ratio, 1)),
+    // one octave under the fold point (5512.5 Hz at +12 st, 2756.25 Hz at
+    // +24 st, 44.1 kHz). Tone is relative to that cap: the cutoff is
+    // min(maxFilterCutoffHz, Tone * min(1, cap / maxShimmerToneHz)),
+    // so the knob's whole range always maps to distinct cutoffs (no dead
+    // zone), the top endpoint ("Off") is exactly the alias cap, and where
+    // the cap is >= 10 kHz (0 st and downward at 44.1 kHz and up) the cutoff
+    // is Tone itself. Off does NOT bypass the filter: it is always applied
+    // to the main shifter's input, so Off and Tone 9.9 kHz are continuous.
+    // Not applied to unityShifter's input, so Freeze is untouched. Applied
+    // once per block; survives prepare()/reset() like width/mix.
     void setShimmerTone (float newShimmerToneHz);
 
     // Test-only introspection, same idiom: the cutoff process() applies to
-    // the Shimmer Tone filters for the current Tone/pitch/sample rate, and
-    // whether their output is used (false at Off).
+    // the Shimmer Tone filters for the current Tone/pitch/sample rate.
     float getShimmerToneCutoffHzForTesting() const noexcept { return computeShimmerToneCutoffHz(); }
-    bool isShimmerToneActiveForTesting() const noexcept { return shimmerToneHz < maxShimmerToneHz; }
 
     // Test-only introspection -- same "peek" idiom as DattorroTank::
     // peekFeedbackSignal() (which this just forwards) and LoopCapture::
@@ -434,9 +433,11 @@ private:
     // setLegacyShimmerBlendForTesting(); two stores, no allocation.
     void pushShimmerBlendToTank();
 
-    // Shimmer Tone's effective cutoff (see setShimmerTone()): min(Tone,
-    // shimmerToneAliasCapBaseHz / max(ratio, 1), maxFilterCutoffHz), ratio =
-    // 2^(pitchShiftSemitones / 12). Used by process() once per block and by
+    // Shimmer Tone's effective cutoff (see setShimmerTone()): Tone *
+    // min(1, aliasCapHz / maxShimmerToneHz), aliasCapHz =
+    // shimmerToneAliasCapBaseHz / max(ratio, 1), ratio =
+    // 2^(pitchShiftSemitones / 12), limited to [minShimmerToneCutoffHz,
+    // maxFilterCutoffHz]. Used by process() once per block and by
     // getShimmerToneCutoffHzForTesting(); one std::pow, no allocation.
     float computeShimmerToneCutoffHz() const noexcept;
 
@@ -507,10 +508,13 @@ private:
     static constexpr float maxHighCutHz = 20000.0f;
 
     // Shimmer Tone range and default (see setShimmerTone()) -- must match
-    // Parameters.cpp. maxShimmerToneHz is the Off endpoint. 5 kHz is the
-    // research doc's starting point for the user's ear-tuning (section 7.3).
+    // Parameters.cpp. maxShimmerToneHz is the Off endpoint (alias cap only).
+    // 5 kHz is the research doc's starting point for the user's ear-tuning
+    // (section 7.3). minShimmerToneCutoffHz floors the applied cutoff so the
+    // TPT filter stays well-conditioned at extreme pitch ratios.
     static constexpr float minShimmerToneHz = 1500.0f;
     static constexpr float maxShimmerToneHz = 10000.0f;
+    static constexpr float minShimmerToneCutoffHz = 20.0f;
     static constexpr float defaultShimmerToneHz = 5000.0f;
 
     // Phase 5 defaults for the new dry/wet mix and bypass knobs -- fully
@@ -668,16 +672,12 @@ private:
     bool highCutActive = false;
 
     // Shimmer Tone (see setShimmerTone()): two mono 2nd-order TPT lowpass
-    // sections in series (4th order, 24 dB/oct). shimmerToneActive is the
-    // per-block "not at the Off endpoint" decision and, like lowCutActive,
-    // gates only which signal the shifter gets: both sections run on every
-    // sample, so their state always tracks dryFeedback and activation
-    // continues from it instead of stepping from zero state.
-    // shimmerToneAliasCapBaseHz is fs / 4, set in prepare().
+    // sections in series (4th order, 24 dB/oct). Both sections run on every
+    // sample and always feed the shifter (there is no Off bypass: Off is the
+    // alias cap alone). shimmerToneAliasCapBaseHz is fs / 4, set in prepare().
     juce::dsp::StateVariableTPTFilter<float> shimmerToneFilterA, shimmerToneFilterB;
     float shimmerToneHz = defaultShimmerToneHz;
     float shimmerToneAliasCapBaseHz = 11025.0f;
-    bool shimmerToneActive = false;
 
     // Test-only state, see peekTankLeft()/peekTankRight().
     float lastTankLeft = 0.0f;

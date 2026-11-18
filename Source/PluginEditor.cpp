@@ -62,9 +62,10 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     // suffix -- the parameter's own text already reads "5000 Hz" / "Off".
     configureRotary (shimmerToneSlider, shimmerToneLabel, "Shimmer Tone");
     shimmerToneSlider.setTooltip ("Low-pass on the signal entering the pitch shifter. Lower settings darken the "
-                                  "shimmer and make higher octaves fade sooner. It also caps itself one octave "
-                                  "below the shift's aliasing point (about 5.5 kHz at +12 st and 2.8 kHz at +24 st "
-                                  "at 44.1 kHz). Fully clockwise is Off: no filtering.");
+                                  "shimmer and make higher octaves fade sooner. The knob's range is scaled so its "
+                                  "top always sits one octave below the shift's aliasing point (about 5.5 kHz at "
+                                  "+12 st and 2.8 kHz at +24 st at 44.1 kHz), so large shifts get a lower cutoff "
+                                  "for the same setting. Fully clockwise is Off: only that anti-alias limit applies.");
     configureRotary (dampingSlider,  dampingLabel,  "Damping");
     configureRotary (widthSlider,    widthLabel,    "Width");
     configureRotary (mixSlider,      mixLabel,      "Mix");

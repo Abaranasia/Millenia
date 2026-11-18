@@ -125,7 +125,6 @@ void ShimmerReverbEngine::reset()
     highCutActive = false;
     shimmerToneFilterA.reset();
     shimmerToneFilterB.reset();
-    shimmerToneActive = false;
 
     // Unity-shifter idle skip (2026-10-10, see unityShifterActive's header
     // comment): unityShifter was just cleared above, so mark it idle --
@@ -249,9 +248,19 @@ float ShimmerReverbEngine::computeShimmerToneCutoffHz() const noexcept
     // ratio = 2^(st / 12); max(ratio, 1) leaves downward shifts at ratio 1's
     // fs / 4 cap. +12 st gives std::pow (2, 1) = 2 exactly, so the cap at
     // 44.1 kHz is exactly 5512.5 Hz.
+    //
+    // Tone is RELATIVE to the cap: the knob's range is scaled by
+    // min (1, cap / maxShimmerToneHz), so the whole range maps to distinct
+    // cutoffs (a plain min (Tone, cap) left every Tone above the cap dead)
+    // and Off (maxShimmerToneHz) lands exactly on the cap. Where the cap is
+    // at or above the 10 kHz range top the scale is 1 and cutoff == Tone.
+    // std::isfinite guards a NaN pitch; the floor keeps the TPT coefficient
+    // sane at extreme ratios.
     const float ratio = std::pow (2.0f, pitchShiftSemitones / 12.0f);
     const float aliasCapHz = shimmerToneAliasCapBaseHz / juce::jmax (ratio, 1.0f);
-    return juce::jmin (shimmerToneHz, aliasCapHz, maxFilterCutoffHz);
+    const float scale = juce::jmin (1.0f, aliasCapHz / maxShimmerToneHz);
+    const float cutoffHz = std::isfinite (scale) ? shimmerToneHz * scale : minShimmerToneCutoffHz;
+    return juce::jlimit (minShimmerToneCutoffHz, juce::jmax (minShimmerToneCutoffHz, maxFilterCutoffHz), cutoffHz);
 }
 
 void ShimmerReverbEngine::setMix (float newMix)
@@ -471,13 +480,10 @@ void ShimmerReverbEngine::processChunk (juce::dsp::AudioBlock<float>& block)
     lowCutFilter.setCutoffFrequency (juce::jmin (lowCutHz, maxFilterCutoffHz));
     highCutFilter.setCutoffFrequency (juce::jmin (highCutHz, maxFilterCutoffHz));
 
-    // Shimmer Tone, decided once per block, same warm-filter pattern as the
-    // wet EQ above (see shimmerToneActive's header comment). At Off the
-    // sections still run, at the alias-capped 10 kHz endpoint, and their
-    // output is unused -- bit-identical to no filter, and no alias cap (the
-    // legacy path). Recomputed every block, so a Tone or pitch change lands
-    // within one block, like the wet EQ cutoffs.
-    shimmerToneActive = shimmerToneHz < maxShimmerToneHz;
+    // Shimmer Tone, set once per block. The filter is ALWAYS applied to the
+    // shifter input -- Off is the alias cap alone, not a bypass (see
+    // computeShimmerToneCutoffHz()). Recomputed every block, so a Tone or
+    // pitch change lands within one block, like the wet EQ cutoffs.
     {
         const float shimmerToneCutoffHz = computeShimmerToneCutoffHz();
         shimmerToneFilterA.setCutoffFrequency (shimmerToneCutoffHz);
@@ -508,13 +514,10 @@ void ShimmerReverbEngine::processChunk (juce::dsp::AudioBlock<float>& block)
         float dryFeedback = tank.peekFeedbackSignal();
 
         // Shimmer Tone (2026-10-25, see setShimmerTone()): the main shifter
-        // and the formant corrector's dry analysis get the low-passed signal
-        // while active; unityShifter below always gets the raw dryFeedback,
-        // so Freeze is untouched. Both sections run on every sample either
-        // way (warm state); at Off shifterInput IS dryFeedback, so the shifter
-        // sees exactly what it saw before this filter existed.
-        const float toneFiltered = shimmerToneFilterB.processSample (0, shimmerToneFilterA.processSample (0, dryFeedback));
-        const float shifterInput = shimmerToneActive ? toneFiltered : dryFeedback;
+        // and the formant corrector's dry analysis always get the low-passed
+        // signal (at Off it is the alias cap alone); unityShifter below always
+        // gets the raw dryFeedback, so Freeze is untouched.
+        const float shifterInput = shimmerToneFilterB.processSample (0, shimmerToneFilterA.processSample (0, dryFeedback));
         float shiftedFeedback = shifter.processSample (shifterInput);
 
         // Freeze level crossfade (2026-10-10, see applyPitchAndFreezeCrossfade()).

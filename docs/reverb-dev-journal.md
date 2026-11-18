@@ -523,6 +523,27 @@ ShimmerReverbEngine, Cascade T6, FreezeCrossfade, Space and DattorroTank "Infini
 - Whether a held tail that sits slightly below the post-burst peak (about -1 dB) is what the user wants by ear.
 - Burst peak 2.1353 in the loud tank probe (weight 0.55, rho 1.0): present before this change, the regulator is inactive while input plays.
 
+## 2026-11-18 — Shimmer Tone relative to the alias cap (audit fix 9)
+
+### What changed
+
+- `computeShimmerToneCutoffHz()` was `min(Tone, cap, maxFilterCutoffHz)`, `cap = fs / (4 * max(ratio, 1))`. At +12 st / 44.1 kHz the cap is 5512.5 Hz, so Tone 5.5-10 kHz changed nothing (dead zone; worse at +24 st).
+- Now `min(maxFilterCutoffHz, Tone * min(1, cap / 10 kHz))`, floored at 20 Hz and NaN-safe. The knob's whole range maps to distinct cutoffs, Off (10 kHz) is exactly the cap, and where the cap is >= 10 kHz (0 st and downward at 44.1 kHz and up) cutoff == Tone, unchanged.
+- Off no longer bypasses the filter. `shimmerToneActive` and `isShimmerToneActiveForTesting()` are gone; the filter always feeds the main shifter and the formant corrector's dry analysis. `unityShifter` still gets the raw `dryFeedback` (Freeze untouched). Before, Off was brighter and more aliased than Tone 9.9 kHz (a jump).
+
+### Behaviour change
+
+- Default Tone 5 kHz: unchanged only where the cap is >= 10 kHz (ratio <= 1.1025, i.e. up to about +1.68 st at 44.1 kHz); at +12 st 5000 -> 2756.25 Hz, at +24 st 5000 -> 1378.1 Hz. Off at 0 st is a 10 kHz 4th-order low-pass instead of no filter.
+
+### Tests
+
+- Cutoff test rewritten (44.1 / 48 / 96 kHz, 8 kHz, +24 st floor, monotonic/no dead zone, continuity at Off). T3 now asserts Off equals Tone 9999 Hz and stays under 40 dB (pre-fix Off was >= 58 dB). T2's RT60 bound widened 10% -> 15% (Off now carries the cap's in-loop loss: 5.22 / 4.80 / 4.19 s).
+- Golden hashes re-recorded on purpose (default mono d0a32dcfc2df8430 -> 710e1b3591f3e7ba, default left 9ece884b8f1eb6b2 -> 5497270224afda5f, legacy mono 5ad945c92eaae118 -> c01bda38eb9cda50, legacy left f57207430acd5ac8 -> ed29a30c654e5d39). The legacy hashes no longer prove bit-identity with the pre-Tone engine, because Off cannot bypass any more.
+
+### Still open
+
+- The parameter's value text still reads the knob value in Hz ("5000 Hz"), which is no longer the applied cutoff at large shifts.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

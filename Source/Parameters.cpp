@@ -165,9 +165,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // Shimmer Tone (see ParamIDs::shimmerTone): 1.5-10 kHz, default 5 kHz
     // (ShimmerReverbEngine::defaultShimmerToneHz), skewed like the wet EQ
     // corners so the range's geometric midpoint (~3.87 kHz) sits at the
-    // knob's centre. The top endpoint is Off -- the engine stops using the
-    // filter's output there (legacy path, no alias cap) -- so the value text
-    // says "Off" at 10 kHz, in the editor (SliderAttachment shows the
+    // knob's centre. The top endpoint is Off -- the engine applies only the
+    // pitch-ratio alias cap there, no Tone darkening -- and the Hz value is
+    // scaled by that cap when the cap is below 10 kHz (see
+    // ShimmerReverbEngine::setShimmerTone()), so the value text says "Off"
+    // at 10 kHz, in the editor (SliderAttachment shows the
     // parameter's own text) and in host automation lanes alike. The text
     // carries its own " Hz" unit, so the editor sets no suffix. Text entry
     // accepts "Off" (-> 10 kHz) or a number in Hz.
