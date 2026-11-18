@@ -6,41 +6,65 @@
   <MAINGROUP id="tGrpMn" name="MilleniaTests">
     <GROUP id="{1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901}" name="Source">
       <FILE id="tstMain" name="Main.cpp" compile="1" resource="0" file="Source/Main.cpp"/>
-      <FILE id="tstDTT" name="DattorroTankTests.cpp" compile="1"
-            resource="0" file="Source/DattorroTankTests.cpp"/>
-      <FILE id="tstPST" name="PitchShifterTests.cpp" compile="1"
-            resource="0" file="Source/PitchShifterTests.cpp"/>
-      <FILE id="tstSRT" name="ShimmerReverbEngineTests.cpp" compile="1"
-            resource="0" file="Source/ShimmerReverbEngineTests.cpp"/>
-      <FILE id="tstDCT" name="DCBlockerTests.cpp" compile="1"
-            resource="0" file="Source/DCBlockerTests.cpp"/>
-      <FILE id="tstLIT" name="SafetyLimiterTests.cpp" compile="1"
-            resource="0" file="Source/SafetyLimiterTests.cpp"/>
+      <FILE id="tstDTT" name="DattorroTankTests.cpp" compile="1" resource="0"
+            file="Source/DattorroTankTests.cpp"/>
+      <FILE id="tstPST" name="PitchShifterTests.cpp" compile="1" resource="0"
+            file="Source/PitchShifterTests.cpp"/>
+      <FILE id="tstSRT" name="ShimmerReverbEngineTests.cpp" compile="1" resource="0"
+            file="Source/ShimmerReverbEngineTests.cpp"/>
+      <FILE id="tstDCT" name="DCBlockerTests.cpp" compile="1" resource="0"
+            file="Source/DCBlockerTests.cpp"/>
+      <FILE id="tstLIT" name="SafetyLimiterTests.cpp" compile="1" resource="0"
+            file="Source/SafetyLimiterTests.cpp"/>
+      <FILE id="tstFEC" name="FormantEnvelopeCorrectorTests.cpp" compile="1"
+            resource="0" file="Source/FormantEnvelopeCorrectorTests.cpp"/>
+      <FILE id="tstLCT" name="LoopCaptureTests.cpp" compile="1" resource="0"
+            file="Source/LoopCaptureTests.cpp"/>
+      <FILE id="tstSST" name="StateSchemaTests.cpp" compile="1" resource="0"
+            file="Source/StateSchemaTests.cpp"/>
+      <FILE id="tstEPS" name="EngineParameterSmoothingTests.cpp" compile="1"
+            resource="0" file="Source/EngineParameterSmoothingTests.cpp"/>
+      <GROUP id="{3D4E5F60-7182-93A4-B5C6-D7E8F9011223}" name="App">
+        <FILE id="tstPRM" name="Parameters.cpp" compile="1" resource="0" file="../Source/Parameters.cpp"/>
+        <FILE id="tstPRH" name="Parameters.h" compile="0" resource="0" file="../Source/Parameters.h"/>
+        <FILE id="tstSSH" name="StateSchema.h" compile="0" resource="0" file="../Source/StateSchema.h"/>
+      </GROUP>
       <GROUP id="{2C3D4E5F-6071-8293-A4B5-C6D7E8F90112}" name="DSP">
         <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
               file="../Source/DSP/DattorroTank.cpp"/>
-        <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0"
-              file="../Source/DSP/DattorroTank.h"/>
+        <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0" file="../Source/DSP/DattorroTank.h"/>
+        <FILE id="tstFEH" name="FormantEnvelopeCorrector.h" compile="0" resource="0"
+              file="../Source/DSP/FormantEnvelopeCorrector.h"/>
+        <FILE id="tstFEP" name="FormantEnvelopeCorrector.cpp" compile="1" resource="0"
+              file="../Source/DSP/FormantEnvelopeCorrector.cpp"/>
         <FILE id="tstPSC" name="PitchShifter.cpp" compile="1" resource="0"
               file="../Source/DSP/PitchShifter.cpp"/>
-        <FILE id="tstPSH" name="PitchShifter.h" compile="0" resource="0"
-              file="../Source/DSP/PitchShifter.h"/>
+        <FILE id="tstPSH" name="PitchShifter.h" compile="0" resource="0" file="../Source/DSP/PitchShifter.h"/>
         <FILE id="tstSRC" name="ShimmerReverbEngine.cpp" compile="1" resource="0"
               file="../Source/DSP/ShimmerReverbEngine.cpp"/>
         <FILE id="tstSRH" name="ShimmerReverbEngine.h" compile="0" resource="0"
               file="../Source/DSP/ShimmerReverbEngine.h"/>
-        <FILE id="tstDCH" name="DCBlocker.h" compile="0" resource="0"
-              file="../Source/DSP/DCBlocker.h"/>
+        <FILE id="tstDCH" name="DCBlocker.h" compile="0" resource="0" file="../Source/DSP/DCBlocker.h"/>
         <FILE id="tstLIC" name="SafetyLimiter.cpp" compile="1" resource="0"
               file="../Source/DSP/SafetyLimiter.cpp"/>
+        <FILE id="tstLCC" name="LoopCapture.cpp" compile="1" resource="0" file="../Source/DSP/LoopCapture.cpp"/>
+        <FILE id="tstLCH" name="LoopCapture.h" compile="0" resource="0" file="../Source/DSP/LoopCapture.h"/>
       </GROUP>
     </GROUP>
   </MAINGROUP>
   <MODULES>
     <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_audio_formats" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_audio_processors" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_audio_processors_headless" showAllCode="1" useLocalCopy="0"
+            useGlobalPath="1"/>
     <MODULE id="juce_core" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_data_structures" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
     <MODULE id="juce_dsp" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_events" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_graphics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_gui_basics" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
+    <MODULE id="juce_gui_extra" showAllCode="1" useLocalCopy="0" useGlobalPath="1"/>
   </MODULES>
   <EXPORTFORMATS>
     <VS2026 targetFolder="Builds/VisualStudio2026">
@@ -50,9 +74,16 @@
       </CONFIGURATIONS>
       <MODULEPATHS>
         <MODULEPATH id="juce_audio_basics" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_audio_processors" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_data_structures" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_events" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_graphics" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_gui_basics" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_audio_formats" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_core" path="../../Projucer/modules"/>
         <MODULEPATH id="juce_dsp" path="../../Projucer/modules"/>
+        <MODULEPATH id="juce_gui_extra" path="../../../Projucer/modules"/>
+        <MODULEPATH id="juce_audio_processors_headless" path="../../../Projucer/modules"/>
       </MODULEPATHS>
     </VS2026>
   </EXPORTFORMATS>

@@ -1,12 +1,14 @@
 #include "DattorroTank.h"
+#include <cmath>
+#include <limits>
 
 DattorroTank::DattorroTank() = default;
 DattorroTank::~DattorroTank() = default;
 
 void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
 {
-    // Every delay line/filter here is mono, same as ScratchSchroederTank —
-    // true stereo decorrelation is deferred to Phase 4.
+    // Every delay line/filter here is mono, same as ScratchSchroederTank --
+    // stereo comes only from the two output tap sets reading this one tank.
     juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
 
     for (int i = 0; i < numDiffuserStages; ++i)
@@ -22,13 +24,37 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     prepareBranch (branchB, monoSpec, branchBAllpass1Ms, branchBDelay1Ms, branchBAllpass2Ms, branchBDelay2Ms);
 
     auto msToSamples = [&spec] (float ms) { return ms * 0.001f * (float) spec.sampleRate; };
-    outputTapBDelay1aSamples  = msToSamples (outputTapBDelay1aMs);
-    outputTapBDelay1bSamples  = msToSamples (outputTapBDelay1bMs);
-    outputTapBAllpass2Samples = msToSamples (outputTapBAllpass2Ms);
-    outputTapBDelay2Samples   = msToSamples (outputTapBDelay2Ms);
-    outputTapADelay1Samples   = msToSamples (outputTapADelay1Ms);
-    outputTapAAllpass2Samples = msToSamples (outputTapAAllpass2Ms);
-    outputTapADelay2Samples   = msToSamples (outputTapADelay2Ms);
+    for (size_t i = 0; i < outputTapMs.size(); ++i)
+        outputTapBaseSamples[i] = msToSamples (outputTapMs[i]);
+
+    // Infinite mode and user Modulation (see setInfiniteAmount()/
+    // setModulation() and the header's mod* constants). prepareBranch()
+    // above already gave both allpass1 lines headroom for the larger of the
+    // two depths at maxSize. Their unmodulated centre is the branch's
+    // allpass1Samples (the whole-sample Size-1 length times Size), so
+    // processSample()'s "centre + 0.0f" with no modulation re-applies
+    // exactly the value setDelay() was given -- bit-identical by
+    // construction.
+    modDepthSamples = msToSamples (modDepthMs);
+    userModDepthSamples = msToSamples (maxModulationDepthMs);
+    modPhaseIncrementA = juce::MathConstants<float>::twoPi * modRateHzA / (float) spec.sampleRate;
+    modPhaseIncrementB = juce::MathConstants<float>::twoPi * modRateHzB / (float) spec.sampleRate;
+
+    auto onePoleCoeff = [&spec] (float seconds) { return (float) std::exp (-1.0 / ((double) seconds * spec.sampleRate)); };
+    levelAttackCoeff  = onePoleCoeff (levelAttackSeconds);
+    levelReleaseCoeff = onePoleCoeff (levelReleaseSeconds);
+    levelGainCoeff    = onePoleCoeff (levelGainSmoothingSeconds);
+
+    // reset(sampleRate, ramp) snaps the current value to the existing
+    // target, so a caller's setInfiniteAmount() survives a re-prepare (e.g.
+    // a host sample-rate change) -- ShimmerReverbEngine::prepare() re-seeds
+    // it anyway, mirroring its shimmerFeedback re-seed.
+    smoothedInfiniteAmount.reset (spec.sampleRate, infiniteRampSeconds);
+
+    // Same "keep the caller's target, snap to it" rule for Size and
+    // Modulation; reset() below then scales the lines to that Size.
+    smoothedSize.reset (spec.sampleRate, sizeRampSeconds);
+    smoothedModulation.reset (spec.sampleRate, modulationRampSeconds);
 
     reset();
 }
@@ -36,23 +62,59 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
 void DattorroTank::prepareBranch (TankBranch& branch, const juce::dsp::ProcessSpec& monoSpec,
                                    float allpass1Ms, float delay1Ms, float allpass2Ms, float delay2Ms)
 {
-    auto sizeDelay = [&monoSpec] (DelayLineType& delay, float delayMs)
+    // Returns the whole-sample Size-1 length. Each line is allocated for
+    // that length times maxSize (slice 2), so Size never reallocates; a
+    // larger buffer does not change what any read returns (reads are
+    // relative to the write pointer), so Size 1 is unaffected.
+    auto sizeDelay = [&monoSpec] (auto& delay, float delayMs, int extraHeadroomSamples = 0)
     {
         auto delayInSamples = juce::roundToInt (delayMs * 0.001 * monoSpec.sampleRate);
-        delay.setMaximumDelayInSamples (delayInSamples + 1);
+        delay.setMaximumDelayInSamples ((int) std::ceil ((float) delayInSamples * maxSize) + 1 + extraHeadroomSamples);
         delay.prepare (monoSpec);
         delay.setDelay ((float) delayInSamples);
+        return (float) delayInSamples;
     };
 
-    sizeDelay (branch.allpass1.delayLine, allpass1Ms);
+    // Infinite mode and user Modulation move allpass1's read delay by up
+    // to +-max(modDepthMs, maxModulationDepthMs) around its centre (see
+    // processSample()), so its maximum must cover the longest centre plus
+    // that depth.
+    const float maxDepthMs = juce::jmax (modDepthMs, maxModulationDepthMs);
+    const int modHeadroomSamples = (int) std::ceil (maxDepthMs * 0.001 * monoSpec.sampleRate) + 1;
+    branch.allpass1BaseSamples = sizeDelay (branch.allpass1.delayLine, allpass1Ms, modHeadroomSamples);
     branch.allpass1.feedback = branchAllpass1Feedback;
 
-    sizeDelay (branch.delay1, delay1Ms);
+    branch.delay1BaseSamples = sizeDelay (branch.delay1, delay1Ms);
 
-    sizeDelay (branch.allpass2.delayLine, allpass2Ms);
+    branch.allpass2BaseSamples = sizeDelay (branch.allpass2.delayLine, allpass2Ms);
     branch.allpass2.feedback = branchAllpass2Feedback;
 
-    sizeDelay (branch.delay2, delay2Ms);
+    branch.delay2BaseSamples = sizeDelay (branch.delay2, delay2Ms);
+}
+
+void DattorroTank::applySize (float size)
+{
+    // base * 1.0f is exact, so at Size 1 every line and tap gets exactly the
+    // value it had before Size existed (bit-identical, see the golden-hash
+    // tests). Off 1.0 the delays are fractional: delay1/delay2/allpass2
+    // read through Lagrange3rd, allpass1 through Thiran (see
+    // ModulatedDelayLineType for its glide-rate analysis).
+    for (auto* branch : { &branchA, &branchB })
+    {
+        branch->allpass1Samples = branch->allpass1BaseSamples * size;
+        branch->delay1Samples   = branch->delay1BaseSamples * size;
+        branch->allpass2Samples = branch->allpass2BaseSamples * size;
+        branch->delay2Samples   = branch->delay2BaseSamples * size;
+
+        branch->delay1.setDelay (branch->delay1Samples);
+        branch->allpass2.delayLine.setDelay (branch->allpass2Samples);
+        branch->delay2.setDelay (branch->delay2Samples);
+        // allpass1's delay is set every sample in processSample() (centre +
+        // modulation offset).
+    }
+
+    for (size_t i = 0; i < outputTapSamples.size(); ++i)
+        outputTapSamples[i] = outputTapBaseSamples[i] * size;
 }
 
 void DattorroTank::reset()
@@ -64,6 +126,24 @@ void DattorroTank::reset()
     resetBranch (branchB);
 
     feedbackFromB = 0.0f;
+    lastRightOutput = 0.0f;
+
+    // Infinite mode state: snap the ramp to its target (keeps a caller's
+    // setting, drops any in-flight ramp), restart both LFOs at their fixed
+    // phases, and clear the level controller back to unity gain.
+    smoothedInfiniteAmount.setCurrentAndTargetValue (smoothedInfiniteAmount.getTargetValue());
+    modPhaseA = 0.0f;
+    modPhaseB = modPhaseOffsetB;
+    levelEnvelope = 0.0f;
+    levelGain = 1.0f;
+
+    // Size/Modulation: same snap-to-target rule, then scale the lines to
+    // the snapped Size and re-derive g from it.
+    smoothedSize.setCurrentAndTargetValue (smoothedSize.getTargetValue());
+    smoothedModulation.setCurrentAndTargetValue (smoothedModulation.getTargetValue());
+    appliedSize = smoothedSize.getTargetValue();
+    applySize (appliedSize);
+    decayGainDirty = true;
 }
 
 void DattorroTank::resetBranch (TankBranch& branch)
@@ -80,12 +160,83 @@ void DattorroTank::setDamping (float newDampingCoefficient)
     dampingCoefficient = newDampingCoefficient;
 }
 
-void DattorroTank::setDecay (float newDecayGain)
+void DattorroTank::setDecaySeconds (float newDecaySeconds)
 {
-    decayGain = newDecayGain;
+    // Called every block by the processor; only a real change re-derives g.
+    if (newDecaySeconds != decaySeconds)
+    {
+        decaySeconds = newDecaySeconds;
+        decayGainDirty = true;
+    }
 }
 
-float DattorroTank::processAllpass (float input, AllpassStage& stage)
+void DattorroTank::setSize (float newSize)
+{
+    smoothedSize.setTargetValue (newSize);
+}
+
+void DattorroTank::setModulation (float newModulation)
+{
+    smoothedModulation.setTargetValue (newModulation);
+}
+
+float DattorroTank::decayGainFor (float newDecaySeconds, float size) noexcept
+{
+    // Double precision so the result is the correctly-rounded float of the
+    // exact mapping (decaySecondsForGain() relies on that to hit a target
+    // gain exactly). The RT60 floor only guards a division by zero.
+    const double rt60 = juce::jmax (1.0e-3, (double) newDecaySeconds);
+    const double g = std::pow (10.0, -3.0 * halfLoopSeconds * (double) size / rt60);
+    return (float) juce::jmin ((double) maxDecayGain, g);
+}
+
+float DattorroTank::decaySecondsForGain (float gain, float size) noexcept
+{
+    // Analytic inverse, then a short walk over neighbouring floats until
+    // decayGainFor() returns `gain` exactly (g rises monotonically with
+    // RT60). Gains outside (0, maxDecayGain] have no exact preimage; the
+    // closest analytic value is returned for them.
+    const double analytic = -3.0 * halfLoopSeconds * (double) size / std::log10 ((double) juce::jlimit (1.0e-6f, 0.999999f, gain));
+    float candidate = (float) analytic;
+
+    for (int step = 0; step < 1024; ++step)
+    {
+        const float g = decayGainFor (candidate, size);
+        if (g == gain)
+            break;
+        candidate = std::nextafter (candidate, g < gain ? std::numeric_limits<float>::max() : 0.0f);
+    }
+
+    return candidate;
+}
+
+void DattorroTank::setShimmerAmountGain (float newShimmerAmountGain)
+{
+    shimmerAmountGain = newShimmerAmountGain;
+}
+
+void DattorroTank::setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight)
+{
+    maxShimmerBlendWeight = newMaxShimmerBlendWeight;
+}
+
+void DattorroTank::setShimmerBlendLaw (float equalPowerAmount)
+{
+    shimmerEqualPowerAmount = equalPowerAmount;
+}
+
+void DattorroTank::setFreezeAmount (float newFreezeAmount)
+{
+    freezeAmount = newFreezeAmount;
+}
+
+void DattorroTank::setInfiniteAmount (float newInfiniteAmount)
+{
+    smoothedInfiniteAmount.setTargetValue (newInfiniteAmount);
+}
+
+template <typename Stage>
+float DattorroTank::processAllpass (float input, Stage& stage)
 {
     // Correct one-multiply Schroeder allpass (Julius O. Smith's "Schroeder
     // Allpass Sections" form): w[n] = x[n] + g*w[n-M]; y[n] = -g*w[n] + w[n-M].
@@ -132,38 +283,180 @@ float DattorroTank::processBranch (float input, TankBranch& branch)
     return out;
 }
 
-float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples)
+float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples, float configuredDelay)
 {
     // See the declaration-site comment: popSample's explicit-delayInSamples
     // overload calls setDelay() internally even when updateReadPointer is
     // false, so it would otherwise permanently shorten this delay line's
     // configured length for every later recirculating popSample(-1) call.
-    // Save/restore keeps this strictly a non-destructive output-only peek.
-    const float configuredDelay = delay.getDelay();
+    // Restoring the caller's configured value keeps this strictly a
+    // non-destructive output-only peek.
     float tapped = delay.popSample (0, offsetSamples, false);
     delay.setDelay (configuredDelay);
     return tapped;
 }
 
-float DattorroTank::processSample (float input, float recirculatingFeedback)
+float DattorroTank::processSample (float input, float externalFeedback)
 {
+    // Size glide and Decay (slice 2, see setSize()/setDecaySeconds()). When
+    // Size is not moving getNextValue() returns exactly appliedSize, so
+    // nothing below runs and steady-state cost is one compare; a Decay
+    // change re-derives g once.
+    const float size = smoothedSize.getNextValue();
+    if (size != appliedSize)
+    {
+        appliedSize = size;
+        applySize (size);
+        decayGainDirty = true;
+    }
+
+    if (decayGainDirty)
+    {
+        decayGain = decayGainFor (decaySeconds, appliedSize);
+        decayGainDirty = false;
+    }
+
     float diffused = input;
 
     for (auto& stage : diffuserStages)
         diffused = processAllpass (diffused, stage);
 
-    // Figure-eight cross-feed: the caller-supplied recirculating feedback
-    // (by default branch B's previous output, via the single-arg overload;
-    // or an externally pitch-shifted version of it, from
-    // ShimmerReverbEngine) feeds branch A, branch A's fresh output feeds
-    // branch B.
-    float inputToA = diffused + decayGain * recirculatingFeedback;
+    // Structural fix, second pass (docs/shimmer-reverb-implementation-plan.md's
+    // Phase 8 note, 2026-08-18): externalFeedback claims a capped SHARE of
+    // the tank's fixed recirculation budget, crossfaded against the tank's
+    // own natural feedbackFromB, rather than being added as an independent
+    // extra gain on top. Since shimmerWeight + plainWeight is always exactly
+    // 1.0, the combined magnitude of (plainWeight*feedbackFromB +
+    // shimmerWeight*externalFeedback) can never exceed
+    // max(|feedbackFromB|, |externalFeedback|) -- so the TOTAL feedback gain
+    // reaching the tank stays bounded by decayGain alone (the same ceiling
+    // Phase 4 already validated safe, decayGain <= 0.85), for ANY
+    // shimmerAmountGain setting. The first attempt at this fix (a plain
+    // additive sum, decayGain*feedbackFromB + shimmerAmountGain*
+    // externalFeedback) let the two gains add independently, so combined
+    // loop gain could reach decayGain + shimmerAmountGain (~1.7 at
+    // defaults) -- past unity, kept only technically bounded by
+    // SafetyLimiter's hard clipping, which produced the reported
+    // "oscillating, unnatural, psychedelic" character. capping
+    // shimmerWeight at maxShimmerBlendWeight (0.5) also guarantees at least
+    // half the recirculating budget always stays on the plain/unshifted
+    // path even at shimmerAmount's maximum, which is what prevents full
+    // geometric pitch-compounding (the original "chipmunk" bug) from
+    // reappearing.
+    // Phase 9 Freeze (see docs/shimmer-reverb-implementation-plan.md and
+    // frozenDecayGain's comment in the header): blends the live decayGain
+    // toward frozenDecayGain as freezeAmount goes 0 -> 1, so at
+    // freezeAmount=0.0f effectiveDecayGain is bit-identical to decayGain
+    // (no behavior change) and at 1.0f both cross-feed sums below
+    // recirculate at the near-unity frozen gain instead. Computed once and
+    // reused for both the A and B cross-feed sums -- Phase 4's validated
+    // decayGain<=0.85 stability work assumed strictly <1.0 and never
+    // exercised this near-unity case, hence the dedicated freeze stability
+    // test in DattorroTankTests.cpp.
+    float effectiveDecayGain = decayGain + freezeAmount * (frozenDecayGain - decayGain);
+
+    // Infinite mode (see setInfiniteAmount() and the header's infinite*
+    // constants). One ramp value per sample drives all three mechanisms.
+    // Every one is written so infinite == 0.0f is an exact no-op:
+    // x + 0.0f*(...) == x, 1.0f + 0.0f*(...) == 1.0f, and a*1.0f == a are all
+    // exact in IEEE float, so the arithmetic below reproduces the
+    // pre-Infinite values bit-for-bit (verified by DattorroTankTests.cpp's
+    // "Infinite OFF is bit-identical" test, not just argued).
+    const float infiniteAmount = smoothedInfiniteAmount.getNextValue();
+
+    // (a) decay pin toward exactly 1.0, applied on top of Freeze's own pin.
+    effectiveDecayGain = effectiveDecayGain + infiniteAmount * (infiniteDecayGain - effectiveDecayGain);
+
+    // (c) level controller gain, from the follower state updated at the end
+    // of the previous sample (see below).
+    const float levelGainEffective = 1.0f + infiniteAmount * (levelGain - 1.0f);
+    const float crossFeedGain = effectiveDecayGain * levelGainEffective;
+
+    // (b) allpass1 read-delay modulation, shared by Infinite and the user
+    // Modulation control (slice 2): the deeper of the two wins, so
+    // Infinite alone behaves exactly as before (max(0, x) == x for x >= 0).
+    // The offset is only computed when some depth is actually present, so
+    // with both at 0.0f each line gets back exactly its centre delay
+    // (centre + 0.0f == centre).
+    const float userDepth = smoothedModulation.getNextValue() * userModDepthSamples;
+    const float depth = juce::jmax (userDepth, infiniteAmount * modDepthSamples);
+    float modOffsetA = 0.0f, modOffsetB = 0.0f;
+
+    if (depth > 0.0f)
+    {
+        modOffsetA = depth * std::sin (modPhaseA);
+        modOffsetB = depth * std::sin (modPhaseB);
+    }
+
+    branchA.allpass1.delayLine.setDelay (branchA.allpass1Samples + modOffsetA);
+    branchB.allpass1.delayLine.setDelay (branchB.allpass1Samples + modOffsetB);
+
+    // Freeze, second mechanism (see frozenMaxShimmerBlendWeight's header
+    // comment for the full measured history): crossfades the shimmerWeight
+    // CAP toward a smaller value as freezeAmount goes 0->1, reducing (not
+    // eliminating) how much of the loop's energy takes the comb-filtering-
+    // prone detour through the shimmer path once frozen, without forcing
+    // plainWeight all the way to the proven-unstable 1.0.
+    const float effectiveMaxShimmerBlendWeight = maxShimmerBlendWeight
+                                                      + freezeAmount * (frozenMaxShimmerBlendWeight - maxShimmerBlendWeight);
+    const float shimmerWeight = shimmerAmountGain * effectiveMaxShimmerBlendWeight;
+
+    // Blend law (2026-10-24, shimmer cascade slice 1, see setShimmerBlendLaw()
+    // and docs/shimmer-character-research.md sections 3 and 7.1). The linear
+    // law above keeps the AMPLITUDE budget at 1, but when the external signal
+    // is pitch-shifted by a semitone or more it is uncorrelated with
+    // feedbackFromB, so only plainWeight^2 + shimmerWeight^2 of the ENERGY
+    // survives each pass (0.745 at shimmerWeight 0.15, 0.5 at 0.5): more
+    // shimmer meant a shorter tail, which is what drove the old 0.15 cap and
+    // the inverted Sustain mapping. Equal-power (plainWeight = sqrt (1 -
+    // shimmerWeight^2)) keeps that energy at 1; the engine fades back to the
+    // linear law as the shift goes toward 0 st, where the copies correlate.
+    //
+    // The (1 - freezeAmount) factor is required, not cosmetic: when frozen,
+    // the engine's unity crossfade makes externalFeedback an UNSHIFTED copy,
+    // correlated with feedbackFromB, and equal-power weights on correlated
+    // signals sum above 1 (at the 0.01 frozen cap, 0.99995 + 0.01 ~= 1.01)
+    // inside a near-lossless (0.999) loop -- growth. Linear weights sum to
+    // exactly 1, so Freeze keeps its validated arithmetic: at freezeAmount
+    // 1.0 this is bit-identical to the linear law (DattorroTankTests), and the
+    // full-engine Freeze guard in ShimmerReverbEngineCascadeTests holds level
+    // like the legacy path. At equalPower == 0.0f (default, or fully frozen)
+    // the branch is skipped and plainWeight is the old 1 - shimmerWeight
+    // bit-for-bit.
+    float plainWeight = 1.0f - shimmerWeight;
+    const float equalPower = shimmerEqualPowerAmount * (1.0f - freezeAmount);
+
+    if (equalPower != 0.0f)
+        plainWeight += equalPower * (std::sqrt (juce::jmax (0.0f, 1.0f - shimmerWeight * shimmerWeight)) - plainWeight);
+
+    float inputToA = diffused + crossFeedGain * (plainWeight * feedbackFromB + shimmerWeight * externalFeedback);
     float tankA_out = processBranch (inputToA, branchA);
 
-    float inputToB = diffused + decayGain * tankA_out;
+    float inputToB = diffused + crossFeedGain * tankA_out;
     float tankB_out = processBranch (inputToB, branchB);
 
     feedbackFromB = tankB_out;
+
+    // (c) Infinite's level controller, updated after feedbackFromB is
+    // latched so next sample's crossFeedGain sees it. Runs unconditionally
+    // (cheap, and keeps the follower warm so engaging Infinite on an
+    // already-loud tail reacts at once), but only reaches the output through
+    // levelGainEffective above, which is exactly 1.0f at infinite == 0.0f.
+    {
+        const float absFeedback = std::abs (feedbackFromB);
+        const float envCoeff = absFeedback > levelEnvelope ? levelAttackCoeff : levelReleaseCoeff;
+        levelEnvelope = envCoeff * levelEnvelope + (1.0f - envCoeff) * absFeedback;
+
+        const float targetGain = levelEnvelope > levelCeiling ? levelCeiling / levelEnvelope : 1.0f;
+        levelGain = levelGainCoeff * levelGain + (1.0f - levelGainCoeff) * targetGain;
+    }
+
+    // (b) advance both LFOs, wrapped to keep float phase precision.
+    modPhaseA += modPhaseIncrementA;
+    modPhaseB += modPhaseIncrementB;
+
+    if (modPhaseA >= juce::MathConstants<float>::twoPi) modPhaseA -= juce::MathConstants<float>::twoPi;
+    if (modPhaseB >= juce::MathConstants<float>::twoPi) modPhaseB -= juce::MathConstants<float>::twoPi;
 
     // Real Dattorro output tap formula (see the outputTap* constants in
     // the header): seven roughly-equal-weight taps with alternating
@@ -172,14 +465,31 @@ float DattorroTank::processSample (float input, float recirculatingFeedback)
     // tankB_out, or the recirculating cross-feed -- output-only.
     // tankA_out/tankB_out are used purely for recirculation now, not
     // summed directly into the output.
+    const auto& taps = outputTapSamples;
     float tankOut = outputScale * (
-          peekTap (branchB.delay1, outputTapBDelay1aSamples)
-        + peekTap (branchB.delay1, outputTapBDelay1bSamples)
-        - peekTap (branchB.allpass2.delayLine, outputTapBAllpass2Samples)
-        + peekTap (branchB.delay2, outputTapBDelay2Samples)
-        - peekTap (branchA.delay1, outputTapADelay1Samples)
-        - peekTap (branchA.allpass2.delayLine, outputTapAAllpass2Samples)
-        - peekTap (branchA.delay2, outputTapADelay2Samples)
+          peekTap (branchB.delay1, taps[tapBDelay1a], branchB.delay1Samples)
+        + peekTap (branchB.delay1, taps[tapBDelay1b], branchB.delay1Samples)
+        - peekTap (branchB.allpass2.delayLine, taps[tapBAllpass2], branchB.allpass2Samples)
+        + peekTap (branchB.delay2, taps[tapBDelay2], branchB.delay2Samples)
+        - peekTap (branchA.delay1, taps[tapADelay1], branchA.delay1Samples)
+        - peekTap (branchA.allpass2.delayLine, taps[tapAAllpass2], branchA.allpass2Samples)
+        - peekTap (branchA.delay2, taps[tapADelay2], branchA.delay2Samples)
+    );
+
+    // Dattorro's right-channel tap set (see the outputTapRight* constants):
+    // read exactly like the left set above, same lines' mirror nodes, same
+    // outputScale, same output-only position -- so no gain stage applies to
+    // one channel and not the other (Infinite's level controller acts on the
+    // shared cross-feed, upstream of both tap sets). Computed after the left
+    // sum so the left output's arithmetic is untouched (bit-identical).
+    lastRightOutput = outputScale * (
+          peekTap (branchA.delay1, taps[tapRightADelay1a], branchA.delay1Samples)
+        + peekTap (branchA.delay1, taps[tapRightADelay1b], branchA.delay1Samples)
+        - peekTap (branchA.allpass2.delayLine, taps[tapRightAAllpass2], branchA.allpass2Samples)
+        + peekTap (branchA.delay2, taps[tapRightADelay2], branchA.delay2Samples)
+        - peekTap (branchB.delay1, taps[tapRightBDelay1], branchB.delay1Samples)
+        - peekTap (branchB.allpass2.delayLine, taps[tapRightBAllpass2], branchB.allpass2Samples)
+        - peekTap (branchB.delay2, taps[tapRightBDelay2], branchB.delay2Samples)
     );
 
     return tankOut;
@@ -202,7 +512,8 @@ void DattorroTank::process (juce::dsp::AudioBlock<float>& block)
 
         float tankOut = processSample (monoIn);
 
+        // Channel 0 gets the left tap set, every other channel the right.
         for (size_t ch = 0; ch < numChannels; ++ch)
-            block.setSample ((int) ch, (int) i, tankOut);
+            block.setSample ((int) ch, (int) i, ch == 0 ? tankOut : lastRightOutput);
     }
 }
