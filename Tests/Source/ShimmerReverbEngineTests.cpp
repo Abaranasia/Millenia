@@ -3084,7 +3084,12 @@ public:
             // runs with Formant Correction ON, so this run goes through the
             // corrector and its numerics changed on purpose. The formant-OFF
             // path is unchanged (its tests are untouched and still pass).
-            constexpr juce::uint64 expectedDefaultHash = 0xd0a32dcfc2df8430ull;
+            //
+            // 2026-11-18, re-recorded d0a32dcfc2df8430 -> 710e1b3591f3e7ba
+            // after audit fix 9 (Shimmer Tone relative to the alias cap): at
+            // the default +12 st the 5 kHz Tone now cuts at 2756.25 Hz (was
+            // 5000 Hz), which changes the default sound by design.
+            constexpr juce::uint64 expectedDefaultHash = 0x710e1b3591f3e7ba;
 
             for (bool forceUnityActive : { false, true })
             {
@@ -3277,7 +3282,10 @@ public:
             // after the FormantEnvelopeCorrector LPC conditioning fix (audit
             // fix 4); legacySlice1Settings() has the corrector ON, see the
             // mono-sum hash test.
-            constexpr juce::uint64 expectedLeftHash = 0x9ece884b8f1eb6b2ull;
+            // 2026-11-18, re-recorded 9ece884b8f1eb6b2 -> 5497270224afda5f
+            // after audit fix 9 (Tone scaled by the +12 st alias cap, 5 kHz ->
+            // 2756.25 Hz), see the mono-sum hash test.
+            constexpr juce::uint64 expectedLeftHash = 0x5497270224afda5full;
             int rampStart = 0;
             std::vector<float> left, right;
             ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (false, 0.5, rampStart, &left, &right,
@@ -4216,11 +4224,19 @@ public:
             // legacy path now goes through the conditioned corrector. The old
             // values pinned the unconditioned corrector's numerics; the
             // formant-OFF path is unchanged.
-            constexpr juce::uint64 legacyMonoHash = 0x5ad945c92eaae118ull;
-            constexpr juce::uint64 legacyLeftHash = 0xf57207430acd5ac8ull;
+            //
+            // 2026-11-18, re-recorded 5ad945c92eaae118 -> c01bda38eb9cda50
+            // (mono) and f57207430acd5ac8 -> ed29a30c654e5d39 (left) after
+            // audit fix 9: Shimmer Tone Off no longer bypasses the filter (it
+            // is the +12 st alias cap, 5512.5 Hz), so the legacy path can no
+            // longer reproduce the pre-Tone arithmetic bit-for-bit. These now
+            // pin the legacy blend + capped Off; the legacy blend itself is
+            // still covered by the T2 / legacy-blend tests.
+            constexpr juce::uint64 legacyMonoHash = 0xc01bda38eb9cda50ull;
+            constexpr juce::uint64 legacyLeftHash = 0xed29a30c654e5d39ull;
 
-            // 2026-10-25 (step C): Shimmer Tone Off too (its 10 kHz endpoint,
-            // where the shifter gets the raw signal). Tone defaults to 5 kHz,
+            // 2026-10-25 (step C): Shimmer Tone Off too (its 10 kHz endpoint;
+            // alias cap only since audit fix 9). Tone defaults to 5 kHz,
             // which the engine these hashes were recorded on did not have;
             // legacySlice1Settings() leaves it at that default on purpose, so
             // the two default golden-hash tests cover the Tone filter.
@@ -4311,7 +4327,7 @@ public:
                                             + juce::String (gapLegacyAt15, 2) + "), expected >= 9 dB");
         }
 
-        beginTest ("T2: energy-neutral blend -- full-engine RT60 at +12 st, Decay 5 s, shimmerWeight 0 / 0.5 / 0.85 within +-10%");
+        beginTest ("T2: energy-neutral blend -- full-engine RT60 at +12 st, Decay 5 s, shimmerWeight 0 / 0.5 / 0.85 within +-15% (Off now carries the alias cap)");
         {
             // Impulse RT60 (SizeTests::measureEngineRt60(), Schroeder
             // -5..-35 dB fit). The legacy figures are logged to show the drop
@@ -4325,6 +4341,13 @@ public:
             // Measured (Release) at the default: 5.22 / 4.79 / 4.17 s
             // (-20% at 0.85), which failed the +-10% bound; logged below as
             // "Tone 5 kHz".
+            //
+            // Audit fix 9: Off no longer bypasses the filter -- at +12 st it is
+            // the 5512.5 Hz alias cap, so even Off now carries a small in-loop
+            // loss on the shifted share. Measured (Release) 5.22 / 4.80 / 4.19 s
+            // (max deviation 11.6% from the mean), so the bound is 15% (was 10%
+            // when Off was unfiltered). The blend law is still what keeps the
+            // drop far under the legacy linear law's (5.22 / 3.46 / 3.56 s).
             double rt[3] {}, legacyRt[3] {}, toneRt[3] {};
             const float weights[3] { 0.0f, 0.5f, 0.85f };
             for (int i = 0; i < 3; ++i)
@@ -4339,8 +4362,8 @@ public:
 
             const double mean = (rt[0] + rt[1] + rt[2]) / 3.0;
             for (int i = 0; i < 3; ++i)
-                expect (std::abs (rt[i] - mean) <= 0.1 * mean, "RT60 at shimmerWeight " + juce::String (weights[i], 2) + " is "
-                                                                   + juce::String (rt[i], 2) + " s, more than 10% from the mean "
+                expect (std::abs (rt[i] - mean) <= 0.15 * mean, "RT60 at shimmerWeight " + juce::String (weights[i], 2) + " is "
+                                                                   + juce::String (rt[i], 2) + " s, more than 15% from the mean "
                                                                    + juce::String (mean, 2) + " s");
         }
 
@@ -4822,57 +4845,113 @@ public:
 
     void runTest() override
     {
-        beginTest ("Effective cutoff: the ratio-tracking alias cap at 44.1 kHz (+12 -> 5512.5 Hz, +24 -> 2756.25 Hz, -12 uncapped), Off is inactive");
+        beginTest ("Effective cutoff: Tone is relative to the alias cap, Off is the cap itself, no dead zone (44.1 kHz)");
         {
             ShimmerReverbEngine engine;
             engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
             engine.reset();
 
-            // Default: 5 kHz, active, under the +12 st cap.
-            expect (engine.isShimmerToneActiveForTesting(), "Shimmer Tone must be active at its 5 kHz default");
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 5000.0f, 0.01f, "Default cutoff at +12 st");
+            // Default: 5 kHz at +12 st (cap 5512.5 Hz, scale 0.55125).
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 2756.25f, 0.01f, "Default Tone at +12 st scales to 2756.25 Hz");
 
-            engine.setShimmerTone (toneJustBelowOffHz);
+            // +12 st: Off is exactly the cap, Tone scales by cap / 10 kHz.
             engine.setPitchShiftSemitones (12.0f);
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 5512.5f, 0.01f, "+12 st cap (fs / 8)");
-            engine.setPitchShiftSemitones (24.0f);
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 2756.25f, 0.01f, "+24 st cap (fs / 16)");
-            engine.setPitchShiftSemitones (0.0f);
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), toneJustBelowOffHz, 0.01f, "0 st: cap fs / 4 = 11025 Hz is above the range");
-
-            engine.setShimmerTone (3000.0f);
-            engine.setPitchShiftSemitones (-12.0f);
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 3000.0f, 0.01f, "-12 st: downward shifts are not capped");
-            engine.setPitchShiftSemitones (12.0f);
-            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 3000.0f, 0.01f, "+12 st with Tone under the cap: Tone wins");
-            expect (engine.isShimmerToneActiveForTesting(), "Shimmer Tone must be active at 3 kHz");
-
             engine.setShimmerTone (toneOffHz);
-            expect (! engine.isShimmerToneActiveForTesting(), "Shimmer Tone at its 10 kHz endpoint must be Off (no filtering)");
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 5512.5f, 0.01f, "+12 st Off == cap (fs / 8)");
+            engine.setShimmerTone (3000.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 1653.75f, 0.01f, "+12 st Tone 3 kHz scales by 0.55125");
+            engine.setShimmerTone (1500.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 826.875f, 0.01f, "+12 st Tone 1.5 kHz scales by 0.55125");
+
+            // No dead zone: every Tone step across the range moves the cutoff.
+            for (float semitones : { 7.0f, 12.0f, 19.0f, 24.0f })
+            {
+                engine.setPitchShiftSemitones (semitones);
+                float previous = 0.0f;
+                for (float toneHz = 1500.0f; toneHz <= toneOffHz + 0.5f; toneHz += 500.0f)
+                {
+                    engine.setShimmerTone (toneHz);
+                    const float cutoff = engine.getShimmerToneCutoffHzForTesting();
+                    expect (cutoff > previous + 1.0f, "Dead zone at " + juce::String (semitones, 0) + " st, Tone " + juce::String (toneHz, 0)
+                                                          + " Hz: cutoff " + juce::String (cutoff, 2) + " vs previous " + juce::String (previous, 2));
+                    previous = cutoff;
+                }
+            }
+
+            // +24 st: monotonic, above the floor, Off == cap (fs / 16).
+            engine.setPitchShiftSemitones (24.0f);
+            engine.setShimmerTone (toneOffHz);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 2756.25f, 0.01f, "+24 st Off == cap (fs / 16)");
+            engine.setShimmerTone (1500.0f);
+            expect (engine.getShimmerToneCutoffHzForTesting() >= 20.0f, "+24 st lowest Tone must stay above the filter floor");
+
+            // 0 st: the cap (11025 Hz) is above the Tone range, so the cutoff is
+            // Tone itself, Off included (10 kHz, not bypassed).
+            engine.setPitchShiftSemitones (0.0f);
+            for (float toneHz : { 1500.0f, 5000.0f, 9999.0f, toneOffHz })
+            {
+                engine.setShimmerTone (toneHz);
+                expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), toneHz, 0.01f, "0 st: cutoff == Tone at " + juce::String (toneHz, 0));
+            }
+
+            // Downward shifts count as ratio 1.
+            engine.setPitchShiftSemitones (-12.0f);
+            engine.setShimmerTone (3000.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 3000.0f, 0.01f, "-12 st: downward shifts are not capped");
+
+            // Continuity at the Off endpoint: no jump between 9999 Hz and Off.
+            for (float semitones : { 0.0f, 12.0f, 24.0f })
+            {
+                engine.setPitchShiftSemitones (semitones);
+                engine.setShimmerTone (toneJustBelowOffHz);
+                const float below = engine.getShimmerToneCutoffHzForTesting();
+                engine.setShimmerTone (toneOffHz);
+                const float off = engine.getShimmerToneCutoffHzForTesting();
+                expect (off >= below && off - below <= 2.0f, "Cutoff jumps at the Off endpoint at " + juce::String (semitones, 0) + " st: "
+                                                                 + juce::String (below, 3) + " -> " + juce::String (off, 3));
+            }
 
             // Clamping: below the range -> 1.5 kHz, above -> Off.
-            engine.setShimmerTone (100.0f);
             engine.setPitchShiftSemitones (-12.0f);
+            engine.setShimmerTone (100.0f);
             expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 1500.0f, 0.01f, "Tone below the range clamps to 1.5 kHz");
             engine.setShimmerTone (50000.0f);
-            expect (! engine.isShimmerToneActiveForTesting(), "Tone above the range clamps to Off");
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), toneOffHz, 0.01f, "Tone above the range clamps to Off");
 
-            // Survives prepare()/reset(). "Not capped" for downward shifts
-            // means ratio counts as 1 (max (ratio, 1)), so fs / 4 still
-            // applies -- above the Tone range at 44.1 kHz and up, but it binds
-            // at a low sample rate: 8 kHz -> 2000 Hz (the 0.49 fs guard,
-            // 3920 Hz, is always above fs / 4 and never binds on its own).
+            // Survives prepare()/reset(). At 8 kHz the cap (fs / 4 = 2000 Hz)
+            // scales the Tone range: Off -> 2000 Hz, 5 kHz -> 1000 Hz.
             ShimmerReverbEngine lowRate;
-            lowRate.setShimmerTone (5000.0f);
+            lowRate.setShimmerTone (toneOffHz);
             lowRate.prepare ({ 8000.0, (juce::uint32) blockSize, 2 });
             lowRate.reset();
             lowRate.setPitchShiftSemitones (-12.0f); // prepare() re-seeds the pitch to +12 st, by design
-            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 2000.0f, 0.01f, "fs / 4 cap at 8 kHz, -12 st");
+            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 2000.0f, 0.01f, "fs / 4 cap at 8 kHz, Off, -12 st");
+            lowRate.setShimmerTone (5000.0f);
+            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 1000.0f, 0.01f, "8 kHz: Tone 5 kHz scales by 0.2");
             lowRate.setShimmerTone (2000.0f);
             lowRate.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
             lowRate.reset();
             lowRate.setPitchShiftSemitones (-12.0f);
             expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 2000.0f, 0.01f, "Tone must survive prepare() and reset()");
+
+            // Other sample rates: Off at +12 st is min(fs / 8, 10 kHz), and the range never collapses.
+            for (double fs : { 48000.0, 96000.0 })
+            {
+                ShimmerReverbEngine e;
+                e.prepare ({ fs, (juce::uint32) blockSize, 2 });
+                e.reset();
+                e.setPitchShiftSemitones (12.0f);
+                e.setShimmerTone (toneOffHz);
+                const float cap = (float) (fs / 8.0);
+                // Off is the cap, except where the cap exceeds the 10 kHz Tone range (96 kHz).
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), juce::jmin (cap, toneOffHz), 0.01f, "+12 st Off at " + juce::String (fs, 0));
+                e.setShimmerTone (5000.0f);
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), 5000.0f * juce::jmin (1.0f, cap / 10000.0f), 0.01f,
+                                           "+12 st Tone 5 kHz at " + juce::String (fs, 0));
+                e.setPitchShiftSemitones (0.0f);
+                e.setShimmerTone (7000.0f);
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), 7000.0f, 0.01f, "0 st cutoff == Tone at " + juce::String (fs, 0));
+            }
         }
 
         beginTest ("Tone darkens the shifted path: the 7040 Hz+ octaves drop >= 12 dB at 2 kHz vs Off, the 880 Hz octave survives at 5 kHz");
@@ -4919,10 +4998,14 @@ public:
             expect (mid880 >= off880 - 3.0, "The 880 Hz octave lost " + juce::String (off880 - mid880, 2) + " dB at 5 kHz (bound 3 dB)");
         }
 
-        beginTest ("T3: anti-alias -- with Tone just below Off only the ratio cap protects; alias lines >= 30 dB below Tone Off");
+        beginTest ("T3: anti-alias -- Off is the ratio cap alone (no unfiltered path): alias lines match Tone 9999 Hz and stay far below the pre-fix unfiltered level");
         {
-            // Spec T3 says "Tone at its 10 kHz maximum (not Off)"; the user
-            // made 10 kHz the Off endpoint, so 9999 Hz stands in for it.
+            // History: Off used to bypass the Tone filter (unfiltered shifter
+            // input), and this test asserted the capped run was >= 30 dB
+            // below Off. Since audit fix 9 Off applies the alias cap, so the
+            // Off run must now equal the 9999 Hz run (measured 0.00 dB apart:
+            // 17.87 dB (a), 28.17 dB (b)) and stay under 40 dB. Pre-fix
+            // unfiltered Off measured 61.12 dB (a) and >= 58.2 dB (b).
             // Default shimmer settings except Modulation 0, a 2 s
             // 0.3-amplitude sine, measured at 1.5 s in a +-150 Hz band around
             // the first-generation alias:
@@ -4960,19 +5043,19 @@ public:
                 const double floorDb = narrowBandEnergyDb (noShifter, 1.5, c.aliasHz, 150.0);
                 logMessage ("T3 " + juce::String (c.name) + ": alias band Off " + juce::String (offDb, 2) + " dB, capped " + juce::String (cappedDb, 2)
                                 + " dB (" + juce::String (cappedDb - offDb, 2) + " dB); floor with Shimmer Amount 0: " + juce::String (floorDb, 2) + " dB");
-                expect (cappedDb <= offDb - 30.0, "T3 " + juce::String (c.name) + ": alias band only " + juce::String (offDb - cappedDb, 2)
-                                                      + " dB below Tone Off (bound 30 dB)");
+                expect (offDb <= 40.0, "T3 " + juce::String (c.name) + ": Off alias band " + juce::String (offDb, 2)
+                                           + " dB (bound 40 dB) -- Off is not capped");
+                expect (std::abs (offDb - cappedDb) <= 0.5, "T3 " + juce::String (c.name) + ": Off and Tone 9999 Hz differ by "
+                                                                + juce::String (offDb - cappedDb, 2) + " dB (bound 0.5 dB)");
             }
         }
 
-        beginTest ("Off is bit-identical to having no Tone filter: Off after 2 kHz and back + reset() equals Off throughout");
+        beginTest ("Off leaves no trace: Off after 2 kHz and back + reset() equals Off throughout");
         {
             // Both engines Off from the start with the same input; one moves
             // to 2 kHz at block 20 and back to Off at block 60, both reset()
             // at block 100. From there the filters (warm or not) must leave no
-            // trace. The legacy golden hashes (ShimmerReverbEngineCascadeTests'
-            // T6, Tone Off) prove Off also matches the engine before the
-            // filter existed.
+            // trace.
             static constexpr int moveBlock = 20, backBlock = 60, resetBlock = 100;
             auto run = [] (bool move)
             {
