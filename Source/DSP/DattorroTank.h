@@ -79,6 +79,16 @@ public:
     // Tunable points, exposed as plain setters for empirical tuning by ear.
     // Phase 5 wires these up to real APVTS parameters; this class owns no
     // parameter knowledge itself.
+    //
+    // newDampingCoefficient is the one-pole coefficient AT A 44.1 kHz
+    // REFERENCE RATE (the APVTS range and the ear-tuned default are defined
+    // there). The tank applies c_eff = c_ref^(44100 / sampleRate) per sample,
+    // so the one-pole's time constant, and hence the cutoff, is the same in
+    // seconds at every host rate (a fixed per-sample coefficient would make
+    // the cutoff proportional to the sample rate). At 44.1 kHz c_eff == c_ref
+    // exactly. Safe to call before prepare() (re-derived there) and from a
+    // smoother: one std::pow, no allocation. Non-positive/NaN gives 0; values
+    // >= 1 are clamped just below 1 so the filter stays stable.
     void setDamping (float newDampingCoefficient);
 
     // Slice 2 (docs/reverb-space-research.md section 9.1): Decay as RT60 in
@@ -228,6 +238,10 @@ public:
     // parallel feedback path (see docs/shimmer-reverb-implementation-plan.md
     // Phase 3/4 correction note).
     float peekFeedbackSignal() const noexcept { return feedbackFromB; }
+
+    // Test hook: the per-sample one-pole coefficient actually in use, i.e.
+    // the reference-rate Damping coefficient rescaled to the prepared rate.
+    float getEffectiveDampingCoefficientForTesting() const noexcept { return dampingCoefficient; }
 
     // Right-channel output of the last processSample() call (Dattorro's
     // right tap set, see outputTapRight*Ms). processSample() itself keeps
@@ -400,6 +414,10 @@ private:
     // intended, making each recirculation sound like a duller, more
     // discrete "thud" instead of a bright, continuous wash (reported as
     // "sounds like a delay, not a reverb").
+    //
+    // Sample-rate note (audit fix 10): this value, like every Damping value,
+    // is the coefficient at a 44.1 kHz reference rate; setDamping() rescales
+    // it to c^(44100/fs) for other rates so the cutoff stays the same in Hz.
     static constexpr float defaultDampingCoefficient = 0.0005f;
 
     // Decay-gain history (the former fixed defaultDecayGain constant, removed
@@ -773,7 +791,14 @@ private:
     std::array<AllpassStage, numDiffuserStages> diffuserStages;
     TankBranch branchA, branchB;
 
+    // dampingReference is what setDamping() was given (coefficient at
+    // dampingReferenceRate); dampingCoefficient is the per-sample pole
+    // processBranch() actually uses, derived by updateEffectiveDamping().
+    static constexpr double dampingReferenceRate = 44100.0;
+    float dampingReference = defaultDampingCoefficient;
+    double dampingSampleRate = dampingReferenceRate;
     float dampingCoefficient = defaultDampingCoefficient;
+    void updateEffectiveDamping() noexcept;
     float shimmerAmountGain = defaultShimmerAmountGain;
 
     // Blend law (see setShimmerBlendLaw()). 0.0f default = the linear law,
