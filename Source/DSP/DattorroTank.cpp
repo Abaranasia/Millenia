@@ -44,6 +44,10 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     levelAttackCoeff  = onePoleCoeff (levelAttackSeconds);
     levelReleaseCoeff = onePoleCoeff (levelReleaseSeconds);
     levelGainCoeff    = onePoleCoeff (levelGainSmoothingSeconds);
+    holdInputCoeff    = onePoleCoeff (holdInputEnvelopeSeconds);
+    holdEnvelopeCoeff = onePoleCoeff (holdEnvelopeSeconds);
+    holdIntegralStep  = (float) ((double) holdUpdateInterval / ((double) holdIntegralSeconds * spec.sampleRate));
+    holdLatchSamples  = juce::roundToInt ((double) holdLatchSeconds * spec.sampleRate);
 
     // reset(sampleRate, ramp) snaps the current value to the existing
     // target, so a caller's setInfiniteAmount() survives a re-prepare (e.g.
@@ -136,6 +140,16 @@ void DattorroTank::reset()
     modPhaseB = modPhaseOffsetB;
     levelEnvelope = 0.0f;
     levelGain = 1.0f;
+    inputEnvelope = 0.0f;
+    holdEnvelope = 0.0f;
+    lastOutputAbs = 0.0f;
+    holdQuietSamples = 0;
+    holdCounter = 0;
+    holdLatched = false;
+    holdTarget = 0.0f;
+    holdLog2Target = 0.0f;
+    holdLog2Integral = 0.0f;
+    holdRegulatorGain = 1.0f;
 
     // Size/Modulation: same snap-to-target rule, then scale the lines to
     // the snapped Size and re-derive g from it.
@@ -447,8 +461,41 @@ float DattorroTank::processSample (float input, float externalFeedback)
         const float envCoeff = absFeedback > levelEnvelope ? levelAttackCoeff : levelReleaseCoeff;
         levelEnvelope = envCoeff * levelEnvelope + (1.0f - envCoeff) * absFeedback;
 
-        const float targetGain = levelEnvelope > levelCeiling ? levelCeiling / levelEnvelope : 1.0f;
+        // holdRegulatorGain is exactly 1.0f unless Infinite is on and T is
+        // latched, so with it off targetGain is the pre-hold value exactly.
+        // The ceiling cut always wins over a boost.
+        const float targetGain = levelEnvelope > levelCeiling ? juce::jmin (levelCeiling / levelEnvelope, holdRegulatorGain)
+                                                              : holdRegulatorGain;
         levelGain = levelGainCoeff * levelGain + (1.0f - levelGainCoeff) * targetGain;
+    }
+
+    // (c2) Hold-level rider bookkeeping. The followers run unconditionally
+    // (they only reach the output through holdRegulatorGain, which stays 1.0f
+    // unless Infinite is on), so engaging Infinite mid-tail finds them warm.
+    {
+        const float absInput = std::abs (input);
+        inputEnvelope = holdInputCoeff * inputEnvelope + (1.0f - holdInputCoeff) * absInput;
+        // The hold rider measures what is HEARD (mean |x| of both output tap
+        // sets, previous sample), not feedbackFromB: right after a burst the
+        // energy is unevenly spread over the lines, so output/feedbackFromB
+        // moves by ~3 dB while the tail settles (measured 2026-11-15) and a
+        // target captured on feedbackFromB held the wrong output level.
+        holdEnvelope  = holdEnvelopeCoeff * holdEnvelope + (1.0f - holdEnvelopeCoeff) * lastOutputAbs;
+
+        // Flush the decaying followers before they reach denormal range.
+        if (inputEnvelope < 1.0e-20f) inputEnvelope = 0.0f;
+        if (holdEnvelope < 1.0e-20f) holdEnvelope = 0.0f;
+
+        if (inputEnvelope > holdInputGate)
+            holdQuietSamples = 0;
+        else if (holdQuietSamples < holdLatchSamples)
+            ++holdQuietSamples;
+
+        if (++holdCounter >= holdUpdateInterval)
+        {
+            holdCounter = 0;
+            updateHoldRegulator (infiniteAmount);
+        }
     }
 
     // (b) advance both LFOs, wrapped to keep float phase precision.
@@ -492,7 +539,75 @@ float DattorroTank::processSample (float input, float externalFeedback)
         - peekTap (branchB.delay2, taps[tapRightBDelay2], branchB.delay2Samples)
     );
 
+    lastOutputAbs = 0.5f * (std::abs (tankOut) + std::abs (lastRightOutput));
+
     return tankOut;
+}
+
+void DattorroTank::updateHoldRegulator (float infiniteAmount)
+{
+    // Infinite off (or fully released): drop every piece of hold state, so a
+    // re-engage captures a fresh target and the off path stays untouched.
+    if (infiniteAmount <= 0.0f)
+    {
+        holdLatched = false;
+        holdTarget = 0.0f;
+        holdLog2Integral = 0.0f;
+        holdRegulatorGain = 1.0f;
+        return;
+    }
+
+    if (! holdLatched)
+    {
+        // Tracking: T follows the envelope while input plays (and through the
+        // quiet window before the latch).
+        holdTarget = holdEnvelope;
+        holdRegulatorGain = 1.0f;
+
+        if (holdQuietSamples >= holdLatchSamples && holdTarget >= holdMinTarget)
+        {
+            holdLatched = true;
+            holdLog2Target = std::log2 (holdTarget);
+            holdLog2Integral = 0.0f;
+        }
+
+        return;
+    }
+
+    if (holdQuietSamples < holdLatchSamples) // input resumed: unlatch, T re-tracks
+    {
+        holdLatched = false;
+        holdLog2Integral = 0.0f;
+        holdRegulatorGain = 1.0f;
+        return;
+    }
+
+    const float env = holdEnvelope;
+
+    if (env <= 1.0e-9f)
+    {
+        holdRegulatorGain = 1.0f; // dead silence stays dead silent
+        return;
+    }
+
+    const float log2Min = std::log2 (holdGainMin);
+    const float log2Max = std::log2 (holdGainMax);
+    const float error = holdLog2Target - std::log2 (env); // > 0: tail below target
+
+    const bool belowFloor = env < holdTarget * holdBoostFloorRatio;
+
+    // Anti-windup: while the ceiling cut is active a boost cannot act, so do not integrate upward.
+    if (! belowFloor && ! (levelEnvelope > levelCeiling && error > 0.0f))
+        holdLog2Integral = juce::jlimit (log2Min, log2Max, holdLog2Integral + holdIntegralStep * error);
+
+    float gain = std::exp2 (juce::jlimit (log2Min, log2Max, holdLog2Integral + holdProportionalExponent * error));
+
+    if (belowFloor)
+        gain = juce::jmin (gain, 1.0f);
+    else if (gain > 1.0f)
+        gain = 1.0f + (1.0f - freezeAmount) * (gain - 1.0f);
+
+    holdRegulatorGain = gain;
 }
 
 void DattorroTank::process (juce::dsp::AudioBlock<float>& block)

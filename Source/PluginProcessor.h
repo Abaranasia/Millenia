@@ -134,21 +134,21 @@ private:
 
     // Slice 1 space controls (docs/reverb-space-research.md section 8).
     // preDelayParam is read RAW: the engine smooths the delay time per
-    // sample itself. lowCut/highCut go through block-rate smoothers below,
-    // like every other continuous parameter (the engine updates filter
-    // cutoffs once per block).
+    // sample itself. lowCut/highCut go through the smoothers below, like
+    // every other continuous parameter (stepped in 32-sample chunks, so the
+    // engine updates filter cutoffs once per chunk).
     std::atomic<float>* preDelayParam = nullptr;
     std::atomic<float>* lowCutParam = nullptr;
     std::atomic<float>* highCutParam = nullptr;
 
-    // Shimmer Tone (see ParamIDs::shimmerTone): a block-rate smoother like
-    // lowCut/highCut -- the engine also updates this cutoff once per block.
+    // Shimmer Tone (see ParamIDs::shimmerTone): smoothed like lowCut/highCut
+    // -- the engine also updates this cutoff once per 32-sample chunk.
     std::atomic<float>* shimmerToneParam = nullptr;
 
     // Slice 2 (docs/reverb-space-research.md section 9). decayParam (above)
-    // goes through a block-rate smoother like the other continuous values;
+    // goes through a chunk-stepped smoother like the other continuous values;
     // size and modulation are read RAW because DattorroTank glides both per
-    // sample itself (300 ms / 50 ms) -- a second, block-rate ramp here would
+    // sample itself (300 ms / 50 ms) -- a second, chunk-rate ramp here would
     // only stair-step the target the tank is already ramping toward.
     std::atomic<float>* sizeParam = nullptr;
     std::atomic<float>* modulationParam = nullptr;

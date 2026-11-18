@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../../Source/DSP/DattorroTank.h"
+#include "../../Source/DSP/SafetyLimiter.h"
 
 // Phase 7 test-runner target — unit tests for the Phase 2 DattorroTank.
 // Unlike ScratchSchroederTankTests (single impulse), this specifically
@@ -10,6 +11,230 @@ class DattorroTankTests : public juce::UnitTest
 {
 public:
     DattorroTankTests() : juce::UnitTest ("DattorroTankTests", "DSP") {}
+
+    void runHoldTests()
+    {
+        // Audit fix 8 (docs/project-audit-2026-11.md, 2026-11-15), reworked
+        // 2026-11-15 to the HOLD criterion: with Infinite on, the tail must
+        // hold the level it was played at (DattorroTank's hold-level rider,
+        // see the hold* constants). Worst-case probe of Infinite + equal-power
+        // blend: the equal-power law gives a per-pass amplitude plainWeight +
+        // shimmerWeight of up to ~1.385 (weight 0.55) if the external copy is
+        // COHERENT with feedbackFromB. The coherent copy is built here
+        // directly: ext = limiter (rho * peekFeedbackSignal()), rho = 1.0 and
+        // 0.7 (rho < 1 models a shifter plus corrector that return less than
+        // unity gain). Reference L0 = output RMS over 2.3-3.3 s (the burst
+        // ends at 2 s and the rider latches 0.5 s later, at about 2.5 s, inside
+        // the window; 3-5 s is still building, which made the old early window
+        // an artifact).
+        {
+            struct HoldRun
+            {
+                std::vector<float> out;
+                double limiterFraction = 0.0;
+                int numNonFinite = 0;
+            };
+
+            static constexpr double holdSampleRate = 44100.0;
+
+            // burstAmp: uniform noise +-burstAmp for the first 2 s, then
+            // silence. releaseAt / reengageAt < 0: never. The limiter
+            // fraction is taken over the last 20 s.
+            auto runHold = [] (float maxWeight, float rho, float burstAmp, float freeze, double totalSeconds,
+                               double releaseAt, double reengageAt)
+            {
+                constexpr double sampleRate = 44100.0;
+                constexpr int blockSize = 512;
+
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                tank.reset();
+                tank.setMaxShimmerBlendWeight (maxWeight);
+                tank.setShimmerAmountGain (1.0f);
+                tank.setShimmerBlendLaw (1.0f);
+                tank.setFreezeAmount (freeze);
+                tank.setInfiniteAmount (1.0f);
+
+                SafetyLimiter limiter; // default 0.8 threshold, as in ShimmerReverbEngine
+                limiter.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                limiter.reset();
+
+                HoldRun run;
+                const long long totalSamples = (long long) (totalSeconds * sampleRate);
+                run.out.reserve ((size_t) totalSamples);
+                const long long burstEnd = (long long) (2.0 * sampleRate);
+                const long long limiterFrom = totalSamples - (long long) (20.0 * sampleRate);
+                const long long releaseSample = releaseAt < 0.0 ? -1 : (long long) (releaseAt * sampleRate);
+                const long long reengageSample = reengageAt < 0.0 ? -1 : (long long) (reengageAt * sampleRate);
+                long long lateOver = 0, lateTotal = 0;
+                juce::Random random (31415926);
+
+                for (long long n = 0; n < totalSamples; ++n)
+                {
+                    if (n == releaseSample)
+                        tank.setInfiniteAmount (0.0f);
+                    if (n == reengageSample)
+                        tank.setInfiniteAmount (1.0f);
+
+                    const float in = n < burstEnd ? (random.nextFloat() * 2.0f - 1.0f) * burstAmp : 0.0f;
+                    const float rawExt = rho * tank.peekFeedbackSignal();
+                    const float out = tank.processSample (in, limiter.processSample (rawExt));
+
+                    if (! std::isfinite (out))
+                    {
+                        ++run.numNonFinite;
+                        run.out.push_back (0.0f);
+                        continue;
+                    }
+
+                    run.out.push_back (out);
+
+                    if (n >= limiterFrom)
+                    {
+                        ++lateTotal;
+                        if (std::abs (rawExt) > 0.8f)
+                            ++lateOver;
+                    }
+                }
+
+                run.limiterFraction = (double) lateOver / (double) juce::jmax (1LL, lateTotal);
+                return run;
+            };
+
+            auto rmsOf = [] (const std::vector<float>& v, double from, double to)
+            {
+                const size_t a = (size_t) (from * holdSampleRate), b = juce::jmin (v.size(), (size_t) (to * holdSampleRate));
+                double sum = 0.0;
+                for (size_t i = a; i < b; ++i)
+                    sum += (double) v[i] * (double) v[i];
+                return std::sqrt (sum / (double) juce::jmax ((size_t) 1, b - a));
+            };
+
+            auto toDb = [] (double rms) { return 20.0 * std::log10 (juce::jmax (1.0e-30, rms)); };
+
+            // Shared HOLD assertions. tolDb is the +-window around L0 for the
+            // 10-15, 30-35 and 55-60 s RMS; no 1 s RMS window from 3 s on may
+            // exceed L0 + 3 dB.
+            auto checkHold = [this, &rmsOf, &toDb] (const juce::String& label, const HoldRun& run, double tolDb)
+            {
+                const double l0 = toDb (rmsOf (run.out, 2.3, 3.3));
+                const double d10 = toDb (rmsOf (run.out, 10.0, 15.0)) - l0;
+                const double d30 = toDb (rmsOf (run.out, 30.0, 35.0)) - l0;
+                const double d55 = toDb (rmsOf (run.out, 55.0, 60.0)) - l0;
+                double maxWindow = -1.0e9;
+                for (int s = 3; s + 1 <= 61; ++s)
+                    maxWindow = juce::jmax (maxWindow, toDb (rmsOf (run.out, (double) s, (double) s + 1.0)) - l0);
+
+                // The burst itself (input playing, before the latch, regulator
+                // inactive) is the pre-existing rider behaviour and is only
+                // pinned at 2.2; the 2.0 hold bound applies from 2.3 s on.
+                float burstPeak = 0.0f, peak = 0.0f;
+                for (size_t i = 0; i < run.out.size(); ++i)
+                {
+                    const float a = std::abs (run.out[i]);
+                    if (i < (size_t) (2.3 * holdSampleRate))
+                        burstPeak = juce::jmax (burstPeak, a);
+                    else
+                        peak = juce::jmax (peak, a);
+                }
+
+                logMessage ("MEASURE tank hold " + label + ": L0(2.3-3.3s)=" + juce::String (l0, 2) + " dB, vs L0: 10-15s="
+                            + juce::String (d10, 2) + " 30-35s=" + juce::String (d30, 2) + " 55-60s=" + juce::String (d55, 2)
+                            + " dB, max 1 s window=" + juce::String (maxWindow, 2) + " dB, peak after 2.3 s=" + juce::String (peak, 4)
+                            + ", burst peak=" + juce::String (burstPeak, 4)
+                            + ", limiterFrac(last20s)=" + juce::String (run.limiterFraction * 100.0, 3) + "%");
+
+                expectEquals (run.numNonFinite, 0, label + ": non-finite output");
+                expect (peak <= 2.0f, label + ": peak after the latch exceeded 2.0: " + juce::String (peak, 4));
+                expect (burstPeak <= 2.2f, label + ": burst peak exceeded 2.2: " + juce::String (burstPeak, 4));
+                expect (l0 > -60.0, label + ": tail already near-silent at 2.3-3.3 s (" + juce::String (l0, 2) + " dB)");
+                expect (std::abs (d10) <= tolDb, label + ": 10-15 s RMS off L0 by " + juce::String (d10, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (std::abs (d30) <= tolDb, label + ": 30-35 s RMS off L0 by " + juce::String (d30, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (std::abs (d55) <= tolDb, label + ": 55-60 s RMS off L0 by " + juce::String (d55, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (maxWindow <= 3.0, label + ": a 1 s RMS window exceeded L0 + 3 dB (" + juce::String (maxWindow, 2) + " dB)");
+                expect (run.limiterFraction < 0.01, label + ": SafetyLimiter engaged on " + juce::String (run.limiterFraction * 100.0, 3)
+                                                        + "% of the last 20 s (bound 1%)");
+            };
+
+            struct WorstCase { float maxWeight; float rho; float burstAmp; };
+            const WorstCase cases[] = {
+                { 0.55f, 1.0f, 0.05f }, { 0.55f, 0.7f, 0.05f }, { 0.707f, 1.0f, 0.05f }, { 0.707f, 0.7f, 0.05f },
+                { 0.55f, 1.0f, 0.3f },  { 0.55f, 0.7f, 0.3f },  { 0.707f, 0.7f, 0.3f },
+            };
+
+            for (const auto& wc : cases)
+            {
+                const auto label = "weight " + juce::String (wc.maxWeight, 3) + ", rho " + juce::String (wc.rho, 1)
+                                   + ", burst " + juce::String (wc.burstAmp, 2);
+                beginTest ("Infinite holds its level, coherent external feedback (" + label + "): within +-2 dB of L0, no swell, limiter rarely engaged");
+                checkHold (label, runHold (wc.maxWeight, wc.rho, wc.burstAmp, 0.0f, 62.0, -1.0, -1.0), 2.0);
+            }
+
+            beginTest ("Infinite release mid-hold: the tail decays with no click (no sample step above the held level's own)");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 0.0f, 20.0, 10.0, -1.0);
+                auto maxStep = [&run] (double from, double to)
+                {
+                    float m = 0.0f;
+                    for (size_t i = (size_t) (from * holdSampleRate); i < (size_t) (to * holdSampleRate); ++i)
+                        m = juce::jmax (m, std::abs (run.out[i] - run.out[i - 1]));
+                    return m;
+                };
+
+                const float heldStep = maxStep (8.0, 10.0);
+                const float releaseStep = maxStep (10.0, 12.0);
+                const double heldDb = toDb (rmsOf (run.out, 8.0, 10.0));
+                const double decayedDb = toDb (rmsOf (run.out, 18.0, 20.0));
+
+                logMessage ("MEASURE tank release: max step held (8-10 s)=" + juce::String (heldStep, 5) + ", during release (10-12 s)="
+                            + juce::String (releaseStep, 5) + "; RMS held=" + juce::String (heldDb, 2) + " dB, 18-20 s="
+                            + juce::String (decayedDb, 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (releaseStep <= heldStep * 1.25f, "Release produced a click: max step " + juce::String (releaseStep, 5)
+                                                             + " vs held " + juce::String (heldStep, 5));
+                expect (decayedDb < heldDb - 6.0, "Tail did not decay after release (" + juce::String (decayedDb - heldDb, 2) + " dB)");
+            }
+
+            beginTest ("Infinite re-engage captures a NEW target: after a release and decay the tail holds the lower level, not the old one");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 0.0f, 40.0, 5.0, 9.0);
+                const double l0 = toDb (rmsOf (run.out, 2.3, 3.3));
+                const double l1 = toDb (rmsOf (run.out, 8.8, 9.0)); // the level at the moment of re-engage
+                const double l2 = toDb (rmsOf (run.out, 20.0, 25.0));
+                const double l3 = toDb (rmsOf (run.out, 30.0, 35.0));
+
+                logMessage ("MEASURE tank re-engage: L0=" + juce::String (l0, 2) + " dB, at re-engage (8.8-9.0 s)=" + juce::String (l1, 2)
+                            + " dB, 20-25 s=" + juce::String (l2, 2) + " dB, 30-35 s=" + juce::String (l3, 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (l1 < l0 - 3.0, "Tail did not decay between release and re-engage (" + juce::String (l1 - l0, 2) + " dB)");
+                expect (std::abs (l3 - l1) <= 2.0, "Re-engaged tail is not at the level captured at re-engage (" + juce::String (l3 - l1, 2) + " dB)");
+                expect (std::abs (l3 - l2) <= 1.0, "Re-engaged tail is not holding (" + juce::String (l3 - l2, 2) + " dB from 20-25 s to 30-35 s)");
+            }
+
+            beginTest ("Infinite + Freeze (1.0): stays finite and bounded, boost off");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 1.0f, 62.0, -1.0, -1.0);
+                float peak = 0.0f;
+                for (float v : run.out)
+                    peak = juce::jmax (peak, std::abs (v));
+                logMessage ("MEASURE tank Infinite+Freeze: peak=" + juce::String (peak, 4) + ", RMS 55-60 s="
+                            + juce::String (toDb (rmsOf (run.out, 55.0, 60.0)), 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (peak, 4));
+            }
+
+            beginTest ("Infinite from dead silence: output stays exactly 0 (no boost of nothing)");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.0f, 0.0f, 30.0, -1.0, -1.0);
+                size_t nonZero = 0;
+                for (float v : run.out)
+                    if (v != 0.0f)
+                        ++nonZero;
+                expectEquals ((int) nonZero, 0, "Dead-silent start produced non-zero output samples");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+            }
+        }
+    }
 
     void runTest() override
     {
@@ -821,7 +1046,7 @@ public:
             }
         };
 
-        beginTest ("Infinite: tail does not decay -- last second of 30s silence is within 3dB of seconds 3-4");
+        beginTest ("Infinite: tail does not decay -- last second of 30s silence is within 1dB of seconds 3-4");
         {
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
@@ -879,8 +1104,10 @@ public:
 
             expect (std::isfinite (earlyRms) && std::isfinite (lateRms), "Non-finite RMS");
             expect (earlyRms > 1.0e-3f, "Infinite tail was already near-silent at seconds 3-4 (RMS " + juce::String (earlyRms, 6) + ")");
-            expect (std::abs (changeDb) <= 3.0f, "Infinite tail drifted by " + juce::String (changeDb, 2)
-                                                     + "dB over 28s (bound: +-3dB)");
+            // Tightened from +-3 dB to +-1 dB (2026-11-15, hold-level rider): the
+            // tail now holds, measured +0.19 dB over 28 s (-0.30 dB before it).
+            expect (std::abs (changeDb) <= 1.0f, "Infinite tail drifted by " + juce::String (changeDb, 2)
+                                                     + "dB over 28s (bound: +-1dB)");
         }
 
         beginTest ("Infinite: new input layers on top of the sustained tail instead of being muted");
@@ -949,6 +1176,8 @@ public:
                                               + juce::String (beforeRms, 5) + ", after " + juce::String (afterRms, 5)
                                               + ") -- Infinite must not mute fresh input");
         }
+
+        runHoldTests();
 
         beginTest ("Stereo taps: left output is bit-identical to the pre-stereo (left-only) tap set");
         {
