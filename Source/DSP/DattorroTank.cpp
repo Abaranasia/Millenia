@@ -11,6 +11,10 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
     // stereo comes only from the two output tap sets reading this one tank.
     juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
 
+    // Damping's per-sample pole depends on the rate (see setDamping()).
+    dampingSampleRate = spec.sampleRate > 0.0 ? spec.sampleRate : dampingReferenceRate;
+    updateEffectiveDamping();
+
     for (int i = 0; i < numDiffuserStages; ++i)
     {
         auto delayInSamples = juce::roundToInt (diffuserDelayMs[(size_t) i] * 0.001 * spec.sampleRate);
@@ -171,7 +175,27 @@ void DattorroTank::resetBranch (TankBranch& branch)
 
 void DattorroTank::setDamping (float newDampingCoefficient)
 {
-    dampingCoefficient = newDampingCoefficient;
+    dampingReference = newDampingCoefficient;
+    updateEffectiveDamping();
+}
+
+void DattorroTank::updateEffectiveDamping() noexcept
+{
+    // Reference-rate coefficient -> per-sample pole at the prepared rate:
+    // c_eff = c_ref^(44100 / fs) keeps the one-pole time constant in
+    // seconds. At 44.1 kHz the exponent is exactly 1.0, so pow returns c_ref
+    // and the result is bit-identical to the raw coefficient.
+    constexpr float maxReference = 0.9999f;
+    const float ref = ! (dampingReference > 0.0f) ? 0.0f // also catches NaN
+                    : (dampingReference >= 1.0f ? maxReference : dampingReference);
+
+    if (ref == 0.0f || dampingSampleRate == dampingReferenceRate)
+    {
+        dampingCoefficient = ref;
+        return;
+    }
+
+    dampingCoefficient = (float) std::pow ((double) ref, dampingReferenceRate / dampingSampleRate);
 }
 
 void DattorroTank::setDecaySeconds (float newDecaySeconds)
@@ -284,7 +308,8 @@ float DattorroTank::processBranch (float input, TankBranch& branch)
 
     // One-pole leaky integrator, matching Dattorro's actual damping stage
     // (see the defaultDampingCoefficient comment in the header): the
-    // *previous* smoothed sample is weighted by dampingCoefficient, the
+    // *previous* smoothed sample is weighted by dampingCoefficient (the
+    // reference-rate Damping rescaled to the prepared rate), the
     // *new* incoming sample by (1 - dampingCoefficient). At the reference's
     // ~0.0005 default this is barely more than a pass-through -- most of
     // the tail's eventual darkening comes from many recirculations, not

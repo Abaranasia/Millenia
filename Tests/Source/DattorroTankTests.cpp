@@ -12,6 +12,125 @@ class DattorroTankTests : public juce::UnitTest
 public:
     DattorroTankTests() : juce::UnitTest ("DattorroTankTests", "DSP") {}
 
+    void runDampingSampleRateTests()
+    {
+        // Audit fix 10 (docs/project-audit-2026-11.md): Damping is the one-pole
+        // coefficient at a 44.1 kHz reference rate; the tank applies
+        // c_eff = c_ref^(44100 / fs) so the time constant is rate-independent.
+        static constexpr double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+
+        beginTest ("Damping at 44.1 kHz: effective coefficient is bit-identical to the raw one");
+        for (float c : { 0.0f, 0.0005f, 0.05f, 0.3f })
+        {
+            DattorroTank tank;
+            tank.prepare ({ 44100.0, 512, 2 });
+            tank.setDamping (c);
+            expect (tank.getEffectiveDampingCoefficientForTesting() == c, "c_eff != c at 44.1k for c=" + juce::String (c));
+        }
+
+        beginTest ("Damping time constant is the same in seconds at 44.1k, 48k, 96k and 192k");
+        for (double fs : rates)
+            for (float c : { 0.0005f, 0.05f, 0.3f })
+            {
+                DattorroTank tank;
+                tank.prepare ({ fs, 512, 2 });
+                tank.setDamping (c);
+                const double cEff = (double) tank.getEffectiveDampingCoefficientForTesting();
+                const double back = std::pow (cEff, fs / 44100.0);
+                expectWithinAbsoluteError (back, (double) c, 1.0e-5 * (double) c + 1.0e-9,
+                                           "fs=" + juce::String (fs) + " c=" + juce::String (c));
+            }
+
+        beginTest ("Damping: setDamping before prepare gives the rate-scaled value after prepare, and survives re-prepare");
+        {
+            DattorroTank tank;
+            tank.setDamping (0.3f);
+            tank.prepare ({ 96000.0, 512, 2 });
+            const double expected = std::pow (0.3, 44100.0 / 96000.0);
+            expectWithinAbsoluteError ((double) tank.getEffectiveDampingCoefficientForTesting(), expected, 1.0e-6, "after prepare 96k");
+            tank.prepare ({ 44100.0, 512, 2 });
+            expect (tank.getEffectiveDampingCoefficientForTesting() == 0.3f, "re-prepare at 44.1k restores raw value");
+        }
+
+        beginTest ("Damping edge values: 0 stays 0, >= 1 and NaN stay finite and stable at 192 kHz");
+        {
+            DattorroTank tank;
+            tank.prepare ({ 192000.0, 512, 2 });
+            tank.setDamping (0.0f);
+            expect (tank.getEffectiveDampingCoefficientForTesting() == 0.0f, "0 stays 0");
+            tank.setDamping (-0.5f);
+            expect (tank.getEffectiveDampingCoefficientForTesting() == 0.0f, "negative treated as 0");
+            for (float c : { 1.0f, 2.0f, std::numeric_limits<float>::quiet_NaN() })
+            {
+                tank.setDamping (c);
+                const float e = tank.getEffectiveDampingCoefficientForTesting();
+                expect (std::isfinite (e) && e >= 0.0f && e < 1.0f, "bad input gives a finite coefficient in [0,1)");
+            }
+        }
+
+        beginTest ("Damping at 96 kHz darkens the tail like at 44.1 kHz (HF energy ratio within tolerance)");
+        {
+            // Tail energy in 6-16 kHz relative to 0.5-3 kHz after a noise
+            // burst, same seed and Damping at each rate. Both bands sit below
+            // 44.1 kHz's Nyquist, so the measure is comparable across rates.
+            auto hfShare = [] (double fs, float damping) -> double
+            {
+                constexpr int blockSize = 512;
+                DattorroTank tank;
+                tank.prepare ({ fs, (juce::uint32) blockSize, 2 });
+                tank.reset();
+                tank.setDamping (damping);
+
+                using Filter = juce::dsp::IIR::Filter<float>;
+                using Coeffs = juce::dsp::IIR::Coefficients<float>;
+                Filter highHp, highLp, lowHp, lowLp;
+                highHp.coefficients = Coeffs::makeHighPass (fs, 6000.0f);
+                highLp.coefficients = Coeffs::makeLowPass (fs, 16000.0f);
+                lowHp.coefficients  = Coeffs::makeHighPass (fs, 500.0f);
+                lowLp.coefficients  = Coeffs::makeLowPass (fs, 3000.0f);
+
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                juce::Random random (24681357);
+                const int burstBlocks = (int) (1.0 * fs / blockSize);
+                const int tailBlocks  = (int) (1.0 * fs / blockSize);
+                double total = 0.0, high = 0.0;
+
+                for (int b = 0; b < burstBlocks + tailBlocks; ++b)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = 0; i < blockSize; ++i)
+                            buffer.setSample (ch, i, b < burstBlocks ? random.nextFloat() * 0.6f - 0.3f : 0.0f);
+
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    tank.process (block);
+
+                    if (b < burstBlocks)
+                        continue;
+
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float x = buffer.getSample (0, i);
+                        const float yh = highLp.processSample (highHp.processSample (x));
+                        const float yl = lowLp.processSample (lowHp.processSample (x));
+                        total += (double) yl * yl;
+                        high  += (double) yh * yh;
+                    }
+                }
+
+                return total > 1.0e-12 ? high / total : 0.0;
+            };
+
+            const double ref44 = hfShare (44100.0, 0.3f);
+            const double at96  = hfShare (96000.0, 0.3f);
+            const double bright = hfShare (44100.0, 0.0005f);
+            logMessage ("HF share: 44.1k d=0.3: " + juce::String (ref44, 6) + ", 96k d=0.3: " + juce::String (at96, 6)
+                        + ", 44.1k d=0.0005: " + juce::String (bright, 6));
+
+            expect (ref44 < 0.85 * bright, "Test is only meaningful if Damping 0.3 clearly darkens the tail at 44.1k");
+            expect (std::abs (at96 - ref44) <= 0.15 * ref44, "96k HF share must be within 15% of 44.1k");
+        }
+    }
+
     void runHoldTests()
     {
         // Audit fix 8 (docs/project-audit-2026-11.md, 2026-11-15), reworked
@@ -1178,6 +1297,7 @@ public:
         }
 
         runHoldTests();
+        runDampingSampleRateTests();
 
         beginTest ("Stereo taps: left output is bit-identical to the pre-stereo (left-only) tap set");
         {
