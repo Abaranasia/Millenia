@@ -1314,6 +1314,20 @@ public:
             expect (std::abs (large / small - 1.0) <= 0.15, "RT60 moved with Size: " + juce::String (small, 3) + " vs " + juce::String (large, 3));
         }
 
+        beginTest ("High-band decay does not collapse off Size 1: 16 kHz RT60 at Size 0.5/0.75 >= 80% of Size 1");
+        {
+            const double reference = measureRt60 (1.0f, 4.0f, 16000.0);
+            for (float size : { 0.5f, 0.75f })
+            {
+                const double measured = measureRt60 (size, 4.0f, 16000.0);
+                logMessage ("16 kHz RT60 at RT60 4 s: Size 1 -> " + juce::String (reference, 3) + " s, Size " + juce::String (size, 2)
+                                + " -> " + juce::String (measured, 3) + " s (ratio " + juce::String (measured / reference, 3) + ")");
+                expect (measured >= 0.8 * reference,
+                        "16 kHz RT60 collapsed at Size " + juce::String (size, 2) + ": " + juce::String (measured, 3)
+                            + " s vs " + juce::String (reference, 3) + " s at Size 1");
+            }
+        }
+
         beginTest ("Decay ceiling: g never exceeds 0.85 for any Decay/Size, statically or while Size glides");
         {
             float maxGain = 0.0f;
@@ -1513,7 +1527,9 @@ private:
     // -5..-35 dB (a T30-style fit) and extrapolated to -60 dB. The IR runs
     // 2 * RT60 + 1 s, so truncation sits ~120 dB down and cannot bend the
     // fitted range. L and R energies are summed.
-    static double measureRt60 (float size, float rt60)
+    // bandHz > 0 band-passes the output around that frequency (Q 2) before
+    // the integration, giving the decay of that band alone.
+    static double measureRt60 (float size, float rt60, double bandHz = 0.0)
     {
         DattorroTank tank;
         tank.prepare ({ sampleRate, 512, 2 });
@@ -1523,12 +1539,26 @@ private:
         tank.setDecaySeconds (rt60);
         tank.reset();
 
+        juce::dsp::IIR::Filter<float> bandL, bandR;
+        if (bandHz > 0.0)
+        {
+            bandL.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sampleRate, (float) bandHz, 2.0f);
+            bandR.coefficients = bandL.coefficients;
+        }
+
         const int numSamples = (int) ((2.0 * rt60 + 1.0) * sampleRate);
         std::vector<double> energy ((size_t) numSamples);
         for (int n = 0; n < numSamples; ++n)
         {
-            const double l = tank.processSample (n == 0 ? 1.0f : 0.0f);
-            const double r = tank.getLastRightOutput();
+            float lf = tank.processSample (n == 0 ? 1.0f : 0.0f);
+            float rf = tank.getLastRightOutput();
+            if (bandHz > 0.0)
+            {
+                lf = bandL.processSample (lf);
+                rf = bandR.processSample (rf);
+            }
+            const double l = lf;
+            const double r = rf;
             energy[(size_t) n] = l * l + r * r;
         }
 
