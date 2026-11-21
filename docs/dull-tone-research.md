@@ -55,6 +55,8 @@ Defaults checked in `Source/Parameters.cpp`: Damping 0.0005 on 0..0.3 with skew 
 
 **Damping range, verified current:** the APVTS range is `0..0.3` (`Parameters.cpp:125`). The diagnostic's name in `DattorroTankTests.cpp:791` still says `0..0.05` and is stale; the figures it quotes (brightness 1.26 / 1.24 / 1.15) are from the old range. The fix-10 agent's "0 to 0.3" is correct.
 
+**Update (2026-11-21):** the Damping skew of 0.3 quoted above is superseded on `fix/damping-knob-range`: the knob centre now maps to a = 0.08 (about 17.8 kHz at 44.1 kHz) via `setSkewForCentre`. Range, default and stored values are unchanged, so the measurements in this document still hold.
+
 ## 3. How the Tone filter works since fix 9
 
 `computeShimmerToneCutoffHz()` (`ShimmerReverbEngine.cpp:246-264`): `cap = (fs/4) / max(ratio, 1)`; `scale = min(1, cap / 10 kHz)`; `cutoff = Tone * scale`. At 44.1 kHz and +12 st: cap 5512.5 Hz, scale 0.55125, default cutoff **2756 Hz**, Off cutoff 5512 Hz. Before fix 9 the default was `min(5000, cap)` = 5000 Hz, so **fix 9 moved the default shimmer cutoff down by almost an octave**. That may be the change the user hears as "duller" (hypothesis; not A/B-tested).

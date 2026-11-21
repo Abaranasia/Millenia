@@ -112,6 +112,33 @@ public:
             juce::ValueTree foreign ("SOMETHING_ELSE");
             expect (! StateSchema::applyState (apvts, foreign));
         }
+
+        beginTest ("Damping knob centre maps to a coefficient near 0.08; range and default are unchanged");
+        {
+            // The parameter stores the one-pole coefficient directly, so the
+            // knob skew alone decides how much travel sits in the audible
+            // band: a = 0.08 is fc ~= 17.8 kHz at 44.1 kHz.
+            DummyProcessor proc;
+            juce::AudioProcessorValueTreeState apvts (proc, nullptr, "PARAMETERS", createParameterLayout());
+            auto* param = apvts.getParameter (ParamIDs::damping);
+            expect (param != nullptr);
+            if (param == nullptr)
+                return;
+
+            const auto& range = param->getNormalisableRange();
+            expectWithinAbsoluteError (range.start, 0.0f, 0.0f);
+            expectWithinAbsoluteError (range.end, 0.3f, 0.0f);
+            expectWithinAbsoluteError (param->convertFrom0to1 (0.0f), 0.0f, 0.0f);
+            expectWithinAbsoluteError (param->convertFrom0to1 (1.0f), 0.3f, 1.0e-6f);
+            expectWithinAbsoluteError (param->convertFrom0to1 (param->getDefaultValue()), 0.0005f, 1.0e-6f);
+
+            const float centre = param->convertFrom0to1 (0.5f);
+            expect (centre >= 0.07f && centre <= 0.09f,
+                    "Damping knob centre maps to " + juce::String (centre) + ", expected 0.07..0.09");
+
+            for (const float v : { 0.0f, 0.0005f, 0.01f, 0.08f, 0.2f, 0.3f })
+                expectWithinAbsoluteError (param->convertFrom0to1 (param->convertTo0to1 (v)), v, 1.0e-6f);
+        }
     }
 };
 

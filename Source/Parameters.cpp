@@ -114,16 +114,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // ~0.32 reference. New range extends the maximum to 0.3f -- just under
     // the documented "sounds like a delay, not a reverb" 0.32 extreme, so the
     // full knob throw actually reaches a genuinely dark/damped tail at full
-    // clockwise, not just a barely-perceptible one. Default (0.0005f,
-    // "bright continuous wash") and skew (0.3, biasing resolution toward the
-    // low end where the tested-good default lives) are UNCHANGED -- only the
-    // upper bound was wrong. Still a REASONED value, not an ear-tuned final
-    // one -- an actual listening pass across the new range is still open.
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::damping, 1 },
-        "Damping",
-        juce::NormalisableRange<float> (0.0f, 0.3f, 0.0f, 0.3f),
-        0.0005f));
+    // clockwise, not just a barely-perceptible one. The default (0.0005f,
+    // "bright continuous wash") was left UNCHANGED then -- only the upper
+    // bound was wrong. Still a REASONED value, not an ear-tuned final one --
+    // an actual listening pass across the new range is still open.
+    //
+    // Knob law (2026-11, supersedes the 0.3 skew this range originally
+    // shipped with): the stored value is still the coefficient `a`, but
+    // with that 0.3 skew ~58% of the travel sat above 21 kHz at 44.1 kHz
+    // (centre -> a ~= 0.03 -> ~25 kHz), i.e. inaudible. The skew now puts the
+    // knob centre at a = 0.08 (fc ~= 17.8 kHz at 44.1 kHz). Range, default and
+    // the stored value's meaning are unchanged; only the normalized position
+    // of a given value moves (host automation lanes shift, raw values don't).
+    {
+        juce::NormalisableRange<float> dampingRange (0.0f, 0.3f);
+        dampingRange.setSkewForCentre (0.08f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::damping, 1 }, "Damping", dampingRange, 0.0005f));
+    }
 
     // Backs ShimmerReverbEngine::setWidth(), an M/S width on the stereo tank
     // tail since 2026-10-11 (docs/reverb-space-research.md section 8.2):
