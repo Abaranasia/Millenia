@@ -89,20 +89,24 @@ void DattorroTank::prepareBranch (TankBranch& branch, const juce::dsp::ProcessSp
     branch.allpass1.feedback = branchAllpass1Feedback;
 
     branch.delay1BaseSamples = sizeDelay (branch.delay1, delay1Ms);
+    sizeDelay (branch.tapDelay1, delay1Ms);
 
     branch.allpass2BaseSamples = sizeDelay (branch.allpass2.delayLine, allpass2Ms);
+    sizeDelay (branch.tapAllpass2, allpass2Ms);
     branch.allpass2.feedback = branchAllpass2Feedback;
 
     branch.delay2BaseSamples = sizeDelay (branch.delay2, delay2Ms);
+    sizeDelay (branch.tapDelay2, delay2Ms);
 }
 
 void DattorroTank::applySize (float size)
 {
     // base * 1.0f is exact, so at Size 1 every line and tap gets exactly the
-    // value it had before Size existed (bit-identical, see the golden-hash
-    // tests). Off 1.0 the delays are fractional: delay1/delay2/allpass2
-    // read through Lagrange3rd, allpass1 through Thiran (see
-    // ModulatedDelayLineType for its glide-rate analysis).
+    // value it had before Size existed. Off 1.0 the delays are fractional:
+    // every recirculating line (allpass1/2, delay1/2) reads through Thiran,
+    // whose magnitude response is flat, so a fractional Size does not
+    // low-pass the loop on each pass (see ModulatedDelayLineType). The
+    // output-tap mirrors read through Lagrange3rd.
     for (auto* branch : { &branchA, &branchB })
     {
         branch->allpass1Samples = branch->allpass1BaseSamples * size;
@@ -113,6 +117,9 @@ void DattorroTank::applySize (float size)
         branch->delay1.setDelay (branch->delay1Samples);
         branch->allpass2.delayLine.setDelay (branch->allpass2Samples);
         branch->delay2.setDelay (branch->delay2Samples);
+        branch->tapDelay1.setDelay (branch->delay1Samples);
+        branch->tapAllpass2.setDelay (branch->allpass2Samples);
+        branch->tapDelay2.setDelay (branch->delay2Samples);
         // allpass1's delay is set every sample in processSample() (centre +
         // modulation offset).
     }
@@ -164,9 +171,12 @@ void DattorroTank::resetBranch (TankBranch& branch)
 {
     branch.allpass1.delayLine.reset();
     branch.delay1.reset();
+    branch.tapDelay1.reset();
     branch.dampState = 0.0f;
     branch.allpass2.delayLine.reset();
+    branch.tapAllpass2.reset();
     branch.delay2.reset();
+    branch.tapDelay2.reset();
 }
 
 void DattorroTank::setDamping (float newDampingCoefficient)
@@ -270,17 +280,37 @@ float DattorroTank::processAllpass (float input, Stage& stage)
     return output;
 }
 
-float DattorroTank::processDelay (float input, DelayLineType& delay)
+float DattorroTank::processDelay (float input, ModulatedDelayLineType& delay, DelayLineType& tapMirror)
 {
     float delayed = delay.popSample (0);
     delay.pushSample (0, input);
+
+    // Keep the Lagrange mirror in lockstep (read pointer and contents) for
+    // the output taps; its own read value is not used.
+    tapMirror.popSample (0);
+    tapMirror.pushSample (0, input);
     return delayed;
+}
+
+// Same allpass as processAllpass(), duplicating the stored sample w into
+// the branch's Lagrange tap mirror.
+float DattorroTank::processAllpass2 (float input, TankBranch& branch)
+{
+    auto& stage = branch.allpass2;
+    float bufOut = stage.delayLine.popSample (0);
+    float w = input + bufOut * stage.feedback;
+    float output = bufOut - w * stage.feedback;
+    stage.delayLine.pushSample (0, w);
+
+    branch.tapAllpass2.popSample (0);
+    branch.tapAllpass2.pushSample (0, w);
+    return output;
 }
 
 float DattorroTank::processBranch (float input, TankBranch& branch)
 {
     float out = processAllpass (input, branch.allpass1);
-    out = processDelay (out, branch.delay1);
+    out = processDelay (out, branch.delay1, branch.tapDelay1);
 
     // One-pole leaky integrator, matching Dattorro's actual damping stage
     // (see the defaultDampingCoefficient comment in the header): the
@@ -292,8 +322,8 @@ float DattorroTank::processBranch (float input, TankBranch& branch)
     branch.dampState = dampingCoefficient * branch.dampState + (1.0f - dampingCoefficient) * out;
     out = branch.dampState;
 
-    out = processAllpass (out, branch.allpass2);
-    out = processDelay (out, branch.delay2);
+    out = processAllpass2 (out, branch);
+    out = processDelay (out, branch.delay2, branch.tapDelay2);
     return out;
 }
 
@@ -514,13 +544,13 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // summed directly into the output.
     const auto& taps = outputTapSamples;
     float tankOut = outputScale * (
-          peekTap (branchB.delay1, taps[tapBDelay1a], branchB.delay1Samples)
-        + peekTap (branchB.delay1, taps[tapBDelay1b], branchB.delay1Samples)
-        - peekTap (branchB.allpass2.delayLine, taps[tapBAllpass2], branchB.allpass2Samples)
-        + peekTap (branchB.delay2, taps[tapBDelay2], branchB.delay2Samples)
-        - peekTap (branchA.delay1, taps[tapADelay1], branchA.delay1Samples)
-        - peekTap (branchA.allpass2.delayLine, taps[tapAAllpass2], branchA.allpass2Samples)
-        - peekTap (branchA.delay2, taps[tapADelay2], branchA.delay2Samples)
+          peekTap (branchB.tapDelay1, taps[tapBDelay1a], branchB.delay1Samples)
+        + peekTap (branchB.tapDelay1, taps[tapBDelay1b], branchB.delay1Samples)
+        - peekTap (branchB.tapAllpass2, taps[tapBAllpass2], branchB.allpass2Samples)
+        + peekTap (branchB.tapDelay2, taps[tapBDelay2], branchB.delay2Samples)
+        - peekTap (branchA.tapDelay1, taps[tapADelay1], branchA.delay1Samples)
+        - peekTap (branchA.tapAllpass2, taps[tapAAllpass2], branchA.allpass2Samples)
+        - peekTap (branchA.tapDelay2, taps[tapADelay2], branchA.delay2Samples)
     );
 
     // Dattorro's right-channel tap set (see the outputTapRight* constants):
@@ -530,13 +560,13 @@ float DattorroTank::processSample (float input, float externalFeedback)
     // shared cross-feed, upstream of both tap sets). Computed after the left
     // sum so the left output's arithmetic is untouched (bit-identical).
     lastRightOutput = outputScale * (
-          peekTap (branchA.delay1, taps[tapRightADelay1a], branchA.delay1Samples)
-        + peekTap (branchA.delay1, taps[tapRightADelay1b], branchA.delay1Samples)
-        - peekTap (branchA.allpass2.delayLine, taps[tapRightAAllpass2], branchA.allpass2Samples)
-        + peekTap (branchA.delay2, taps[tapRightADelay2], branchA.delay2Samples)
-        - peekTap (branchB.delay1, taps[tapRightBDelay1], branchB.delay1Samples)
-        - peekTap (branchB.allpass2.delayLine, taps[tapRightBAllpass2], branchB.allpass2Samples)
-        - peekTap (branchB.delay2, taps[tapRightBDelay2], branchB.delay2Samples)
+          peekTap (branchA.tapDelay1, taps[tapRightADelay1a], branchA.delay1Samples)
+        + peekTap (branchA.tapDelay1, taps[tapRightADelay1b], branchA.delay1Samples)
+        - peekTap (branchA.tapAllpass2, taps[tapRightAAllpass2], branchA.allpass2Samples)
+        + peekTap (branchA.tapDelay2, taps[tapRightADelay2], branchA.delay2Samples)
+        - peekTap (branchB.tapDelay1, taps[tapRightBDelay1], branchB.delay1Samples)
+        - peekTap (branchB.tapAllpass2, taps[tapRightBAllpass2], branchB.allpass2Samples)
+        - peekTap (branchB.tapDelay2, taps[tapRightBDelay2], branchB.delay2Samples)
     );
 
     lastOutputAbs = 0.5f * (std::abs (tankOut) + std::abs (lastRightOutput));

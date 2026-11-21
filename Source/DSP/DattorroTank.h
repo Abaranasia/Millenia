@@ -255,6 +255,16 @@ private:
 
     using AllpassStage = AllpassStageOf<DelayLineType>;
 
+    // Every recirculating tank line (allpass1, delay1, allpass2, delay2)
+    // reads through this Thiran type. Size scales the lengths to fractional
+    // values, and Lagrange3rd at a fractional read is a low-pass whose loss
+    // compounds on every pass around the loop: measured plain-tank RT60 at
+    // 16 kHz was 7.1 s at Size 1 but 3.8 s at 0.75 and 2.4 s at 0.5
+    // (docs/dull-tone-research.md section 4.4). Thiran is flat in magnitude,
+    // so the high end decays the same at every Size. The output taps are
+    // the exception: they read Lagrange3rd mirrors (TankBranch::tapDelay1
+    // etc.), see there.
+    //
     // Infinite mode (see modDepthMs): each branch's allpass1 is the one
     // stage whose read delay gets modulated, and it uses first-order Thiran
     // (allpass) interpolation instead of Lagrange3rd -- Dattorro's own paper
@@ -297,10 +307,20 @@ private:
     struct TankBranch
     {
         ModulatedAllpassStage allpass1;
-        DelayLineType delay1;
+        ModulatedDelayLineType delay1;
         float dampState = 0.0f;
-        AllpassStage allpass2;
-        DelayLineType delay2;
+        ModulatedAllpassStage allpass2;
+        ModulatedDelayLineType delay2;
+
+        // Lagrange3rd mirrors of delay1, allpass2's line and delay2, fed the
+        // same samples and advanced in lockstep. Only the 14 output taps
+        // read them (peekTap); the recirculating path reads the Thiran
+        // lines above. A Thiran read carries one sample of state, so
+        // peeking it at tap offsets would corrupt the loop, and the taps
+        // stay on Lagrange so their sound is unchanged.
+        DelayLineType tapDelay1;
+        DelayLineType tapAllpass2;
+        DelayLineType tapDelay2;
 
         float allpass1BaseSamples = 0.0f, delay1BaseSamples = 0.0f, allpass2BaseSamples = 0.0f, delay2BaseSamples = 0.0f;
         float allpass1Samples = 0.0f, delay1Samples = 0.0f, allpass2Samples = 0.0f, delay2Samples = 0.0f;
@@ -308,7 +328,8 @@ private:
 
     template <typename Stage>
     float processAllpass (float input, Stage& stage);
-    float processDelay (float input, DelayLineType& delay);
+    float processDelay (float input, ModulatedDelayLineType& delay, DelayLineType& tapMirror);
+    float processAllpass2 (float input, TankBranch& branch);
     float processBranch (float input, TankBranch& branch);
 
     // Non-consuming "peek" read at an absolute sample offset within a delay
@@ -597,8 +618,8 @@ private:
     // i.e. ~0.5 ms), which smears those modes so no single one can build up
     // coherently. Applied to allpass1 of BOTH branches with incommensurate
     // rates and a 90-degree phase offset so the two branches never detune
-    // in lockstep. The delay lines are Lagrange3rd, so the fractional,
-    // per-sample-changing read delay is interpolated smoothly.
+    // in lockstep. allpass1's line is Thiran (see ModulatedDelayLineType), so
+    // the fractional, per-sample-changing read delay keeps a flat magnitude.
     static constexpr float modDepthMs = 0.5f;
     static constexpr float modRateHzA = 0.5f;
     static constexpr float modRateHzB = 0.7f;
