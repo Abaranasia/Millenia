@@ -31,10 +31,19 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     // float (0.0/1.0) even though it's an AudioParameterBool.
     pitchShiftParam = apvts.getRawParameterValue (ParamIDs::pitchShift);
     feedbackParam   = apvts.getRawParameterValue (ParamIDs::feedback);
+    shimmerAmountParam = apvts.getRawParameterValue (ParamIDs::shimmerAmount);
+    shimmerSustainParam = apvts.getRawParameterValue (ParamIDs::shimmerSustain);
     dampingParam    = apvts.getRawParameterValue (ParamIDs::damping);
     widthParam      = apvts.getRawParameterValue (ParamIDs::width);
     mixParam        = apvts.getRawParameterValue (ParamIDs::mix);
     bypassParam     = apvts.getRawParameterValue (ParamIDs::bypass);
+    freezeParam     = apvts.getRawParameterValue (ParamIDs::freeze);
+    infiniteParam   = apvts.getRawParameterValue (ParamIDs::infinite);
+    loopMixParam = apvts.getRawParameterValue (ParamIDs::loopMix);
+    loopLengthParam = apvts.getRawParameterValue (ParamIDs::loopLength);
+    preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
+    lowCutParam     = apvts.getRawParameterValue (ParamIDs::lowCut);
+    highCutParam    = apvts.getRawParameterValue (ParamIDs::highCut);
 }
 
 MilleniaAudioProcessor::~MilleniaAudioProcessor()
@@ -110,6 +119,10 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // initialisation that you need..
 
     juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) getTotalNumOutputChannels() };
+
+    // Seeded before prepare() so the engine's own pre-delay smoother starts
+    // at the host's current value instead of gliding in from 0 ms.
+    shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
     shimmerReverbEngine.prepare (spec);
     shimmerReverbEngine.reset();
 
@@ -120,14 +133,41 @@ void MilleniaAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // host actually has each parameter set.
     smoothedPitchShift.reset (sampleRate, 0.05);
     smoothedFeedback.reset (sampleRate, 0.05);
+    smoothedShimmerAmount.reset (sampleRate, 0.05);
+    smoothedShimmerSustain.reset (sampleRate, 0.05);
     smoothedDamping.reset (sampleRate, 0.05);
     smoothedWidth.reset (sampleRate, 0.05);
     smoothedMix.reset (sampleRate, 0.05);
+    smoothedLowCut.reset (sampleRate, 0.05);
+    smoothedHighCut.reset (sampleRate, 0.05);
+
+    // 2026-08-29: tried giving Freeze its own longer ramp (0.3s, then 1.0s)
+    // after a by-ear report that the freezeQuickToggle checkbox produced "a
+    // quick initial highly-pitched noise... like a DJ scratch effect" that
+    // manual dial drags didn't. REVERTED -- both attempts made it WORSE, not
+    // better ("even worse because... it takes longer"): the problem isn't
+    // sweep SPEED at all, it's that the pitch-ratio glide itself is
+    // unwanted for a toggle -- the user wants a clean swap between "live"
+    // and "frozen" output, not an audible pitch-bend transition of any
+    // duration, so stretching the transition out just prolongs an
+    // unwanted characteristic. FIXED 2026-10-10 in the engine, not here:
+    // Freeze is now a LEVEL crossfade from the main shifter to a 0-semitone
+    // unityShifter (see ShimmerReverbEngine::
+    // applyPitchAndFreezeCrossfade()), and the
+    // engine ramps freeze per sample inside each block, so this block-rate
+    // 0.05s ramp no longer steps audibly on large buffers. Engram topic_key
+    // millenia/freeze-toggle-pitch-artifact has the full investigation.
+    smoothedFreeze.reset (sampleRate, 0.05);
 
     smoothedPitchShift.setCurrentAndTargetValue (pitchShiftParam->load());
     smoothedFeedback.setCurrentAndTargetValue (feedbackParam->load());
+    smoothedShimmerAmount.setCurrentAndTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setCurrentAndTargetValue (shimmerSustainParam->load());
     smoothedDamping.setCurrentAndTargetValue (dampingParam->load());
     smoothedWidth.setCurrentAndTargetValue (widthParam->load());
+    smoothedFreeze.setCurrentAndTargetValue (freezeParam->load());
+    smoothedLowCut.setCurrentAndTargetValue (lowCutParam->load());
+    smoothedHighCut.setCurrentAndTargetValue (highCutParam->load());
 
     // Bypass folds into the mix smoother's seed value too -- see
     // processBlock()'s comment for why bypass drives smoothedMix rather than
@@ -200,8 +240,13 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     smoothedPitchShift.setTargetValue (pitchShiftParam->load());
     smoothedFeedback.setTargetValue (feedbackParam->load());
+    smoothedShimmerAmount.setTargetValue (shimmerAmountParam->load());
+    smoothedShimmerSustain.setTargetValue (shimmerSustainParam->load());
     smoothedDamping.setTargetValue (dampingParam->load());
     smoothedWidth.setTargetValue (widthParam->load());
+    smoothedFreeze.setTargetValue (freezeParam->load());
+    smoothedLowCut.setTargetValue (lowCutParam->load());
+    smoothedHighCut.setTargetValue (highCutParam->load());
 
     // Bypass integration: bypass does NOT call
     // ShimmerReverbEngine::setBypassed() at all. That method forces its own
@@ -221,9 +266,47 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     shimmerReverbEngine.setPitchShiftSemitones (smoothedPitchShift.skip ((int) numSamples));
     shimmerReverbEngine.setFeedback (smoothedFeedback.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerAmount (smoothedShimmerAmount.skip ((int) numSamples));
+    shimmerReverbEngine.setShimmerSustain (smoothedShimmerSustain.skip ((int) numSamples));
     shimmerReverbEngine.setDamping (smoothedDamping.skip ((int) numSamples));
     shimmerReverbEngine.setWidth (smoothedWidth.skip ((int) numSamples));
     shimmerReverbEngine.setMix (smoothedMix.skip ((int) numSamples));
+
+    // Linear smoothers land exactly on their target when the ramp ends, so
+    // the engine's "skip the filter at the open endpoint" check sees exactly
+    // 20 Hz / 20 kHz again once a knob is returned there.
+    shimmerReverbEngine.setLowCutHz (smoothedLowCut.skip ((int) numSamples));
+    shimmerReverbEngine.setHighCutHz (smoothedHighCut.skip ((int) numSamples));
+    shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
+
+    // Phase 9: Freeze gets the exact same block-granularity smoothing
+    // treatment as every other continuous parameter above -- originally a
+    // bool at the APVTS level (now a continuous float dial, 2026-08-22, see
+    // Parameters.cpp), but even a hard 0->1 jump on decayGain/dry-mute
+    // inside the tank would click, same reasoning as bypass driving
+    // smoothedMix instead of a hard switch (see the comment above).
+    shimmerReverbEngine.setFreezeAmount (smoothedFreeze.skip ((int) numSamples));
+
+    // Infinite mode: read RAW, no smoother here -- DattorroTank ramps the
+    // 0/1 target itself over infiniteRampSeconds, sample-accurately, same
+    // reasoning as Loop Mix below.
+    shimmerReverbEngine.setInfiniteAmount (infiniteParam->load() > 0.5f ? 1.0f : 0.0f);
+
+    // Phase 10 Loop Mix: read RAW, no smoother here -- the engage/disengage
+    // ramp lives INSIDE LoopCapture itself (2026-09-06 fix, see
+    // LoopCapture::setLoopFreezeAmount()'s comment), sample-accurate
+    // regardless of host buffer size. Loop Mix is itself now a continuously-
+    // dragged dial (retyped 2026-09-26 from a discrete on/off toggle), which
+    // makes the case for reading it raw here even clearer than before -- a
+    // second, coarser block-granularity smoother on top of LoopCapture's own
+    // sample-accurate ramp would be redundant at best. loopLengthParam is
+    // read RAW too, for the unrelated "only matters at a discrete instant"
+    // reason -- LoopCapture itself only ever applies a new length at its own
+    // next rising-edge capture (see LoopCapture::setLoopLengthMs()'s comment), so
+    // smoothing this value would add nothing but latency to when a length
+    // change is picked up.
+    shimmerReverbEngine.setLoopFreezeAmount (loopMixParam->load());
+    shimmerReverbEngine.setLoopLengthMs (loopLengthParam->load());
 
     juce::dsp::AudioBlock<float> block (buffer);
     shimmerReverbEngine.process (block);
