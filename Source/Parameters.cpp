@@ -119,11 +119,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // low end where the tested-good default lives) are UNCHANGED -- only the
     // upper bound was wrong. Still a REASONED value, not an ear-tuned final
     // one -- an actual listening pass across the new range is still open.
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::damping, 1 },
-        "Damping",
-        juce::NormalisableRange<float> (0.0f, 0.3f, 0.0f, 0.3f),
-        0.0005f));
+    //
+    // Knob law (2026-11): the stored value is still the coefficient `a`, but
+    // with the old 0.3 skew ~58% of the travel sat above 21 kHz at 44.1 kHz
+    // (centre -> a ~= 0.03 -> ~25 kHz), i.e. inaudible. The skew now puts the
+    // knob centre at a = 0.08 (fc ~= 17.8 kHz at 44.1 kHz). Range, default and
+    // the stored value's meaning are unchanged; only the normalized position
+    // of a given value moves (host automation lanes shift, raw values don't).
+    {
+        juce::NormalisableRange<float> dampingRange (0.0f, 0.3f);
+        dampingRange.setSkewForCentre (0.08f);
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::damping, 1 }, "Damping", dampingRange, 0.0005f));
+    }
 
     // Backs ShimmerReverbEngine::setWidth(), an M/S width on the stereo tank
     // tail since 2026-10-11 (docs/reverb-space-research.md section 8.2):
