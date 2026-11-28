@@ -544,6 +544,20 @@ ShimmerReverbEngine, Cascade T6, FreezeCrossfade, Space and DattorroTank "Infini
 
 - The parameter's value text still reads the knob value in Hz ("5000 Hz"), which is no longer the applied cutoff at large shifts.
 
+## 2026-11-28 — Mix defaults to 40% wet at the plugin level
+
+### What changed
+
+- The APVTS `mix` default went from 1.0 to 0.4 (typical insert) in `Parameters.cpp`. `ShimmerReverbEngine::defaultMix` stays 1.0, so engine tests and golden hashes are unaffected.
+
+### Behaviour change
+
+- A fresh instance opens 40% wet. A saved state that lacks `mix` now loads at 0.4 instead of 1.0 (the parameter is reset to its default); states that store `mix` are unchanged.
+
+### Tests
+
+- `StateSchemaTests`: Mix default is 0.4, a fresh APVTS reads 0.4, and loading a state without `mix` resets a moved Mix to that 0.4 default (`APVTS::replaceState` resets parameters missing from the state).
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

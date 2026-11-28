@@ -208,13 +208,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 
     // Dry/wet mix. NOT called directly against ShimmerReverbEngine::setMix()
     // from PluginProcessor::processBlock() -- see the bypass parameter below
-    // and PluginProcessor's smoothing wiring for why. Default matches
-    // ShimmerReverbEngine::defaultMix (1.0f, fully wet).
+    // and PluginProcessor's smoothing wiring for why. Deliberately does NOT
+    // match ShimmerReverbEngine::defaultMix (1.0f, fully wet, which the engine
+    // tests and golden hashes rely on): the plugin opens at 40% wet, a typical
+    // insert setting, so the dry signal stays audible on a fresh instance.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::mix, 1 },
         "Mix",
         juce::NormalisableRange<float> (0.0f, 1.0f),
-        1.0f));
+        0.4f));
 
     // Bypass does NOT call ShimmerReverbEngine::setBypassed() -- PluginProcessor
     // instead drives the mix smoother toward 0 so bypass gets the same

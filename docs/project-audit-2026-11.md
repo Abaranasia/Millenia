@@ -72,7 +72,7 @@ Still unresearched. Measure before changing anything. Candidates (inferred):
 ### Parameters
 - Express Damping in Hz or percent; it is a raw coefficient with a default of 0.0005 on a 0–0.3 range (`Parameters.cpp:120-124`).
 - Add host-visible units (`.withLabel`); only `shimmerTone` has value-to-text.
-- Default Mix below 100% wet for insert use (`Parameters.cpp:193-197`).
+- Default Mix below 100% wet for insert use (`Parameters.cpp:193-197`). **Done 2026-11-28**: the plugin default is now 40% wet (`Parameters.cpp`); the engine default stays 1.0.
 - Use an equal-power mix law (`ShimmerReverbEngine.cpp:813`).
 - Give `pitchShift` a semitone step and `loopLength` a skew.
 

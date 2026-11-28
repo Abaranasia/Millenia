@@ -99,9 +99,33 @@ public:
             DummyProcessor proc;
             juce::AudioProcessorValueTreeState apvts (proc, nullptr, "PARAMETERS", createParameterLayout());
 
-            auto state = makeState ({ { ParamIDs::mix, 0.4f } }, nullptr);
+            // 0.7 is deliberately not the Mix default, so a no-op applyState cannot pass.
+            auto state = makeState ({ { ParamIDs::mix, 0.7f } }, nullptr);
 
             expect (StateSchema::applyState (apvts, state));
+            expectWithinAbsoluteError (readParam (apvts, ParamIDs::mix), 0.7f, 1.0e-6f);
+        }
+
+        beginTest ("Mix parameter defaults to 0.4 (typical insert), a fresh APVTS reads it, and a state without mix resets it to that default");
+        {
+            DummyProcessor proc;
+            juce::AudioProcessorValueTreeState apvts (proc, nullptr, "PARAMETERS", createParameterLayout());
+            auto* param = apvts.getParameter (ParamIDs::mix);
+            expect (param != nullptr);
+            if (param == nullptr)
+                return;
+
+            expectWithinAbsoluteError (param->convertFrom0to1 (param->getDefaultValue()), 0.4f, 1.0e-6f);
+            expectWithinAbsoluteError (readParam (apvts, ParamIDs::mix), 0.4f, 1.0e-6f);
+
+            // APVTS::replaceState resets a parameter missing from the loaded state to its
+            // default. Move mix off the default first so this fails if that ever stops
+            // being true, i.e. an older save without mix would no longer land on 0.4.
+            param->setValueNotifyingHost (param->convertTo0to1 (0.9f));
+            expectWithinAbsoluteError (readParam (apvts, ParamIDs::mix), 0.9f, 1.0e-6f);
+
+            const int v = StateSchema::currentVersion;
+            expect (StateSchema::applyState (apvts, makeState ({ { ParamIDs::air, 1.0f } }, &v)));
             expectWithinAbsoluteError (readParam (apvts, ParamIDs::mix), 0.4f, 1.0e-6f);
         }
 
