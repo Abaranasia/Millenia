@@ -224,6 +224,82 @@ public:
             }
         }
 
+        // Audit fix 4 (2026-11): a pure tone makes the autocorrelation matrix
+        // near-singular, which used to push the LPC poles/zeros onto the unit
+        // circle and let the dry/shifted gain ratio run away. The corrector must
+        // stay bounded AND keep the shifted octave audible (not notch it away).
+        for (const bool useQuadraturePath : { false, true })
+        {
+            beginTest (juce::String ("Tonal input stays bounded and preserves the shifted octave")
+                       + (useQuadraturePath ? " (quadrature path)" : ""));
+            {
+                constexpr double sampleRate = 44100.0;
+                constexpr int numSamples = (int) (sampleRate * 2.0);
+                constexpr int settleSamples = (int) (sampleRate * 0.5);
+                constexpr int measureSamples = (int) (sampleRate * 0.5);
+                constexpr double twoPi = juce::MathConstants<double>::twoPi;
+
+                FormantEnvelopeCorrector corrector;
+                juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+                corrector.prepare (spec);
+                corrector.setPitchShiftSemitones (12.0f);
+
+                std::vector<double> out ((size_t) numSamples), uncorrected ((size_t) numSamples);
+                bool allFinite = true;
+                float peak = 0.0f;
+
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    const float dry = (float) (0.5 * std::sin (twoPi * 440.0 * n / sampleRate));
+                    const float shifted = (float) (0.5 * std::sin (twoPi * 880.0 * n / sampleRate));
+                    // processSample() must always run first (it drives the hop schedule).
+                    const float primary = corrector.processSample (dry, shifted);
+                    const float result = useQuadraturePath ? corrector.processQuadratureSample (shifted) : primary;
+
+                    allFinite = allFinite && std::isfinite (result);
+                    out[(size_t) n] = (double) result;
+                    uncorrected[(size_t) n] = (double) shifted;
+                    if (n >= settleSamples && std::isfinite (result))
+                        peak = juce::jmax (peak, std::abs (result));
+                }
+
+                auto goertzelLevel = [&] (const std::vector<double>& x, double freq)
+                {
+                    const int start = numSamples - measureSamples;
+                    const double w = twoPi * freq / sampleRate;
+                    const double coeff = 2.0 * std::cos (w);
+                    double s1 = 0.0, s2 = 0.0;
+                    for (int i = start; i < numSamples; ++i)
+                    {
+                        const double s0 = x[(size_t) i] + coeff * s1 - s2;
+                        s2 = s1;
+                        s1 = s0;
+                    }
+                    const double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+                    return std::sqrt (juce::jmax (0.0, power)) * 2.0 / (double) measureSamples;
+                };
+                auto toDb = [] (double v) { return 20.0 * std::log10 (juce::jmax (1.0e-12, v)); };
+
+                const double out880 = toDb (goertzelLevel (out, 880.0));
+                const double out440 = toDb (goertzelLevel (out, 440.0));
+                const double ref880 = toDb (goertzelLevel (uncorrected, 880.0));
+
+                logMessage ("Tonal test" + juce::String (useQuadraturePath ? " [quad]" : "")
+                            + ": peak=" + juce::String (peak, 3)
+                            + " out880=" + juce::String (out880, 2) + "dB"
+                            + " ref880=" + juce::String (ref880, 2) + "dB"
+                            + " out440=" + juce::String (out440, 2) + "dB");
+
+                expect (allFinite, "Non-finite output on tonal input");
+                expect (peak <= 2.0f, "Peak " + juce::String (peak) + " exceeded 2.0 on tonal input");
+                expect (std::abs (out880 - ref880) <= 6.0,
+                        "880 Hz level " + juce::String (out880, 2) + " dB not within 6 dB of uncorrected "
+                            + juce::String (ref880, 2) + " dB");
+                expect (out880 - out440 >= 20.0,
+                        "440 Hz only " + juce::String (out880 - out440, 2) + " dB below 880 Hz (need >= 20)");
+            }
+        }
+
         beginTest ("Corrected formants land substantially closer to dry than the uncorrected shifted signal, at the classic +12st default");
         {
             constexpr double sampleRate = 44100.0;

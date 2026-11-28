@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../../Source/DSP/DattorroTank.h"
+#include "../../Source/DSP/SafetyLimiter.h"
 
 // Phase 7 test-runner target — unit tests for the Phase 2 DattorroTank.
 // Unlike ScratchSchroederTankTests (single impulse), this specifically
@@ -10,6 +11,230 @@ class DattorroTankTests : public juce::UnitTest
 {
 public:
     DattorroTankTests() : juce::UnitTest ("DattorroTankTests", "DSP") {}
+
+    void runHoldTests()
+    {
+        // Audit fix 8 (docs/project-audit-2026-11.md, 2026-11-15), reworked
+        // 2026-11-15 to the HOLD criterion: with Infinite on, the tail must
+        // hold the level it was played at (DattorroTank's hold-level rider,
+        // see the hold* constants). Worst-case probe of Infinite + equal-power
+        // blend: the equal-power law gives a per-pass amplitude plainWeight +
+        // shimmerWeight of up to ~1.385 (weight 0.55) if the external copy is
+        // COHERENT with feedbackFromB. The coherent copy is built here
+        // directly: ext = limiter (rho * peekFeedbackSignal()), rho = 1.0 and
+        // 0.7 (rho < 1 models a shifter plus corrector that return less than
+        // unity gain). Reference L0 = output RMS over 2.3-3.3 s (the burst
+        // ends at 2 s and the rider latches 0.5 s later, at about 2.5 s, inside
+        // the window; 3-5 s is still building, which made the old early window
+        // an artifact).
+        {
+            struct HoldRun
+            {
+                std::vector<float> out;
+                double limiterFraction = 0.0;
+                int numNonFinite = 0;
+            };
+
+            static constexpr double holdSampleRate = 44100.0;
+
+            // burstAmp: uniform noise +-burstAmp for the first 2 s, then
+            // silence. releaseAt / reengageAt < 0: never. The limiter
+            // fraction is taken over the last 20 s.
+            auto runHold = [] (float maxWeight, float rho, float burstAmp, float freeze, double totalSeconds,
+                               double releaseAt, double reengageAt)
+            {
+                constexpr double sampleRate = 44100.0;
+                constexpr int blockSize = 512;
+
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                tank.reset();
+                tank.setMaxShimmerBlendWeight (maxWeight);
+                tank.setShimmerAmountGain (1.0f);
+                tank.setShimmerBlendLaw (1.0f);
+                tank.setFreezeAmount (freeze);
+                tank.setInfiniteAmount (1.0f);
+
+                SafetyLimiter limiter; // default 0.8 threshold, as in ShimmerReverbEngine
+                limiter.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                limiter.reset();
+
+                HoldRun run;
+                const long long totalSamples = (long long) (totalSeconds * sampleRate);
+                run.out.reserve ((size_t) totalSamples);
+                const long long burstEnd = (long long) (2.0 * sampleRate);
+                const long long limiterFrom = totalSamples - (long long) (20.0 * sampleRate);
+                const long long releaseSample = releaseAt < 0.0 ? -1 : (long long) (releaseAt * sampleRate);
+                const long long reengageSample = reengageAt < 0.0 ? -1 : (long long) (reengageAt * sampleRate);
+                long long lateOver = 0, lateTotal = 0;
+                juce::Random random (31415926);
+
+                for (long long n = 0; n < totalSamples; ++n)
+                {
+                    if (n == releaseSample)
+                        tank.setInfiniteAmount (0.0f);
+                    if (n == reengageSample)
+                        tank.setInfiniteAmount (1.0f);
+
+                    const float in = n < burstEnd ? (random.nextFloat() * 2.0f - 1.0f) * burstAmp : 0.0f;
+                    const float rawExt = rho * tank.peekFeedbackSignal();
+                    const float out = tank.processSample (in, limiter.processSample (rawExt));
+
+                    if (! std::isfinite (out))
+                    {
+                        ++run.numNonFinite;
+                        run.out.push_back (0.0f);
+                        continue;
+                    }
+
+                    run.out.push_back (out);
+
+                    if (n >= limiterFrom)
+                    {
+                        ++lateTotal;
+                        if (std::abs (rawExt) > 0.8f)
+                            ++lateOver;
+                    }
+                }
+
+                run.limiterFraction = (double) lateOver / (double) juce::jmax (1LL, lateTotal);
+                return run;
+            };
+
+            auto rmsOf = [] (const std::vector<float>& v, double from, double to)
+            {
+                const size_t a = (size_t) (from * holdSampleRate), b = juce::jmin (v.size(), (size_t) (to * holdSampleRate));
+                double sum = 0.0;
+                for (size_t i = a; i < b; ++i)
+                    sum += (double) v[i] * (double) v[i];
+                return std::sqrt (sum / (double) juce::jmax ((size_t) 1, b - a));
+            };
+
+            auto toDb = [] (double rms) { return 20.0 * std::log10 (juce::jmax (1.0e-30, rms)); };
+
+            // Shared HOLD assertions. tolDb is the +-window around L0 for the
+            // 10-15, 30-35 and 55-60 s RMS; no 1 s RMS window from 3 s on may
+            // exceed L0 + 3 dB.
+            auto checkHold = [this, &rmsOf, &toDb] (const juce::String& label, const HoldRun& run, double tolDb)
+            {
+                const double l0 = toDb (rmsOf (run.out, 2.3, 3.3));
+                const double d10 = toDb (rmsOf (run.out, 10.0, 15.0)) - l0;
+                const double d30 = toDb (rmsOf (run.out, 30.0, 35.0)) - l0;
+                const double d55 = toDb (rmsOf (run.out, 55.0, 60.0)) - l0;
+                double maxWindow = -1.0e9;
+                for (int s = 3; s + 1 <= 61; ++s)
+                    maxWindow = juce::jmax (maxWindow, toDb (rmsOf (run.out, (double) s, (double) s + 1.0)) - l0);
+
+                // The burst itself (input playing, before the latch, regulator
+                // inactive) is the pre-existing rider behaviour and is only
+                // pinned at 2.2; the 2.0 hold bound applies from 2.3 s on.
+                float burstPeak = 0.0f, peak = 0.0f;
+                for (size_t i = 0; i < run.out.size(); ++i)
+                {
+                    const float a = std::abs (run.out[i]);
+                    if (i < (size_t) (2.3 * holdSampleRate))
+                        burstPeak = juce::jmax (burstPeak, a);
+                    else
+                        peak = juce::jmax (peak, a);
+                }
+
+                logMessage ("MEASURE tank hold " + label + ": L0(2.3-3.3s)=" + juce::String (l0, 2) + " dB, vs L0: 10-15s="
+                            + juce::String (d10, 2) + " 30-35s=" + juce::String (d30, 2) + " 55-60s=" + juce::String (d55, 2)
+                            + " dB, max 1 s window=" + juce::String (maxWindow, 2) + " dB, peak after 2.3 s=" + juce::String (peak, 4)
+                            + ", burst peak=" + juce::String (burstPeak, 4)
+                            + ", limiterFrac(last20s)=" + juce::String (run.limiterFraction * 100.0, 3) + "%");
+
+                expectEquals (run.numNonFinite, 0, label + ": non-finite output");
+                expect (peak <= 2.0f, label + ": peak after the latch exceeded 2.0: " + juce::String (peak, 4));
+                expect (burstPeak <= 2.2f, label + ": burst peak exceeded 2.2: " + juce::String (burstPeak, 4));
+                expect (l0 > -60.0, label + ": tail already near-silent at 2.3-3.3 s (" + juce::String (l0, 2) + " dB)");
+                expect (std::abs (d10) <= tolDb, label + ": 10-15 s RMS off L0 by " + juce::String (d10, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (std::abs (d30) <= tolDb, label + ": 30-35 s RMS off L0 by " + juce::String (d30, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (std::abs (d55) <= tolDb, label + ": 55-60 s RMS off L0 by " + juce::String (d55, 2) + " dB (bound +-" + juce::String (tolDb, 1) + ")");
+                expect (maxWindow <= 3.0, label + ": a 1 s RMS window exceeded L0 + 3 dB (" + juce::String (maxWindow, 2) + " dB)");
+                expect (run.limiterFraction < 0.01, label + ": SafetyLimiter engaged on " + juce::String (run.limiterFraction * 100.0, 3)
+                                                        + "% of the last 20 s (bound 1%)");
+            };
+
+            struct WorstCase { float maxWeight; float rho; float burstAmp; };
+            const WorstCase cases[] = {
+                { 0.55f, 1.0f, 0.05f }, { 0.55f, 0.7f, 0.05f }, { 0.707f, 1.0f, 0.05f }, { 0.707f, 0.7f, 0.05f },
+                { 0.55f, 1.0f, 0.3f },  { 0.55f, 0.7f, 0.3f },  { 0.707f, 0.7f, 0.3f },
+            };
+
+            for (const auto& wc : cases)
+            {
+                const auto label = "weight " + juce::String (wc.maxWeight, 3) + ", rho " + juce::String (wc.rho, 1)
+                                   + ", burst " + juce::String (wc.burstAmp, 2);
+                beginTest ("Infinite holds its level, coherent external feedback (" + label + "): within +-2 dB of L0, no swell, limiter rarely engaged");
+                checkHold (label, runHold (wc.maxWeight, wc.rho, wc.burstAmp, 0.0f, 62.0, -1.0, -1.0), 2.0);
+            }
+
+            beginTest ("Infinite release mid-hold: the tail decays with no click (no sample step above the held level's own)");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 0.0f, 20.0, 10.0, -1.0);
+                auto maxStep = [&run] (double from, double to)
+                {
+                    float m = 0.0f;
+                    for (size_t i = (size_t) (from * holdSampleRate); i < (size_t) (to * holdSampleRate); ++i)
+                        m = juce::jmax (m, std::abs (run.out[i] - run.out[i - 1]));
+                    return m;
+                };
+
+                const float heldStep = maxStep (8.0, 10.0);
+                const float releaseStep = maxStep (10.0, 12.0);
+                const double heldDb = toDb (rmsOf (run.out, 8.0, 10.0));
+                const double decayedDb = toDb (rmsOf (run.out, 18.0, 20.0));
+
+                logMessage ("MEASURE tank release: max step held (8-10 s)=" + juce::String (heldStep, 5) + ", during release (10-12 s)="
+                            + juce::String (releaseStep, 5) + "; RMS held=" + juce::String (heldDb, 2) + " dB, 18-20 s="
+                            + juce::String (decayedDb, 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (releaseStep <= heldStep * 1.25f, "Release produced a click: max step " + juce::String (releaseStep, 5)
+                                                             + " vs held " + juce::String (heldStep, 5));
+                expect (decayedDb < heldDb - 6.0, "Tail did not decay after release (" + juce::String (decayedDb - heldDb, 2) + " dB)");
+            }
+
+            beginTest ("Infinite re-engage captures a NEW target: after a release and decay the tail holds the lower level, not the old one");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 0.0f, 40.0, 5.0, 9.0);
+                const double l0 = toDb (rmsOf (run.out, 2.3, 3.3));
+                const double l1 = toDb (rmsOf (run.out, 8.8, 9.0)); // the level at the moment of re-engage
+                const double l2 = toDb (rmsOf (run.out, 20.0, 25.0));
+                const double l3 = toDb (rmsOf (run.out, 30.0, 35.0));
+
+                logMessage ("MEASURE tank re-engage: L0=" + juce::String (l0, 2) + " dB, at re-engage (8.8-9.0 s)=" + juce::String (l1, 2)
+                            + " dB, 20-25 s=" + juce::String (l2, 2) + " dB, 30-35 s=" + juce::String (l3, 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (l1 < l0 - 3.0, "Tail did not decay between release and re-engage (" + juce::String (l1 - l0, 2) + " dB)");
+                expect (std::abs (l3 - l1) <= 2.0, "Re-engaged tail is not at the level captured at re-engage (" + juce::String (l3 - l1, 2) + " dB)");
+                expect (std::abs (l3 - l2) <= 1.0, "Re-engaged tail is not holding (" + juce::String (l3 - l2, 2) + " dB from 20-25 s to 30-35 s)");
+            }
+
+            beginTest ("Infinite + Freeze (1.0): stays finite and bounded, boost off");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.05f, 1.0f, 62.0, -1.0, -1.0);
+                float peak = 0.0f;
+                for (float v : run.out)
+                    peak = juce::jmax (peak, std::abs (v));
+                logMessage ("MEASURE tank Infinite+Freeze: peak=" + juce::String (peak, 4) + ", RMS 55-60 s="
+                            + juce::String (toDb (rmsOf (run.out, 55.0, 60.0)), 2) + " dB");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+                expect (peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (peak, 4));
+            }
+
+            beginTest ("Infinite from dead silence: output stays exactly 0 (no boost of nothing)");
+            {
+                const auto run = runHold (0.55f, 1.0f, 0.0f, 0.0f, 30.0, -1.0, -1.0);
+                size_t nonZero = 0;
+                for (float v : run.out)
+                    if (v != 0.0f)
+                        ++nonZero;
+                expectEquals ((int) nonZero, 0, "Dead-silent start produced non-zero output samples");
+                expectEquals (run.numNonFinite, 0, "Non-finite output");
+            }
+        }
+    }
 
     void runTest() override
     {
@@ -270,7 +495,7 @@ public:
             // "Shimmer Sustain" task (see Source/DSP/DattorroTank.h's comment
             // above maxShimmerBlendWeight): this constant just became a
             // runtime-adjustable, UNCLAMPED (same convention as
-            // setDecay()/setDamping()/setShimmerFeedbackGain()/
+            // setDecaySeconds()/setDamping()/setShimmerAmountGain()/
             // setFreezeAmount()) instance member via setMaxShimmerBlendWeight().
             // The header's own safety argument is that shimmerWeight+plainWeight
             // == 1.0 exactly for ANY value in [0, 1], so the combined feedback
@@ -350,6 +575,105 @@ public:
                             + ", full freeze (1.0) measured peak=" + juce::String (fullFreezePeak));
         }
 
+        //==============================================================================
+        // Shimmer cascade slice 1 (2026-10-24, docs/shimmer-character-research.md
+        // section 7.1 item 1): setShimmerBlendLaw(). The external feed is the
+        // tank's own feedbackFromB delayed by externalDelaySamples (100 ms)
+        // through a plain circular buffer -- a stand-in for the engine's
+        // shifter path (its grain pool lags ~80 ms) that is broadband and,
+        // on a noise tail, nearly uncorrelated with the undelayed copy, like
+        // a +12 st shift. Noise burst for burstSeconds, then silence.
+        // freezeFromSample (if >= 0) steps setFreezeAmount (1.0f) there.
+        auto runBlendLawScenario = [] (float equalPowerAmount, bool setLaw, double seconds, int freezeFromSample) -> std::vector<float>
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int externalDelaySamples = 4410;
+            constexpr double burstSeconds = 1.0;
+
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.reset();
+            tank.setMaxShimmerBlendWeight (0.5f);
+            if (setLaw)
+                tank.setShimmerBlendLaw (equalPowerAmount);
+
+            std::vector<float> delay ((size_t) externalDelaySamples, 0.0f);
+            size_t delayIndex = 0;
+            juce::Random random (27182818);
+
+            const int numSamples = (int) (seconds * sampleRate);
+            const int burstSamples = (int) (burstSeconds * sampleRate);
+            std::vector<float> out ((size_t) numSamples, 0.0f);
+
+            for (int n = 0; n < numSamples; ++n)
+            {
+                if (n == freezeFromSample)
+                    tank.setFreezeAmount (1.0f);
+
+                const float input = n < burstSamples ? random.nextFloat() * 0.6f - 0.3f : 0.0f;
+                const float external = delay[delayIndex];
+                out[(size_t) n] = tank.processSample (input, external);
+                delay[delayIndex] = tank.peekFeedbackSignal();
+                delayIndex = (delayIndex + 1) % delay.size();
+            }
+
+            return out;
+        };
+
+        auto rmsDbOver = [] (const std::vector<float>& x, double fromSeconds, double toSeconds) -> double
+        {
+            const size_t from = (size_t) (fromSeconds * 44100.0), to = juce::jmin (x.size(), (size_t) (toSeconds * 44100.0));
+            double sum = 0.0;
+            for (size_t i = from; i < to; ++i)
+                sum += (double) x[i] * (double) x[i];
+            return 10.0 * std::log10 (juce::jmax (1.0e-30, sum / (double) juce::jmax ((size_t) 1, to - from)));
+        };
+
+        beginTest ("setShimmerBlendLaw (0.0f) is bit-identical to an untouched tank (linear law), with a live external feed, before and after Freeze");
+        {
+            const int freezeFrom = (int) (3.0 * 44100.0);
+            const auto untouched = runBlendLawScenario (0.0f, false, 6.0, freezeFrom);
+            const auto explicitLinear = runBlendLawScenario (0.0f, true, 6.0, freezeFrom);
+            expect (untouched == explicitLinear, "setShimmerBlendLaw (0.0f) changed the output -- the linear law must be the old arithmetic exactly");
+        }
+
+        beginTest ("At Freeze 1 the equal-power law is inert: setShimmerBlendLaw (1.0f) is bit-identical to the linear law");
+        {
+            // The (1 - freezeAmount) factor in processSample(): when frozen the
+            // engine feeds an UNSHIFTED copy, correlated with feedbackFromB,
+            // and equal-power weights on correlated feeds sum above unity. So
+            // a fully frozen tank must not use them at all.
+            const auto linear = runBlendLawScenario (0.0f, true, 4.0, 0);
+            const auto equalPower = runBlendLawScenario (1.0f, true, 4.0, 0);
+            expect (linear == equalPower, "setShimmerBlendLaw (1.0f) changed the fully frozen output -- Freeze must force the linear law");
+        }
+
+        beginTest ("Equal-power law keeps more loop energy than the linear law when the external feed is uncorrelated");
+        {
+            // shimmerWeight 0.5 (Amount 1, cap 0.5): linear keeps 0.5^2 +
+            // 0.5^2 = 0.5 of the cross-feed energy per pass, equal-power
+            // 0.75 + 0.25 = 1.0, so the equal-power tail must be clearly
+            // louder a few seconds after the burst. Bounded too.
+            const auto linear = runBlendLawScenario (0.0f, true, 6.0, -1);
+            const auto equalPower = runBlendLawScenario (1.0f, true, 6.0, -1);
+            const double linearDb = rmsDbOver (linear, 3.0, 4.0);
+            const double equalPowerDb = rmsDbOver (equalPower, 3.0, 4.0);
+
+            float peak = 0.0f;
+            for (float v : equalPower)
+            {
+                expect (std::isfinite (v), "Non-finite sample with the equal-power law");
+                peak = juce::jmax (peak, std::abs (v));
+            }
+
+            logMessage ("Blend law, delayed-feedback tank, RMS 3-4 s: linear " + juce::String (linearDb, 2) + " dB, equal-power "
+                            + juce::String (equalPowerDb, 2) + " dB (gap " + juce::String (equalPowerDb - linearDb, 2)
+                            + " dB), equal-power peak " + juce::String (peak, 4));
+            expect (equalPowerDb > linearDb + 3.0, "Equal-power tail is not clearly longer than the linear one: linear "
+                                                       + juce::String (linearDb, 2) + " dB, equal-power " + juce::String (equalPowerDb, 2) + " dB");
+            expect (peak <= 10.0f, "Equal-power law exceeded the 10.0 bound: " + juce::String (peak, 4));
+        }
+
         beginTest ("Freeze sustains a captured tail indefinitely, unlike normal (non-frozen) processing which decays to silence");
         {
             // Phase 9: a short burst, then silence, run in parallel through
@@ -370,8 +694,8 @@ public:
 
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
 
-            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
-            // see setShimmerFeedbackGain()'s comment) would otherwise claim
+            // DattorroTank's own class default (shimmerAmountGain = 1.0f,
+            // see setShimmerAmountGain()'s comment) would otherwise claim
             // maxShimmerBlendWeight's share (0.85) of the recirculation
             // budget for an externalFeedback that's always 0.0 here (both
             // tanks are driven through the single-arg processSample()/
@@ -382,12 +706,12 @@ public:
             DattorroTank plainTank;
             plainTank.prepare (spec);
             plainTank.reset();
-            plainTank.setShimmerFeedbackGain (0.0f);
+            plainTank.setShimmerAmountGain (0.0f);
 
             DattorroTank frozenTank;
             frozenTank.prepare (spec);
             frozenTank.reset();
-            frozenTank.setShimmerFeedbackGain (0.0f);
+            frozenTank.setShimmerAmountGain (0.0f);
             frozenTank.setFreezeAmount (1.0f);
 
             juce::AudioBuffer<float> plainBuffer (numChannels, blockSize);
@@ -583,9 +907,9 @@ public:
         // "Infinite mode" section and DattorroTank::setInfiniteAmount()):
         // unlike Freeze, Infinite keeps feeding fresh input into a tank that
         // never decays, so new material layers on top of the sustained tail.
-        // T2-T4 below zero shimmerFeedbackGain on purpose: the single-arg
+        // T2-T4 below zero shimmerAmountGain on purpose: the single-arg
         // processSample() overload always passes externalFeedback=0.0f, so
-        // the class default (shimmerFeedbackGain=1.0f, i.e. shimmerWeight=0.85)
+        // the class default (shimmerAmountGain=1.0f, i.e. shimmerWeight=0.85)
         // would leave only a 0.15 plainWeight share of the loop recirculating
         // -- a tail that dies within a second no matter what Infinite does.
         // Zeroing it gives plainWeight=1.0, the exact "bare tank, unity decay,
@@ -664,7 +988,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f); // plainWeight = 1.0, see the section comment above
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, see the section comment above
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -722,7 +1046,7 @@ public:
             }
         };
 
-        beginTest ("Infinite: tail does not decay -- last second of 30s silence is within 3dB of seconds 3-4");
+        beginTest ("Infinite: tail does not decay -- last second of 30s silence is within 1dB of seconds 3-4");
         {
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
@@ -736,7 +1060,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -780,8 +1104,10 @@ public:
 
             expect (std::isfinite (earlyRms) && std::isfinite (lateRms), "Non-finite RMS");
             expect (earlyRms > 1.0e-3f, "Infinite tail was already near-silent at seconds 3-4 (RMS " + juce::String (earlyRms, 6) + ")");
-            expect (std::abs (changeDb) <= 3.0f, "Infinite tail drifted by " + juce::String (changeDb, 2)
-                                                     + "dB over 28s (bound: +-3dB)");
+            // Tightened from +-3 dB to +-1 dB (2026-11-15, hold-level rider): the
+            // tail now holds, measured +0.19 dB over 28 s (-0.30 dB before it).
+            expect (std::abs (changeDb) <= 1.0f, "Infinite tail drifted by " + juce::String (changeDb, 2)
+                                                     + "dB over 28s (bound: +-1dB)");
         }
 
         beginTest ("Infinite: new input layers on top of the sustained tail instead of being muted");
@@ -804,7 +1130,7 @@ public:
             juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
             tank.prepare (spec);
             tank.reset();
-            tank.setShimmerFeedbackGain (0.0f);
+            tank.setShimmerAmountGain (0.0f);
             tank.setInfiniteAmount (1.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
@@ -851,6 +1177,8 @@ public:
                                               + ") -- Infinite must not mute fresh input");
         }
 
+        runHoldTests();
+
         beginTest ("Stereo taps: left output is bit-identical to the pre-stereo (left-only) tap set");
         {
             // Golden FNV-1a hash of processSample()'s return value (impulse,
@@ -858,7 +1186,10 @@ public:
             // RECORDED by running this exact test against the pre-stereo
             // tank (commit dbc784c, Debug x64, MSVC VS2026) before the right
             // tap set was added. Adding output-only right taps must not move
-            // a single bit of the left output.
+            // a single bit of the left output. Since slice 2 the run pins
+            // Modulation 0 and the legacy g = 0.7f (see hashLeftOutput()),
+            // so the same value also proves Size/Decay/Modulation are exact
+            // no-ops at those settings.
             constexpr juce::uint64 expectedLeftHash = 0x475497026ccf0cebull;
             const auto hash = hashLeftOutput();
             logMessage ("DattorroTank left-output FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
@@ -904,6 +1235,16 @@ public:
         constexpr double sampleRate = 44100.0;
         DattorroTank tank;
         tank.prepare ({ sampleRate, 512, 2 });
+
+        // Slice 2 (docs/reverb-space-research.md section 9): the tank's
+        // defaults now mirror the new APVTS defaults (Decay 7.0 s -> g
+        // 0.6993, Modulation 0.3), which move the output by design. The
+        // golden hash was recorded at the old fixed g = 0.7f with no
+        // modulation, so pin exactly that: Modulation 0 and the RT60 that
+        // maps back to 0.7f bit-for-bit at Size 1 (asserted in
+        // DattorroTankSpaceTests).
+        tank.setModulation (0.0f);
+        tank.setDecaySeconds (DattorroTank::decaySecondsForGain (0.7f, 1.0f));
         tank.reset();
 
         juce::Random random (271828);
@@ -929,3 +1270,333 @@ public:
 };
 
 static DattorroTankTests dattorroTankTests;
+
+// Slice 2 of docs/reverb-space-research.md (section 9): Decay as RT60
+// seconds, Size, and always-on Modulation, on the bare tank.
+class DattorroTankSpaceTests : public juce::UnitTest
+{
+public:
+    DattorroTankSpaceTests() : juce::UnitTest ("DattorroTankSpaceTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("decaySecondsForGain (0.7f, 1) maps back to exactly 0.7f (golden-hash runs depend on it)");
+        {
+            const float legacySeconds = DattorroTank::decaySecondsForGain (0.7f, 1.0f);
+            logMessage ("RT60 reproducing g = 0.7f at Size 1: " + juce::String (legacySeconds, 6) + " s; default 7.0 s gives g = "
+                            + juce::String (DattorroTank::decayGainFor (7.0f, 1.0f), 6));
+            expect (DattorroTank::decayGainFor (legacySeconds, 1.0f) == 0.7f, "Legacy RT60 does not map back to exactly 0.7f");
+            expect (std::abs (DattorroTank::decayGainFor (7.0f, 1.0f) - 0.7f) < 0.002f, "Default 7 s should land near the old g = 0.7");
+        }
+
+        beginTest ("RT60 mapping: bare tank decay at Size 1 and 2, RT60 2 s and 5 s, within 15%");
+        {
+            for (float size : { 1.0f, 2.0f })
+            {
+                for (float rt60 : { 2.0f, 5.0f })
+                {
+                    const double measured = measureRt60 (size, rt60);
+                    logMessage ("Size " + juce::String (size, 1) + ", RT60 " + juce::String (rt60, 1) + " s -> measured "
+                                    + juce::String (measured, 3) + " s (" + juce::String (100.0 * (measured / rt60 - 1.0), 1) + "%)");
+                    expect (std::abs (measured / rt60 - 1.0) <= 0.15,
+                            "Measured RT60 " + juce::String (measured, 3) + " s, expected " + juce::String (rt60, 1)
+                                + " s +-15% at Size " + juce::String (size, 1));
+                }
+            }
+        }
+
+        beginTest ("RT60 independent of Size: Size 0.5 vs 2 within 15% at RT60 4 s (below every Size's ceiling)");
+        {
+            const double small = measureRt60 (0.5f, 4.0f);
+            const double large = measureRt60 (2.0f, 4.0f);
+            logMessage ("RT60 4 s: Size 0.5 -> " + juce::String (small, 3) + " s, Size 2 -> " + juce::String (large, 3)
+                            + " s (ratio " + juce::String (large / small, 3) + ")");
+            expect (std::abs (large / small - 1.0) <= 0.15, "RT60 moved with Size: " + juce::String (small, 3) + " vs " + juce::String (large, 3));
+        }
+
+        beginTest ("High-band decay does not collapse off Size 1: 16 kHz RT60 at Size 0.5/0.75 >= 80% of Size 1");
+        {
+            const double reference = measureRt60 (1.0f, 4.0f, 16000.0);
+            for (float size : { 0.5f, 0.75f })
+            {
+                const double measured = measureRt60 (size, 4.0f, 16000.0);
+                logMessage ("16 kHz RT60 at RT60 4 s: Size 1 -> " + juce::String (reference, 3) + " s, Size " + juce::String (size, 2)
+                                + " -> " + juce::String (measured, 3) + " s (ratio " + juce::String (measured / reference, 3) + ")");
+                expect (measured >= 0.8 * reference,
+                        "16 kHz RT60 collapsed at Size " + juce::String (size, 2) + ": " + juce::String (measured, 3)
+                            + " s vs " + juce::String (reference, 3) + " s at Size 1");
+            }
+        }
+
+        beginTest ("Decay ceiling: g never exceeds 0.85 for any Decay/Size, statically or while Size glides");
+        {
+            float maxGain = 0.0f;
+            for (int d = 0; d <= 60; ++d)
+            {
+                const float rt60 = DattorroTank::minDecaySeconds
+                                   * std::pow (DattorroTank::maxDecaySeconds / DattorroTank::minDecaySeconds, (float) d / 60.0f);
+                for (int s = 0; s <= 30; ++s)
+                {
+                    const float size = DattorroTank::minSize + (DattorroTank::maxSize - DattorroTank::minSize) * (float) s / 30.0f;
+                    maxGain = juce::jmax (maxGain, DattorroTank::decayGainFor (rt60, size));
+                }
+            }
+            maxGain = juce::jmax (maxGain, DattorroTank::decayGainFor (1.0e6f, 0.5f));
+            expect (maxGain <= DattorroTank::maxDecayGain, "Static sweep: g reached " + juce::String (maxGain, 6));
+            expect (DattorroTank::decayGainFor (DattorroTank::maxDecaySeconds, 1.0f) == DattorroTank::maxDecayGain,
+                    "20 s at Size 1 is above the ceiling and must clamp to exactly 0.85");
+
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setDecaySeconds (DattorroTank::maxDecaySeconds);
+            tank.reset();
+            float runtimeMax = 0.0f;
+            for (int n = 0; n < (int) (4.0 * sampleRate); ++n)
+            {
+                if (n % (int) (0.5 * sampleRate) == 0)
+                    tank.setSize ((n / (int) (0.5 * sampleRate)) % 2 == 0 ? DattorroTank::minSize : DattorroTank::maxSize);
+                tank.processSample (0.0f);
+                runtimeMax = juce::jmax (runtimeMax, tank.getCurrentDecayGain());
+            }
+            logMessage ("Ceiling: static sweep max g = " + juce::String (maxGain, 6) + ", runtime max g during Size glides = " + juce::String (runtimeMax, 6));
+            expect (runtimeMax <= DattorroTank::maxDecayGain, "Runtime g reached " + juce::String (runtimeMax, 6));
+        }
+
+        beginTest ("Size scales the space: first output-tap arrival doubles from Size 1 to Size 2");
+        {
+            const int onset1 = firstOutputSample (1.0f);
+            const int onset2 = firstOutputSample (2.0f);
+            const double ratio = (double) onset2 / (double) juce::jmax (1, onset1);
+            logMessage ("First tap arrival: Size 1 -> sample " + juce::String (onset1) + " (" + juce::String (1000.0 * onset1 / sampleRate, 2)
+                            + " ms), Size 2 -> sample " + juce::String (onset2) + " (" + juce::String (1000.0 * onset2 / sampleRate, 2)
+                            + " ms), ratio " + juce::String (ratio, 4));
+            expect (onset1 > 0 && onset2 > 0, "No onset found");
+            expect (std::abs (ratio - 2.0) < 0.05, "Onset ratio " + juce::String (ratio, 4) + ", expected ~2");
+        }
+
+        beginTest ("Size automation (0.5 <-> 2 every 0.35 s, Modulation 1, Decay at ceiling) stays finite and bounded");
+        {
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0, the tank's harshest recirculation case
+            tank.setModulation (1.0f);
+            tank.setDecaySeconds (ceilingDecaySeconds()); // g = 0.85 at every Size
+            tank.reset();
+
+            juce::Random random (31415);
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+            const int toggleEvery = (int) (0.35 * sampleRate);
+            for (int n = 0; n < (int) (20.0 * sampleRate); ++n)
+            {
+                if (n % toggleEvery == 0)
+                    tank.setSize ((n / toggleEvery) % 2 == 0 ? DattorroTank::maxSize : DattorroTank::minSize);
+                const float left = tank.processSample (random.nextFloat() * 0.6f - 0.3f);
+                const float right = tank.getLastRightOutput();
+                if (! std::isfinite (left) || ! std::isfinite (right))
+                    ++numNonFinite;
+                else
+                    maxPeak = juce::jmax (maxPeak, std::abs (left), std::abs (right));
+            }
+            logMessage ("Size automation sweep, 20 s noise: peak " + juce::String (maxPeak, 4));
+            expectEquals (numNonFinite, 0, "Non-finite output during Size automation");
+            expect (maxPeak <= 10.0f, "Size automation exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
+        }
+
+        beginTest ("Size glide 1 -> 2 is click-free: max sample delta during the 300 ms glide stays within 3x steady state");
+        {
+            // Measures what the Thiran-interpolated allpass1 lines do at the
+            // fastest delay change Size can produce (see sizeRampSeconds in
+            // DattorroTank.h). A 220 Hz tone builds a steady tail at Size 1,
+            // then Size jumps to 2 (smoothed over 300 ms). A pitch glide
+            // raises the sample-to-sample delta only by the glide's
+            // frequency ratio; a Thiran state transient at each integer
+            // crossing would show up as spikes well above that.
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setModulation (0.0f);
+            tank.reset();
+
+            std::vector<float> left, right;
+            const int switchAt = (int) (3.0 * sampleRate);
+            const int total = switchAt + (int) (0.4 * sampleRate);
+            const double phaseIncrement = juce::MathConstants<double>::twoPi * 220.0 / sampleRate;
+            for (int n = 0; n < total; ++n)
+            {
+                if (n == switchAt)
+                    tank.setSize (2.0f);
+                left.push_back (tank.processSample (0.3f * (float) std::sin (phaseIncrement * n)));
+                right.push_back (tank.getLastRightOutput());
+            }
+
+            auto maxDelta = [&] (int from, int to)
+            {
+                float m = 0.0f;
+                for (int i = from; i < to; ++i)
+                    m = juce::jmax (m, std::abs (left[(size_t) i] - left[(size_t) i - 1]), std::abs (right[(size_t) i] - right[(size_t) i - 1]));
+                return m;
+            };
+
+            const float steady = maxDelta (switchAt - (int) (0.5 * sampleRate), switchAt);
+            const float glide = maxDelta (switchAt, switchAt + (int) (0.3 * sampleRate));
+            logMessage ("Size glide 1 -> 2: max steady delta " + juce::String (steady, 6) + ", max glide delta " + juce::String (glide, 6)
+                            + ", ratio " + juce::String (glide / juce::jmax (1.0e-9f, steady), 3));
+            expect (steady > 0.0f, "No steady tail");
+            expect (glide <= 3.0f * steady, "Size glide delta " + juce::String (glide, 6) + " exceeds 3x steady " + juce::String (steady, 6));
+        }
+
+        beginTest ("Freeze at Size 2 + Modulation 1 + Decay at ceiling stays finite and bounded over 3 minutes of sustained input");
+        {
+            // Same scenario as DattorroTankTests' 3-minute freeze test, at the
+            // longest lines, deepest modulation and the 0.85 decay ceiling
+            // (which Freeze then overrides toward 0.999f exactly as before).
+            constexpr int blockSize = 512;
+            constexpr int numBlocks = (int) (180.0 * sampleRate / blockSize);
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            tank.setSize (2.0f);
+            tank.setModulation (1.0f);
+            tank.setDecaySeconds (ceilingDecaySeconds());
+            tank.reset();
+            tank.setFreezeAmount (1.0f);
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::Random random (24681357);
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                        buffer.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                tank.process (block);
+
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float v = buffer.getSample (ch, i);
+                        if (! std::isfinite (v)) ++numNonFinite;
+                        else maxPeak = juce::jmax (maxPeak, std::abs (v));
+                    }
+            }
+
+            logMessage ("Frozen tank, Size 2 + Modulation 1, 180 s noise: peak " + juce::String (maxPeak, 4));
+            expectEquals (numNonFinite, 0, "Non-finite frozen output");
+            expect (maxPeak <= 10.0f, "Frozen output exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
+        }
+
+        beginTest ("Modulation > 0 actually changes the output");
+        {
+            auto runImpulse = [] (float modulation)
+            {
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, 512, 2 });
+                tank.setModulation (modulation);
+                tank.reset();
+                std::vector<float> out;
+                for (int n = 0; n < (int) (2.0 * sampleRate); ++n)
+                    out.push_back (tank.processSample (n == 0 ? 1.0f : 0.0f));
+                return out;
+            };
+            const auto off = runImpulse (0.0f);
+            const auto on = runImpulse (1.0f);
+            int differing = 0;
+            for (size_t i = 0; i < off.size(); ++i)
+                differing += off[i] != on[i] ? 1 : 0;
+            expect (differing > 0, "Modulation 1 did not change the output");
+        }
+    }
+
+private:
+    static constexpr double sampleRate = 44100.0;
+
+    // An RT60 long enough that g sits at the 0.85 ceiling at every Size,
+    // Size 2 included (~30.8 s there -- beyond the Decay parameter's 20 s
+    // maximum, which the bare tank does not clamp).
+    static float ceilingDecaySeconds()
+    {
+        return DattorroTank::decaySecondsForGain (DattorroTank::maxDecayGain, DattorroTank::maxSize);
+    }
+
+    // RT60 of the bare tank (no shimmer path, no modulation) from its
+    // impulse response, by Schroeder backward integration: E(t) = sum of
+    // h^2 from t to the end, in dB, with a least-squares line fitted over
+    // -5..-35 dB (a T30-style fit) and extrapolated to -60 dB. The IR runs
+    // 2 * RT60 + 1 s, so truncation sits ~120 dB down and cannot bend the
+    // fitted range. L and R energies are summed.
+    // bandHz > 0 band-passes the output around that frequency (Q 2) before
+    // the integration, giving the decay of that band alone.
+    static double measureRt60 (float size, float rt60, double bandHz = 0.0)
+    {
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
+        tank.setModulation (0.0f);
+        tank.setSize (size);
+        tank.setDecaySeconds (rt60);
+        tank.reset();
+
+        juce::dsp::IIR::Filter<float> bandL, bandR;
+        if (bandHz > 0.0)
+        {
+            bandL.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (sampleRate, (float) bandHz, 2.0f);
+            bandR.coefficients = bandL.coefficients;
+        }
+
+        const int numSamples = (int) ((2.0 * rt60 + 1.0) * sampleRate);
+        std::vector<double> energy ((size_t) numSamples);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float lf = tank.processSample (n == 0 ? 1.0f : 0.0f);
+            float rf = tank.getLastRightOutput();
+            if (bandHz > 0.0)
+            {
+                lf = bandL.processSample (lf);
+                rf = bandR.processSample (rf);
+            }
+            const double l = lf;
+            const double r = rf;
+            energy[(size_t) n] = l * l + r * r;
+        }
+
+        for (int n = numSamples - 2; n >= 0; --n)
+            energy[(size_t) n] += energy[(size_t) n + 1];
+
+        const double total = energy[0];
+        double sumT = 0.0, sumY = 0.0, sumTT = 0.0, sumTY = 0.0;
+        int count = 0;
+        for (int n = 0; n < numSamples; n += 16)
+        {
+            const double db = 10.0 * std::log10 (juce::jmax (1.0e-300, energy[(size_t) n] / total));
+            if (db > -5.0 || db < -35.0)
+                continue;
+            const double t = n / sampleRate;
+            sumT += t; sumY += db; sumTT += t * t; sumTY += t * db;
+            ++count;
+        }
+
+        const double slope = (count * sumTY - sumT * sumY) / juce::jmax (1.0e-30, count * sumTT - sumT * sumT);
+        return slope < 0.0 ? -60.0 / slope : 1.0e9;
+    }
+
+    static int firstOutputSample (float size)
+    {
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.setModulation (0.0f);
+        tank.setSize (size);
+        tank.reset();
+        for (int n = 0; n < (int) sampleRate; ++n)
+        {
+            const float left = tank.processSample (n == 0 ? 1.0f : 0.0f);
+            if (std::abs (left) > 1.0e-7f || std::abs (tank.getLastRightOutput()) > 1.0e-7f)
+                return n;
+        }
+        return -1;
+    }
+};
+
+static DattorroTankSpaceTests dattorroTankSpaceTests;

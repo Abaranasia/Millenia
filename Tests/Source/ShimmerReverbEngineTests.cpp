@@ -19,8 +19,9 @@
 // DattorroTank::peekFeedbackSignal()/the two-argument processSample()
 // overload, matching shimmer-reverb-architecture.md's documented topology.
 // There is no longer a separate "feedback gain" to set -- the only knob is
-// DattorroTank's own decayGain (default 0.6f), which these tests exercise
-// at its default since ShimmerReverbEngine exposes no setter for it.
+// DattorroTank's own decayGain (since slice 2 derived from the RT60 Decay,
+// ShimmerReverbEngine::setDecaySeconds(), default 7 s ~= g 0.7 at Size 1),
+// which most of these tests exercise at its default.
 //
 // These tests keep the exact same two safety properties the old
 // feedbackGain-based tests checked (boundedness over 30s+, decay-to-silence
@@ -537,21 +538,27 @@ public:
                                            + juce::String (maxPeak) + ")");
         }
 
-        beginTest ("Shimmer Sustain defaults to 0.85 and an untouched engine matches explicitly setting that default");
+        beginTest ("Shimmer Feedback (shimmerFeedback) defaults to 0.55 and an untouched engine matches explicitly setting that default");
         {
-            // "Shimmer Sustain" task: setShimmerSustain() has two effects
+            // "Shimmer Sustain" task: setShimmerFeedback() has two effects
             // (see its header comment) -- an INVERTED forward to
             // DattorroTank::setMaxShimmerBlendWeight(), and a direct gate on
             // process()'s Width injection. Its own default
-            // (ShimmerReverbEngine::defaultShimmerSustainAmount, matching
+            // (ShimmerReverbEngine::defaultShimmerFeedbackAmount, matching
             // Parameters.cpp's APVTS default) is 0.85f -- a freshly-chosen
             // default for this control's widened scope, deliberately NOT
             // preserved bit-identical to any prior hardcoded constant (see
-            // defaultShimmerSustainAmount's comment for why that guarantee
+            // defaultShimmerFeedbackAmount's comment for why that guarantee
             // was dropped). This test only proves internal consistency: an
             // untouched engine matches one with the default explicitly set,
             // same discipline as the Shimmer Amount/Freeze default-regression
             // tests above use for THEIR still-preserved defaults.
+            //
+            // 2026-10-24 (shimmer cascade slice 1): the mapping is no longer
+            // inverted (maxShimmerBlendWeight = x, the control is now labelled
+            // "Shimmer Feedback") and the default moved 0.85 -> 0.55
+            // (shimmerWeight 0.55 at Amount 1), docs/shimmer-character-
+            // research.md section 7.1 item 2.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 512;
             constexpr int numChannels = 2;
@@ -565,7 +572,7 @@ public:
             ShimmerReverbEngine explicitEngine;
             explicitEngine.prepare (spec);
             explicitEngine.reset();
-            explicitEngine.setShimmerSustain (0.85f);
+            explicitEngine.setShimmerFeedback (0.55f);
 
             juce::AudioBuffer<float> defaultBuffer (numChannels, blockSize);
             juce::AudioBuffer<float> explicitBuffer (numChannels, blockSize);
@@ -597,7 +604,7 @@ public:
                     auto* explicitData = explicitBuffer.getReadPointer (ch);
                     for (int i = 0; i < blockSize; ++i)
                     {
-                        expectEquals (explicitData[i], defaultData[i], "setShimmerSustain(0.85f) diverged from the "
+                        expectEquals (explicitData[i], defaultData[i], "setShimmerFeedback(0.55f) diverged from the "
                                                                             "untouched default at channel "
                                                                             + juce::String (ch) + ", block "
                                                                             + juce::String (b) + ", sample "
@@ -607,19 +614,19 @@ public:
             }
         }
 
-        beginTest ("Shimmer Sustain at 0.0f collapses the Width injection to mono, an unmistakable audible gate");
+        beginTest ("Shimmer Feedback at 0.0f collapses the Width injection to mono, an unmistakable audible gate");
         {
             // "Shimmer Sustain" task, 2026-09-06 widening (see
-            // setShimmerSustain()'s header comment, effect 2): this is the
+            // setShimmerFeedback()'s header comment, effect 2): this is the
             // deterministic regression test for the fix to the by-ear report
             // "I don't clearly notice any difference [moving the dial]" --
-            // shimmerSustainAmount now directly gates process()'s
+            // shimmerFeedbackAmount now directly gates process()'s
             // sideShift/wetLeft/wetRight Width injection, the same
             // multiplicative-gate convention shimmerAmount=0.0f and
             // width=0.0f already use individually to collapse to mono. Uses
             // Width and Shimmer Amount both at FULL strength (1.0f) so this
             // test isn't just re-proving one of those two pre-existing
-            // mono-collapse cases -- Shimmer Sustain=0.0f must independently
+            // mono-collapse cases -- Shimmer Feedback=0.0f must independently
             // collapse to mono even when neither of the other two gates is
             // doing it.
             //
@@ -642,7 +649,7 @@ public:
             engine.reset();
             engine.setWidth (2.0f);
             engine.setShimmerAmount (1.0f);
-            engine.setShimmerSustain (0.0f);
+            engine.setShimmerFeedback (0.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (778899);
@@ -662,20 +669,20 @@ public:
                 const double shimmerAtOutput = outputShimmerTerm (buffer, engine, 2.0f);
                 if (std::abs (shimmerAtOutput) > 1.0e-6)
                     expectWithinAbsoluteError (shimmerAtOutput, 0.0, 1.0e-6,
-                                               "setShimmerSustain(0.0f) failed to zero the shimmer side term at the output, "
+                                               "setShimmerFeedback(0.0f) failed to zero the shimmer side term at the output, "
                                                "sample " + juce::String (b) + " (Width=2.0, Shimmer Amount=1.0 -- the Width "
                                                "injection gate must still zero out on its own)");
             }
         }
 
-        beginTest ("Shimmer Sustain: a HIGH (dial) value decays measurably slower than a LOW value at ordinary (non-frozen, default decayGain) settings");
+        beginTest ("Shimmer Feedback (legacy path): a HIGH (dial) value decays measurably slower than a LOW value at ordinary (non-frozen, default decayGain) settings");
         {
             // "Shimmer Sustain" task: verifies the new knob actually does
             // something audible-proxy-measurable (not just that it's wired
             // up), at ordinary settings -- no Freeze involved, default
             // feedback/decayGain. Same burst-then-silence-then-measure-RMS
             // shape as the Freeze=1.0 full-chain tail diagnostic above, but
-            // comparing two engines (low vs. high setShimmerSustain()) instead
+            // comparing two engines (low vs. high setShimmerFeedback()) instead
             // of comparing time within one engine.
             //
             // IMPORTANT history (2026-09-06, two findings, in order):
@@ -696,20 +703,20 @@ public:
             // ANY decayGain, just far more visible once decayGain's own
             // (much larger) attenuation is out of the way.
             // (2) By-ear follow-up, same day, two rounds: first, the user
-            // found this direction unintuitive -- setShimmerSustain() now
+            // found this direction unintuitive -- setShimmerFeedback() now
             // DELIBERATELY INVERTS the mapping (1.0f - newAmount before
             // forwarding to DattorroTank), so the USER-FACING dial's high end
             // now maps to the LOW (slow-decay) end of the underlying
             // mechanism -- this test's low/high sample points and assertion
             // direction below are therefore the OPPOSITE of finding (1)
-            // above, at the ShimmerReverbEngine::setShimmerSustain() level
+            // above, at the ShimmerReverbEngine::setShimmerFeedback() level
             // (DattorroTank's own setMaxShimmerBlendWeight() is untouched and
             // still behaves per finding (1)). Second, the user reported not
             // clearly noticing a difference at all -- traced to
             // process()'s Width/decorrelation injection never having been
             // gated by this parameter in the first place (see
-            // setShimmerSustain()'s header comment, effect 2, and the new
-            // "collapses to mono" test above) -- shimmerSustainAmount now
+            // setShimmerFeedback()'s header comment, effect 2, and the new
+            // "collapses to mono" test above) -- shimmerFeedbackAmount now
             // ALSO gates that term directly, so this test's measured dB gap
             // below is now driven by BOTH effects together, not just the
             // tank-recirculation effect alone. Measured at the full [0, 1]
@@ -724,18 +731,55 @@ public:
             constexpr int numChannels = 2;
             static constexpr int blocksPerSecond = (int) (sampleRate / blockSize);
 
-            constexpr float lowShimmerSustain = 0.0f;
-            constexpr float highShimmerSustain = 1.0f;
+            constexpr float lowShimmerFeedback = 0.0f;
+            constexpr float highShimmerFeedback = 1.0f;
 
-            auto measureTailDecayDb = [&] (float shimmerSustainToUse, juce::int64 randomSeed) -> float
+            // 2026-10-11, slice 2: pinned to Modulation 0 (set before
+            // prepare(), so no ramp). The tank-recirculation half of this
+            // effect is comb-filter loss between the direct and the
+            // shifter-delayed copy of the loop, and always-on allpass1
+            // modulation decorrelates those two copies. Measured (Release,
+            // this seed, low/high dB over 5 s, Decay 7.0 s): Modulation 0
+            // -33.79/-31.38 (2.4 dB gap), 0.1 -33.50/-33.08, 0.2
+            // -33.34/-33.32, 0.3 (the new default) -33.25/-33.36 (gap gone,
+            // sign flipped by 0.1 dB), 1.0 -32.87/-33.44. So this asserts the
+            // mechanism where it exists; the Modulation dependence is logged
+            // by the DIAGNOSTIC that follows and reported for a default
+            // decision (docs/reverb-dev-journal.md, slice 2).
+            //
+            // 2026-10-24 (shimmer cascade slice 1): the inversion is gone --
+            // its cause was the linear blend's energy loss (docs/shimmer-
+            // character-research.md section 5, cause 2), which the equal-power
+            // law removes, so "more shimmer decays faster" is no longer the
+            // design. This test is pinned to the legacy path
+            // (setLegacyShimmerBlendForTesting(true)), where it still
+            // documents the old mechanism; ShimmerReverbEngineCascadeTests' T2
+            // asserts the new behaviour (RT60 flat across shimmerWeight). The
+            // new path's low/high figures are logged below.
+            float modulationToUse = 0.0f;
+            bool legacyToUse = true;
+            auto measureTailDecayDb = [&] (float shimmerFeedbackToUse, juce::int64 randomSeed) -> float
             {
                 ShimmerReverbEngine engine;
+                engine.setLegacyShimmerBlendForTesting (legacyToUse);
+                engine.setModulation (modulationToUse);
+                // 2026-10-25: Formant Correction ON (before prepare(), so the
+                // crossfade starts settled) -- the figures above were all
+                // measured with the corrector always in the loop. With it off
+                // (the new default) the legacy low/high measured
+                // -31.34/-31.38 dB (Release): the high figure is unchanged,
+                // the low one (legacy shimmerWeight 1) lost its extra decay.
+                engine.setFormantCorrection (true);
+                // 2026-10-25 (step C): Shimmer Tone Off, for the same reason --
+                // the figures above predate the Tone filter (default 5 kHz).
+                engine.setShimmerTone (10000.0f);
                 juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
                 engine.prepare (spec);
                 engine.reset();
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 // Defaults otherwise: pitchShift=12st, shimmerAmount=1.0,
-                // feedback=0.7, freeze off -- ordinary, non-frozen settings.
+                // Decay 7.0 s (g 0.6993; was feedback=0.7), freeze off --
+                // ordinary, non-frozen settings.
 
                 juce::AudioBuffer<float> buffer (numChannels, blockSize);
                 juce::Random random (randomSeed);
@@ -779,8 +823,8 @@ public:
                 }
 
                 for (float v : perBlockRms)
-                    expect (std::isfinite (v), "Non-finite RMS block in setShimmerSustain("
-                                                    + juce::String (shimmerSustainToUse) + ") tail measurement");
+                    expect (std::isfinite (v), "Non-finite RMS block in setShimmerFeedback("
+                                                    + juce::String (shimmerFeedbackToUse) + ") tail measurement");
 
                 auto meanRmsOverBlocks = [&perBlockRms] (int startBlock, int count) -> float
                 {
@@ -795,22 +839,43 @@ public:
                 return 20.0f * std::log10 (juce::jmax (1.0e-9f, lastSecondMean) / juce::jmax (1.0e-9f, firstSecondMean));
             };
 
-            const float lowDecayDb  = measureTailDecayDb (lowShimmerSustain, 11223344);
-            const float highDecayDb = measureTailDecayDb (highShimmerSustain, 11223344);
+            const float lowDecayDb  = measureTailDecayDb (lowShimmerFeedback, 11223344);
+            const float highDecayDb = measureTailDecayDb (highShimmerFeedback, 11223344);
 
-            logMessage ("setShimmerSustain() tail decay over 5s: low (" + juce::String (lowShimmerSustain) + ") = "
-                            + juce::String (lowDecayDb, 2) + " dB, high (" + juce::String (highShimmerSustain) + ") = "
+            logMessage ("setShimmerFeedback() tail decay over 5s: low (" + juce::String (lowShimmerFeedback) + ") = "
+                            + juce::String (lowDecayDb, 2) + " dB, high (" + juce::String (highShimmerFeedback) + ") = "
                             + juce::String (highDecayDb, 2) + " dB");
 
-            expect (lowDecayDb < highDecayDb, "Expected setShimmerSustain(" + juce::String (lowShimmerSustain)
+            expect (lowDecayDb < highDecayDb, "Expected setShimmerFeedback(" + juce::String (lowShimmerFeedback)
                                                    + ") to decay measurably faster (more negative dB) than "
-                                                   + "setShimmerSustain(" + juce::String (highShimmerSustain)
+                                                   + "setShimmerFeedback(" + juce::String (highShimmerFeedback)
                                                    + ") over the same 5s tail window (see this test's comment for the "
                                                    + "inverted dial mapping) -- got low=" + juce::String (lowDecayDb, 2)
                                                    + " dB, high=" + juce::String (highDecayDb, 2) + " dB");
+
+            // DIAGNOSTIC (logged only, see the comment above): the same
+            // low/high gap across Modulation.
+            for (float modulation : { 0.0f, 0.3f, 1.0f })
+            {
+                modulationToUse = modulation;
+                const float low = measureTailDecayDb (lowShimmerFeedback, 11223344);
+                const float high = measureTailDecayDb (highShimmerFeedback, 11223344);
+                logMessage ("DIAGNOSTIC Shimmer Sustain tail decay at Modulation " + juce::String (modulation, 1) + ": low "
+                                + juce::String (low, 2) + " dB, high " + juce::String (high, 2) + " dB (gap "
+                                + juce::String (high - low, 2) + " dB)");
+            }
+
+            // DIAGNOSTIC (logged only): the new mapping and blend law, same
+            // seed, Modulation 0.
+            legacyToUse = false;
+            modulationToUse = 0.0f;
+            const float newLow = measureTailDecayDb (lowShimmerFeedback, 11223344);
+            const float newHigh = measureTailDecayDb (highShimmerFeedback, 11223344);
+            logMessage ("DIAGNOSTIC Shimmer Feedback (new path) tail decay at Modulation 0: low " + juce::String (newLow, 2)
+                            + " dB, high " + juce::String (newHigh, 2) + " dB (gap " + juce::String (newHigh - newLow, 2) + " dB)");
         }
 
-        beginTest ("Shimmer Amount=1, Shimmer Sustain=1 (max), Width=1 -- confirmed root cause, regression-tests the fix");
+        beginTest ("Shimmer Amount=1, Shimmer Feedback=1 (max, legacy path), Width=1 -- confirmed root cause, regression-tests the fix");
         {
             // "Shimmer Sustain" task follow-up (2026-09-06, by-ear report):
             // "when shimmer amount and sustain values are high, higher values
@@ -826,7 +891,7 @@ public:
             // out the shifter alone); a dedicated divergence diagnostic
             // (below) measured up to ~265 samples of primary/quadrature
             // offset divergence, ~178 samples average, ONLY once
-            // shimmerSustainAmount drives maxShimmerBlendWeight toward 0.0 --
+            // shimmerFeedbackAmount drives maxShimmerBlendWeight toward 0.0 --
             // removing the shimmer-cascade content that used to keep the
             // tank's own recirculation just complex enough to avoid the
             // ambiguity. Given this project's own four prior, all-failed
@@ -840,7 +905,7 @@ public:
             // test now asserts the fix's actual bound, not just a first
             // measurement pass.
             //
-            // (Original hypothesis, confirmed correct): shimmerSustainAmount=1.0 drives maxShimmerBlendWeight to 0.0 --
+            // (Original hypothesis, confirmed correct): shimmerFeedbackAmount=1.0 drives maxShimmerBlendWeight to 0.0 --
             // the tank's own recirculation then carries ZERO shimmer-cascade
             // content (a plain, undamped decaying resonance only), unlike the
             // old always-0.85f-weighted tank, which always had substantial
@@ -874,19 +939,30 @@ public:
             // * amount * sustain * 0.5 scale back out; per sample, hence
             // 1-sample blocks) -- the same quantity the old proxy measured at
             // the old Width = 1, still observed where it is audible.
+            //
+            // 2026-10-24 (shimmer cascade slice 1): the root-cause combination
+            // -- side term gated fully open while maxShimmerBlendWeight is 0
+            // -- only existed through the INVERTED mapping. With Sustain now
+            // "Shimmer Feedback" (weight = x, side gate = x) both go to 0
+            // together, so it is unreachable from the dial. The two
+            // root-cause runs are pinned to the legacy path so they still
+            // regression-test the sideShift limiter; a third run checks the
+            // new mapping's own top end (Feedback 1.0: weight 1, gate 1) with
+            // the same bounds.
             constexpr double sampleRate = 44100.0;
             constexpr int blockSize = 1;
             constexpr int numChannels = 2;
             constexpr float toneFrequencyHz = 220.0f;
 
-            auto measurePeaks = [&] (float shimmerSustainToUse) -> std::pair<float, float>
+            auto measurePeaks = [&] (float shimmerFeedbackToUse, bool legacy = true) -> std::pair<float, float>
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+                engine.setLegacyShimmerBlendForTesting (legacy);
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
                 // Defaults otherwise: pitchShift=12st, feedback=0.7, freeze off.
 
@@ -920,29 +996,29 @@ public:
                     {
                         expect (std::isfinite (left[i]) && std::isfinite (right[i]),
                                 "Non-finite sample at block " + juce::String (b) + ", sample " + juce::String (i)
-                                    + " (shimmerSustain=" + juce::String (shimmerSustainToUse) + ")");
+                                    + " (shimmerFeedback=" + juce::String (shimmerFeedbackToUse) + ")");
 
                         peakWet  = juce::jmax (peakWet, std::abs (left[i]), std::abs (right[i]));
-                        peakDiff = juce::jmax (peakDiff, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)));
+                        peakDiff = juce::jmax (peakDiff, (float) std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerFeedbackToUse)));
                     }
                 }
 
                 return { peakWet, peakDiff };
             };
 
-            const auto highSustainPeaks = measurePeaks (1.0f);
-            const auto lowSustainPeaks  = measurePeaks (0.15f);
+            const auto highFeedbackPeaks = measurePeaks (1.0f);
+            const auto lowFeedbackPeaks  = measurePeaks (0.15f);
 
             logMessage ("Shimmer Amount=1, Width=1, 220Hz tone, 6s: "
-                            + juce::String ("high Sustain (1.0) peakWet=") + juce::String (highSustainPeaks.first, 4)
-                            + ", peak|L-R|=" + juce::String (highSustainPeaks.second, 4)
-                            + " -- low Sustain (0.15) peakWet=" + juce::String (lowSustainPeaks.first, 4)
-                            + ", peak|L-R|=" + juce::String (lowSustainPeaks.second, 4));
+                            + juce::String ("high Sustain (1.0) peakWet=") + juce::String (highFeedbackPeaks.first, 4)
+                            + ", peak|L-R|=" + juce::String (highFeedbackPeaks.second, 4)
+                            + " -- low Sustain (0.15) peakWet=" + juce::String (lowFeedbackPeaks.first, 4)
+                            + ", peak|L-R|=" + juce::String (lowFeedbackPeaks.second, 4));
 
-            expect (highSustainPeaks.first <= 10.0f, "High-Sustain peak exceeded the 10.0 safety ceiling: "
-                                                          + juce::String (highSustainPeaks.first));
-            expect (lowSustainPeaks.first <= 10.0f, "Low-Sustain peak exceeded the 10.0 safety ceiling: "
-                                                         + juce::String (lowSustainPeaks.first));
+            expect (highFeedbackPeaks.first <= 10.0f, "High-Sustain peak exceeded the 10.0 safety ceiling: "
+                                                          + juce::String (highFeedbackPeaks.first));
+            expect (lowFeedbackPeaks.first <= 10.0f, "Low-Sustain peak exceeded the 10.0 safety ceiling: "
+                                                         + juce::String (lowFeedbackPeaks.first));
 
             // The real regression assertion: peak|L-R| (the injected
             // sideShift's own contribution) used to reach 2.0 at high
@@ -951,12 +1027,18 @@ public:
             // approaches but never reaches 1.0f -- 1.2f leaves a small margin
             // above that asymptote while still catching a regression back to
             // anything near the old 2.0f.
-            expect (highSustainPeaks.second <= 1.2f, "High-Sustain peak|L-R| regression: expected the safetyLimiter "
+            expect (highFeedbackPeaks.second <= 1.2f, "High-Sustain peak|L-R| regression: expected the safetyLimiter "
                                                           "fix on sideShift to bound this well under the old unfixed "
-                                                          "2.0 peak, got " + juce::String (highSustainPeaks.second));
+                                                          "2.0 peak, got " + juce::String (highFeedbackPeaks.second));
+
+            const auto newTopPeaks = measurePeaks (1.0f, false);
+            logMessage ("Shimmer Feedback 1.0 (new mapping), same tone: peakWet=" + juce::String (newTopPeaks.first, 4)
+                            + ", peak|L-R|=" + juce::String (newTopPeaks.second, 4));
+            expect (newTopPeaks.first <= 10.0f, "Shimmer Feedback 1.0 peak exceeded the 10.0 safety ceiling: " + juce::String (newTopPeaks.first));
+            expect (newTopPeaks.second <= 1.2f, "Shimmer Feedback 1.0 peak|L-R| exceeded 1.2: " + juce::String (newTopPeaks.second));
         }
 
-        beginTest ("DIAGNOSTIC: what peekDryFeedback() actually looks like reaching the shifter, high vs. low Sustain");
+        beginTest ("DIAGNOSTIC: what peekDryFeedback() actually looks like reaching the shifter, high vs. low Shimmer Feedback (legacy path)");
         {
             // Glitch investigation, second pass: a BARE PitchShifter fed the
             // same 220Hz tone directly stayed perfectly well-behaved
@@ -974,14 +1056,15 @@ public:
             constexpr float toneFrequencyHz = 220.0f;
             constexpr int snippetLength = 40;
 
-            auto captureSnippet = [&] (float shimmerSustainToUse) -> std::vector<float>
+            auto captureSnippet = [&] (float shimmerFeedbackToUse) -> std::vector<float>
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1022,7 +1105,7 @@ public:
             logMessage ("peekDryFeedback() last " + juce::String (snippetLength) + " samples, low Sustain (0.15): " + lowStr);
         }
 
-        beginTest ("DIAGNOSTIC: do primary/quadrature grain pools settle on the SAME alignment offset, high vs. low Sustain?");
+        beginTest ("DIAGNOSTIC: do primary/quadrature grain pools settle on the SAME alignment offset, high vs. low Shimmer Feedback (legacy path)?");
         {
             // Glitch investigation, third pass. This codebase's own
             // extensively-documented "pitch oscillation" investigation
@@ -1054,14 +1137,15 @@ public:
 
             struct OffsetStats { float maxAbsDiff; float meanAbsDiff; int numSamplesOverThreshold; };
 
-            auto measureOffsetDivergence = [&] (float shimmerSustainToUse) -> OffsetStats
+            auto measureOffsetDivergence = [&] (float shimmerFeedbackToUse) -> OffsetStats
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1138,7 +1222,7 @@ public:
             // existed.
             //
             // RESULT: swept 0.00/0.02/0.05/0.10/0.15/0.20/0.30 (via
-            // setShimmerSustain(1.0f - floor), which already reaches
+            // setShimmerFeedback(1.0f - floor), which already reaches
             // maxShimmerBlendWeight=floor exactly -- no source change needed
             // to test this). meanOffsetDiff came back NOISY and NON-
             // MONOTONIC across that whole range (178/120/181/125/85/118/86
@@ -1149,7 +1233,7 @@ public:
             // the dial exists to provide) only reached ~86 samples average
             // divergence, barely better than 0.15's 85 -- no floor in this
             // practical range gives a clean, reliable win. NOT implemented in
-            // production code as a result -- `setShimmerSustain()` still maps
+            // production code as a result -- `setShimmerFeedback()` still maps
             // to the unfloored `1.0f - newAmount`, unchanged from before this
             // sweep. Decision (user, 2026-09-06): keep the safetyLimiter fix
             // (a real, verified severity reduction) as the stopping point;
@@ -1162,9 +1246,9 @@ public:
             // session doesn't re-attempt the same floor idea without knowing
             // it was already measured and found wanting.
             //
-            // `ShimmerReverbEngine::setShimmerSustain(x)` maps to
+            // `ShimmerReverbEngine::setShimmerFeedback(x)` maps to
             // `maxShimmerBlendWeight = 1.0f - x`, so testing candidate FLOOR
-            // values here doesn't need any source change -- setShimmerSustain
+            // values here doesn't need any source change -- setShimmerFeedback
             // (1.0f - floor) reaches exactly maxShimmerBlendWeight=floor,
             // letting this sweep answer "how big a floor is actually needed"
             // with real measurements before
@@ -1182,7 +1266,8 @@ public:
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (1.0f - floorWeight); // reaches maxShimmerBlendWeight == floorWeight exactly
+                engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
+                engine.setShimmerFeedback (1.0f - floorWeight); // reaches maxShimmerBlendWeight == floorWeight exactly
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1235,7 +1320,7 @@ public:
             logMessage ("maxShimmerBlendWeight floor sweep (Shimmer Amount=1, Width=1, 220Hz tone, final 1s of 6s): " + summary);
         }
 
-        beginTest ("DIAGNOSTIC: sample-to-sample discontinuity ('click') size in wetLeft, post-limiter-fix, high vs. low Sustain");
+        beginTest ("DIAGNOSTIC: sample-to-sample discontinuity ('click') size in wetLeft, post-limiter-fix, high vs. low Shimmer Feedback (legacy path)");
         {
             // Glitch investigation, fourth pass -- user reports it STILL
             // sounds glitchy after the safetyLimiter fix on sideShift. That
@@ -1260,14 +1345,15 @@ public:
 
             struct ClickStats { float maxDelta; float meanDelta; float p99Delta; float fractionSaturated; };
 
-            auto measureClickStats = [&] (float shimmerSustainToUse) -> ClickStats
+            auto measureClickStats = [&] (float shimmerFeedbackToUse) -> ClickStats
             {
                 ShimmerReverbEngine engine;
                 juce::dsp::ProcessSpec spec { sampleRate, 1, (juce::uint32) numChannels };
                 engine.prepare (spec);
                 engine.reset();
                 engine.setShimmerAmount (1.0f);
-                engine.setShimmerSustain (shimmerSustainToUse);
+                engine.setLegacyShimmerBlendForTesting (true); // 2026-10-24: keeps measuring the pre-slice inverted mapping (Sustain 1 -> weight 0)
+                engine.setShimmerFeedback (shimmerFeedbackToUse);
                 engine.setWidth (1.0f);
 
                 juce::AudioBuffer<float> buffer (numChannels, 1);
@@ -1314,7 +1400,7 @@ public:
                         // measures how much of the time the limiter is actively,
                         // heavily distorting this signal, not just occasionally
                         // catching a peak.
-                        if (std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerSustainToUse)) > 0.7)
+                        if (std::abs (outputSideShift (buffer, engine, 1.0f, 1.0f, shimmerFeedbackToUse)) > 0.7)
                             ++saturatedCount;
 
                         ++measuredCount;
@@ -1392,7 +1478,7 @@ public:
 
         beginTest ("Shimmer Amount = 0.0 makes the engine's tail behave identically to a bare DattorroTank (no shimmer contribution at all)");
         {
-            // Structural-fix regression: proves shimmerFeedbackGain = 0.0
+            // Structural-fix regression: proves shimmerAmountGain = 0.0
             // genuinely means ZERO shimmer contribution (the tank's own
             // natural recirculation, completely independent of the shift
             // path), not just "small" -- by cross-checking
@@ -1418,15 +1504,15 @@ public:
             DattorroTank plainTank;
             plainTank.prepare (spec);
             plainTank.reset();
-            // DattorroTank's own class default (shimmerFeedbackGain = 1.0f,
+            // DattorroTank's own class default (shimmerAmountGain = 1.0f,
             // matching ShimmerReverbEngine's default so untouched use "just
             // works") would otherwise make this comparison tank claim half
             // its recirculation budget for an externalFeedback that's always
-            // 0.0 (see setShimmerFeedbackGain()'s crossfade comment) --
+            // 0.0 (see setShimmerAmountGain()'s crossfade comment) --
             // explicitly zero it so this reference truly represents "zero
             // shimmer, full decayGain", matching engine.setShimmerAmount(0.0f)
             // above.
-            plainTank.setShimmerFeedbackGain (0.0f);
+            plainTank.setShimmerAmountGain (0.0f);
 
             juce::AudioBuffer<float> buffer (numChannels, blockSize);
             juce::Random random (135790);
@@ -1484,7 +1570,7 @@ public:
             // - quadratureSafe) is computed from the pitch shifter's output
             // unconditionally, on every sample, regardless of shimmerAmount
             // -- shimmerAmount only ever gated DattorroTank's own internal
-            // recirculation crossfade (see setShimmerFeedbackGain()), never
+            // recirculation crossfade (see setShimmerAmountGain()), never
             // this separate feed-forward term. The prior regression test
             // above ("...behave identically to a bare DattorroTank...")
             // masked this exact bug by always zeroing Width alongside
@@ -1809,7 +1895,7 @@ public:
             // "still finishes soon, oscillates too much, and sometimes sounds
             // like a motor" -- not ethereal/static as intended. The existing
             // DattorroTankTests.cpp freeze-sustain test only proves the BARE
-            // tank sustains (with setShimmerFeedbackGain(0.0f), i.e. the shifter/
+            // tank sustains (with setShimmerAmountGain(0.0f), i.e. the shifter/
             // DCBlocker/SafetyLimiter chain excluded entirely) -- it never
             // measured whether the REAL product signal path (through
             // ShimmerReverbEngine, default shimmerAmount=1.0, so 85% of the
@@ -2455,6 +2541,23 @@ public:
     static constexpr double sineHz = 440.0;
     static constexpr float sineAmplitude = 0.3f;
 
+    // Slice 2 (docs/reverb-space-research.md section 9): the settings that
+    // reproduce the slice 1 engine exactly -- Modulation 0 and the RT60
+    // that maps to g = 0.7f bit-for-bit at Size 1 (asserted in
+    // DattorroTankSpaceTests). Used by the golden-hash tests.
+    //
+    // 2026-10-25: also Formant Correction ON. Every golden hash was recorded
+    // with the corrector always in the loop; it is OFF by default now (see
+    // ShimmerReverbEngine::setFormantCorrection()), and set here before
+    // prepare() so its crossfade starts settled at 1 -- the hashes stay as
+    // recorded, proving the "on" path is bit-identical to the old engine.
+    static void legacySlice1Settings (ShimmerReverbEngine& engine)
+    {
+        engine.setFormantCorrection (true);
+        engine.setModulation (0.0f);
+        engine.setDecaySeconds (DattorroTank::decaySecondsForGain (0.7f, 1.0f));
+    }
+
     // Returns the mono-summed (0.5 * (L + R)) wet output for the whole run,
     // plus the raw L/R channels when leftOut/rightOut are given.
     // rampStartSample is set to the first sample of the block in which the
@@ -2463,9 +2566,16 @@ public:
                                                        std::vector<float>* leftOut = nullptr,
                                                        std::vector<float>* rightOut = nullptr,
                                                        int blockSize = defaultBlockSize,
-                                                       bool forceUnityActive = false)
+                                                       bool forceUnityActive = false,
+                                                       const std::function<void (ShimmerReverbEngine&)>& setup = {})
     {
         ShimmerReverbEngine engine;
+
+        // Before prepare(), so per-sample smoothers (Modulation, Size) start
+        // AT the configured value instead of ramping to it.
+        if (setup)
+            setup (engine);
+
         juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
         engine.prepare (spec);
         engine.reset();
@@ -2794,10 +2904,32 @@ public:
             // pre-ramp swing), a pre-existing level transition from the
             // frozen tank collapsing a 100%-shimmer loop to its plain path,
             // unrelated to this crossfade.
+            //
+            // 2026-10-24 (shimmer cascade slice 1): at the new default (Shimmer
+            // Feedback 0.55, equal-power) this absolute measure failed --
+            // -9.78dB (128) / -8.75dB (512) -- but not because of the ramp:
+            // the steady 440Hz output itself now swings that deep (pre-ramp
+            // min -5.87 / -5.15dB), and a no-ramp run of the same engine sits
+            // even LOWER in the same windows (20ms envelope at +60ms: -9.5dB
+            // no-ramp vs -6.3dB ramped; legacy at the same 0.55 weight dips
+            // -1.19dB with a -8.58dB pre-ramp swing, i.e. the same beating).
+            // The octave cascade beats against the drone, which a 10ms window
+            // on a sine reads as a "dip". So this absolute check is pinned to
+            // the legacy path at the old default (the setup it was specified
+            // on; there it still logs what the pre-slice suite logged, Release:
+            // pre-ramp min -1.80 / -1.72dB, ramp min +1.39 / +1.40dB), and the new default
+            // is checked RELATIVE to its own no-ramp run, window by window --
+            // what a crossfade hole would actually change.
+            auto legacyDefault = [] (ShimmerReverbEngine& engine)
+            {
+                engine.setLegacyShimmerBlendForTesting (true);
+                engine.setShimmerFeedback (0.85f);
+            };
+
             for (int blockSize : { defaultBlockSize, 512 })
             {
                 int rampStart = 0;
-                const auto ramped = runFreezeToggleScenario (true, 1.0, rampStart, nullptr, nullptr, blockSize);
+                const auto ramped = runFreezeToggleScenario (true, 1.0, rampStart, nullptr, nullptr, blockSize, false, legacyDefault);
 
                 const int window = (int) (0.010 * sampleRate); // 10ms
                 const int preLen = (int) (0.200 * sampleRate);
@@ -2818,6 +2950,18 @@ public:
 
                 expect (minDb >= -3.0f, "Block size " + juce::String (blockSize) + ": wet level dipped " + juce::String (-minDb, 2)
                                              + " dB below the pre-ramp level during the Freeze toggle ramp");
+
+                // New default: ramped vs no-ramp, same 10ms windows.
+                int newRampStart = 0, flatStart = 0;
+                const auto newRamped = runFreezeToggleScenario (true, 1.0, newRampStart, nullptr, nullptr, blockSize);
+                const auto newFlat = runFreezeToggleScenario (false, 1.0, flatStart, nullptr, nullptr, blockSize);
+                float relMinDb = 200.0f;
+                for (int start = newRampStart; start + window <= newRampStart + (int) (0.5 * sampleRate); start += window)
+                    relMinDb = juce::jmin (relMinDb, rmsDb (newRamped, start, window) - rmsDb (newFlat, start, window));
+                logMessage ("Block size " + juce::String (blockSize) + ", new default: ramp + 500ms min vs the no-ramp run = "
+                                + juce::String (relMinDb, 2) + " dB");
+                expect (relMinDb >= -3.0f, "Block size " + juce::String (blockSize) + ", new default: the Freeze ramp dipped "
+                                               + juce::String (-relMinDb, 2) + " dB below the same engine without the ramp");
             }
         }
 
@@ -2907,12 +3051,51 @@ public:
             // bit-identical to the old engine -- asserted separately by
             // ShimmerReverbEngineSpaceTests' left-channel fingerprint, which
             // was recorded on the pre-stereo code.
-            constexpr juce::uint64 expectedDefaultHash = 0x106b8609081503f9ull;
+            //
+            // 2026-10-11, slice 2 (Decay in seconds, Size, Modulation): the
+            // engine's defaults now mirror the new APVTS defaults (Decay
+            // 7.0 s -> g 0.6993, Modulation 0.3), which change the default
+            // sound by design. The hash is kept and now runs with
+            // legacySlice1Settings() -- Modulation 0 and the RT60 that maps
+            // to exactly g = 0.7f at Size 1 -- so it still proves those
+            // settings reproduce the slice 1 engine bit-for-bit.
+            //
+            // 2026-10-24, deliberately replaced 106b8609081503f9 ->
+            // 933a970f88302962: shimmer cascade slice 1 (equal-power blend,
+            // un-inverted "Shimmer Feedback", default 0.55 instead of the old
+            // inverted 0.85) changes the default sound by design. The old
+            // value is still asserted, for the legacy path at Sustain 0.85, by
+            // ShimmerReverbEngineCascadeTests' T6. Same value in Debug and
+            // Release.
+            //
+            // 2026-10-25, deliberately replaced 933a970f88302962 ->
+            // 7149627bc88d4fcf: shimmer cascade slice 1 step C adds Shimmer
+            // Tone, default 5 kHz (active), which low-passes the signal
+            // entering the shifter and so changes the default sound by design.
+            // legacySlice1Settings() leaves Tone at that default on purpose so
+            // this hash covers the filter; with Tone Off the engine
+            // reproduces the old arithmetic (T6's legacy hashes unchanged).
+            // Same value in Debug and Release.
+            //
+            // 2026-11-15, re-recorded 7149627bc88d4fcf -> d0a32dcfc2df8430
+            // after the FormantEnvelopeCorrector LPC conditioning fix (audit
+            // fix 4: white-noise correction, lag window, reflection clamp,
+            // bandwidth expansion, gain-ratio clamp). legacySlice1Settings()
+            // runs with Formant Correction ON, so this run goes through the
+            // corrector and its numerics changed on purpose. The formant-OFF
+            // path is unchanged (its tests are untouched and still pass).
+            //
+            // 2026-11-18, re-recorded d0a32dcfc2df8430 -> 710e1b3591f3e7ba
+            // after audit fix 9 (Shimmer Tone relative to the alias cap): at
+            // the default +12 st the 5 kHz Tone now cuts at 2756.25 Hz (was
+            // 5000 Hz), which changes the default sound by design.
+            constexpr juce::uint64 expectedDefaultHash = 0x710e1b3591f3e7ba;
 
             for (bool forceUnityActive : { false, true })
             {
                 int rampStart = 0;
-                const auto wet = runFreezeToggleScenario (false, 0.5, rampStart, nullptr, nullptr, defaultBlockSize, forceUnityActive);
+                const auto wet = runFreezeToggleScenario (false, 0.5, rampStart, nullptr, nullptr, defaultBlockSize, forceUnityActive,
+                                                          legacySlice1Settings);
                 juce::uint64 hash = 1469598103934665603ull;
                 for (float v : wet)
                 {
@@ -3085,11 +3268,29 @@ public:
             // dbc784c, old Width default 0.15, Debug x64, MSVC VS2026). At
             // Width = 1 the new M/S matrix reduces to L = tankLeft + 1.0 *
             // shimmerSide, with shimmerSide carrying the old 0.15 constant --
-            // the old wetLeft expression, so it must hash the same.
-            constexpr juce::uint64 expectedLeftHash = 0x918d1cec9419a789ull;
+            // the old wetLeft expression, so it must hash the same. Since
+            // slice 2 it runs with legacySlice1Settings() (Modulation 0,
+            // g = 0.7f exactly), see the mono-sum hash test for why.
+            // 2026-10-24, deliberately replaced 918d1cec9419a789 ->
+            // e30cadee8d7121fb by shimmer cascade slice 1 (see the mono-sum
+            // hash test); the old value lives on in
+            // ShimmerReverbEngineCascadeTests' T6 (legacy path).
+            // 2026-10-25, deliberately replaced e30cadee8d7121fb ->
+            // 380d36dfca706ba2 by Shimmer Tone's 5 kHz default (slice 1 step
+            // C, see the mono-sum hash test). Same value in Debug and Release.
+            // 2026-11-15, re-recorded 380d36dfca706ba2 -> 9ece884b8f1eb6b2
+            // after the FormantEnvelopeCorrector LPC conditioning fix (audit
+            // fix 4); legacySlice1Settings() has the corrector ON, see the
+            // mono-sum hash test.
+            // 2026-11-18, re-recorded 9ece884b8f1eb6b2 -> 5497270224afda5f
+            // after audit fix 9 (Tone scaled by the +12 st alias cap, 5 kHz ->
+            // 2756.25 Hz), see the mono-sum hash test.
+            constexpr juce::uint64 expectedLeftHash = 0x5497270224afda5full;
             int rampStart = 0;
             std::vector<float> left, right;
-            ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (false, 0.5, rampStart, &left, &right);
+            ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (false, 0.5, rampStart, &left, &right,
+                                                                              ShimmerReverbEngineFreezeCrossfadeTests::defaultBlockSize,
+                                                                              false, ShimmerReverbEngineFreezeCrossfadeTests::legacySlice1Settings);
             const auto hash = fnv1a (left);
             logMessage ("Default engine left-channel FNV-1a fingerprint: " + juce::String::toHexString ((juce::int64) hash));
             expect (hash == expectedLeftHash, "Left-channel fingerprint changed: got " + juce::String::toHexString ((juce::int64) hash)
@@ -3275,6 +3476,112 @@ public:
                 allFinite = allFinite && std::isfinite (out.left[i]) && std::isfinite (out.right[i]);
             expect (allFinite, "Non-finite output with out-of-range setter values");
         }
+
+        beginTest ("Air at 0 dB is bit-identical to no shelf, including after being moved away and back");
+        {
+            // Same endpoint-skip proof as the cut filters: the shelf sits
+            // after the recirculating loop, so an engine whose Air was up for
+            // the first second must match an untouched one from then on.
+            const auto untouched = run ([] (ShimmerReverbEngine&) {}, 3.0);
+            const auto explicitZero = run ([] (ShimmerReverbEngine& e) { e.setAirDb (0.0f); }, 3.0);
+            const auto moved = run ([] (ShimmerReverbEngine& e) { e.setAirDb (6.0f); }, 3.0, false,
+                                    [] (ShimmerReverbEngine& e) { e.setAirDb (0.0f); });
+
+            int mismatchesExplicit = 0, mismatchesAfter = 0, differencesWhileActive = 0;
+            const size_t switchSample = (size_t) (switchBlock * blockSize);
+            for (size_t i = 0; i < untouched.left.size(); ++i)
+            {
+                if (untouched.left[i] != explicitZero.left[i] || untouched.right[i] != explicitZero.right[i])
+                    ++mismatchesExplicit;
+                if (i < switchSample)
+                    differencesWhileActive += (untouched.left[i] != moved.left[i]) ? 1 : 0;
+                else if (untouched.left[i] != moved.left[i] || untouched.right[i] != moved.right[i])
+                    ++mismatchesAfter;
+            }
+
+            expectEquals (mismatchesExplicit, 0, "setAirDb (0) changed the output");
+            expect (differencesWhileActive > 0, "Air at +6 dB had no effect");
+            expectEquals (mismatchesAfter, 0, "Output after returning Air to 0 dB differs from an untouched engine");
+        }
+
+        beginTest ("Air at +6 dB lifts the wet by ~6 dB at 12 kHz and ~0 dB at 200 Hz; dry is untouched");
+        {
+            // Linear wet path (shimmer off, no modulation): the same sine
+            // through Air 0 and Air +6 differs only by the shelf's gain.
+            auto sineLevelDb = [] (float airDb, double hz, float mix)
+            {
+                ShimmerReverbEngine engine;
+                engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                engine.reset();
+                engine.setShimmerAmount (0.0f);
+                engine.setModulation (0.0f);
+                engine.setMix (mix);
+                engine.setAirDb (airDb);
+
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                std::vector<float> left;
+                double phase = 0.0;
+                const double inc = juce::MathConstants<double>::twoPi * hz / sampleRate;
+                for (int b = 0; b < (int) (3.0 * sampleRate / blockSize); ++b)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float s = 0.3f * (float) std::sin (phase);
+                        phase += inc;
+                        buffer.setSample (0, i, s);
+                        buffer.setSample (1, i, s);
+                    }
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+                    for (int i = 0; i < blockSize; ++i)
+                        left.push_back (buffer.getSample (0, i));
+                }
+                const int n = 32768, start = (int) left.size() - n;
+                return 10.0 * std::log10 (juce::jmax (1.0e-30, ShimmerReverbEngineFreezeCrossfadeTests::goertzelPower (left, start, n, hz)));
+            };
+
+            const double high = sineLevelDb (6.0f, 12000.0, 1.0f) - sineLevelDb (0.0f, 12000.0, 1.0f);
+            const double low = sineLevelDb (6.0f, 200.0, 1.0f) - sineLevelDb (0.0f, 200.0, 1.0f);
+            const double dryDelta = sineLevelDb (6.0f, 12000.0, 0.0f) - sineLevelDb (0.0f, 12000.0, 0.0f);
+            logMessage ("Air +6 dB: " + juce::String (high, 3) + " dB at 12 kHz, " + juce::String (low, 3)
+                            + " dB at 200 Hz, " + juce::String (dryDelta, 6) + " dB on the dry path");
+            expect (std::abs (high - 6.0) < 1.0, "12 kHz boost " + juce::String (high, 3) + " dB, expected ~6");
+            expect (std::abs (low) < 0.2, "200 Hz changed by " + juce::String (low, 3) + " dB, expected ~0");
+            expect (std::abs (dryDelta) < 1.0e-6, "Air changed the dry path by " + juce::String (dryDelta, 6) + " dB");
+        }
+
+        beginTest ("Air setter clamps to 0..+6 dB and stays finite at low sample rates");
+        {
+            const auto over = run ([] (ShimmerReverbEngine& e) { e.setAirDb (60.0f); }, 1.0);
+            const auto six = run ([] (ShimmerReverbEngine& e) { e.setAirDb (6.0f); }, 1.0);
+            expect (over.left == six.left && over.right == six.right, "setAirDb (60) must clamp to 6 dB");
+            const auto under = run ([] (ShimmerReverbEngine& e) { e.setAirDb (-12.0f); }, 1.0);
+            const auto zero = run ([] (ShimmerReverbEngine&) {}, 1.0);
+            expect (under.left == zero.left && under.right == zero.right, "setAirDb (-12) must clamp to 0 dB");
+
+            // 7 kHz is above 0.49 fs at 8 kHz: the corner must be capped.
+            ShimmerReverbEngine engine;
+            engine.prepare ({ 8000.0, 256, 2 });
+            engine.reset();
+            engine.setAirDb (6.0f);
+            juce::AudioBuffer<float> buffer (2, 256);
+            juce::Random random (42);
+            bool allFinite = true;
+            for (int b = 0; b < 100; ++b)
+            {
+                for (int i = 0; i < 256; ++i)
+                {
+                    const float s = random.nextFloat() * 0.6f - 0.3f;
+                    buffer.setSample (0, i, s);
+                    buffer.setSample (1, i, s);
+                }
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+                for (int i = 0; i < 256; ++i)
+                    allFinite = allFinite && std::isfinite (buffer.getSample (0, i)) && std::isfinite (buffer.getSample (1, i));
+            }
+            expect (allFinite, "Non-finite output with Air at an 8 kHz sample rate");
+        }
     }
 
 private:
@@ -3341,3 +3648,1997 @@ private:
 };
 
 static ShimmerReverbEngineSpaceTests shimmerReverbEngineSpaceTests;
+
+// Slice 2 of docs/reverb-space-research.md (section 9): Decay in seconds,
+// Size and Modulation through the full engine (shifter in the loop).
+class ShimmerReverbEngineSizeTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineSizeTests() : juce::UnitTest ("ShimmerReverbEngineSizeTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Decay/Size/Modulation setters clamp to their ranges");
+        {
+            auto runWith = [] (float decay, float size, float modulation)
+            {
+                return runNoise ([=] (ShimmerReverbEngine& e) { e.setDecaySeconds (decay); e.setSize (size); e.setModulation (modulation); }, 1.0);
+            };
+            expect (runWith (20.0f, 2.0f, 1.0f) == runWith (1000.0f, 50.0f, 7.0f), "Values above the ranges must clamp to the maxima");
+            expect (runWith (0.3f, 0.5f, 0.0f) == runWith (-1.0f, -3.0f, -2.0f), "Values below the ranges must clamp to the minima");
+        }
+
+        beginTest ("Size automation through the full engine (0.5 <-> 2 every 0.35 s, Modulation 1, Decay at maximum) stays finite and bounded");
+        {
+            const auto out = runNoise ([] (ShimmerReverbEngine& e) { e.setModulation (1.0f); e.setDecaySeconds (20.0f); }, 20.0,
+                                       [] (ShimmerReverbEngine& e, int block)
+                                       {
+                                           const int toggleBlocks = (int) (0.35 * sampleRate / blockSize);
+                                           if (block % toggleBlocks == 0)
+                                               e.setSize ((block / toggleBlocks) % 2 == 0 ? 2.0f : 0.5f);
+                                       });
+            const auto stats = peakOf (out);
+            logMessage ("Engine Size automation, 20 s noise: peak " + juce::String (stats.peak, 4));
+            expectEquals (stats.numNonFinite, 0, "Non-finite output during Size automation");
+            expect (stats.peak <= 10.0f, "Size automation exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
+        }
+
+        beginTest ("Size 2 + Modulation 1 + Decay at maximum: 3 minutes of sustained noise (Freeze engaged for the last 2) stay finite and bounded");
+        {
+            const int freezeBlock = (int) (60.0 * sampleRate / blockSize);
+            const auto out = runNoise (stressSettings, 180.0,
+                                       [freezeBlock] (ShimmerReverbEngine& e, int block)
+                                       {
+                                           if (block == freezeBlock)
+                                               e.setFreezeAmount (1.0f);
+                                       });
+            const auto stats = peakOf (out);
+            logMessage ("Engine Size 2 + Modulation 1 + Decay 20 s, 180 s (Freeze from 60 s): peak " + juce::String (stats.peak, 4));
+            expectEquals (stats.numNonFinite, 0, "Non-finite output");
+            expect (stats.peak <= 10.0f, "Exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
+        }
+
+        beginTest ("Size 2 + Modulation 1 + Decay at maximum: output decays to near-silence after input stops");
+        {
+            // Same 2 s burst, 40 s silence window and 1e-3 final-second
+            // threshold as ShimmerReverbEngineTests' decay-to-silence test.
+            // Measured 2026-10-11 (Release): final-second peaks 0.0263 at
+            // 10 s, 3.05e-4 at 20 s, 5e-6 at 30 s, 0 from 40 s -- the full
+            // chain decays well inside the bare tank's 20 s nominal RT60
+            // (the shimmer path adds its own loss, section 9.1).
+            constexpr double burstSeconds = 2.0;
+            constexpr double silenceSeconds = 40.0;
+            const int burstBlocks = (int) (burstSeconds * sampleRate / blockSize);
+            const auto out = runNoise (stressSettings, burstSeconds + silenceSeconds, {}, burstBlocks);
+
+            float lastSecondPeak = 0.0f;
+            const size_t lastSecondStart = out.left.size() - (size_t) sampleRate;
+            for (size_t i = lastSecondStart; i < out.left.size(); ++i)
+                lastSecondPeak = juce::jmax (lastSecondPeak, std::abs (out.left[i]));
+
+            for (int second = 10; second <= (int) silenceSeconds; second += 10)
+            {
+                float peak = 0.0f;
+                const size_t start = (size_t) ((burstSeconds + second - 1) * sampleRate);
+                for (size_t i = start; i < start + (size_t) sampleRate && i < out.left.size(); ++i)
+                    peak = juce::jmax (peak, std::abs (out.left[i]));
+                logMessage ("  stress decay: peak in second " + juce::String (second) + " of silence = " + juce::String (peak, 6));
+            }
+
+            expect (lastSecondPeak < 1e-3f, "Tail did not decay below 1e-3 within " + juce::String (silenceSeconds, 0)
+                                                + " s (final-second peak " + juce::String (lastSecondPeak, 6) + ")");
+        }
+
+        beginTest ("DIAGNOSTIC: PitchShifter alignment-offset stability at Modulation 0 / 0.3 / 1.0");
+        {
+            // Section 9.3's risk check. Same measure as ShimmerReverbEngineTests'
+            // "primary/quadrature grain pools" diagnostic (block size 1,
+            // Shimmer Amount 1, default Sustain, 0.3-amplitude tone), over a
+            // longer window (the last 5 s of 10 s) and two tones, plus a
+            // count of primary-offset jumps > 10 samples between consecutive
+            // samples (a proxy for alignment-anchor flips).
+            for (double toneHz : { 220.0, 330.0 })
+            {
+                for (float modulation : { 0.0f, 0.3f, 1.0f })
+                {
+                    const auto stats = measureOffsetStability (modulation, toneHz);
+                    logMessage (juce::String (toneHz, 0) + " Hz, Modulation " + juce::String (modulation, 1)
+                                    + ": primary vs quadrature offset maxAbsDiff=" + juce::String (stats.maxAbsDiff, 2)
+                                    + ", meanAbsDiff=" + juce::String (stats.meanAbsDiff, 2)
+                                    + ", samples with diff>10=" + juce::String (stats.numOverThreshold)
+                                    + ", primary offset jumps>10=" + juce::String (stats.numPrimaryJumps));
+                }
+            }
+        }
+
+        beginTest ("DIAGNOSTIC: full-engine RT60 vs the Decay setting (Size 1, default shimmer settings)");
+        {
+            // RT60 is the bare tank's value (section 9.1); the shimmer path
+            // and the leveler change the full chain's decay. Logged only.
+            for (float decay : { 2.0f, 7.0f })
+            {
+                const double measured = measureEngineRt60 (decay);
+                logMessage ("Engine Decay " + juce::String (decay, 1) + " s -> measured RT60 " + juce::String (measured, 2) + " s");
+            }
+        }
+    }
+
+    // Public since 2026-10-24 so ShimmerReverbEngineCascadeTests below can
+    // reuse the noise runner, peak stats and RT60 measurement.
+    static constexpr double sampleRate = 44100.0;
+    static constexpr int blockSize = 512;
+
+    struct Output
+    {
+        std::vector<float> left, right;
+        bool operator== (const Output& other) const { return left == other.left && right == other.right; }
+    };
+
+    struct PeakStats { float peak = 0.0f; int numNonFinite = 0; };
+
+    // Longest lines, deepest modulation, longest Decay the engine accepts.
+    // At Size 2 the 0.85 g ceiling would need ~30.8 s, beyond Decay's 20 s
+    // maximum, so through the engine the reachable worst case at Size 2 is
+    // g ~= 0.778; DattorroTankSpaceTests covers g = 0.85 at Size 2 on the
+    // bare tank directly.
+    static void stressSettings (ShimmerReverbEngine& engine)
+    {
+        engine.setSize (2.0f);
+        engine.setModulation (1.0f);
+        engine.setDecaySeconds (20.0f);
+    }
+
+    static PeakStats peakOf (const Output& out)
+    {
+        PeakStats stats;
+        for (size_t i = 0; i < out.left.size(); ++i)
+            for (float v : { out.left[i], out.right[i] })
+            {
+                if (! std::isfinite (v)) ++stats.numNonFinite;
+                else stats.peak = juce::jmax (stats.peak, std::abs (v));
+            }
+        return stats;
+    }
+
+    // +-0.3 noise (silence from block `silenceFromBlock` on) through an
+    // engine configured by `setup` before prepare(); `perBlock` runs before
+    // every block.
+    static Output runNoise (const std::function<void (ShimmerReverbEngine&)>& setup, double seconds,
+                            const std::function<void (ShimmerReverbEngine&, int)>& perBlock = {},
+                            int silenceFromBlock = std::numeric_limits<int>::max())
+    {
+        ShimmerReverbEngine engine;
+        setup (engine);
+        engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        engine.reset();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::Random random (11235813);
+        const int numBlocks = (int) (seconds * sampleRate / blockSize);
+        Output out;
+        out.left.reserve ((size_t) (numBlocks * blockSize));
+        out.right.reserve ((size_t) (numBlocks * blockSize));
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            if (perBlock)
+                perBlock (engine, b);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const float s = b < silenceFromBlock ? random.nextFloat() * 0.6f - 0.3f : 0.0f;
+                buffer.setSample (0, i, s);
+                buffer.setSample (1, i, s);
+            }
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                out.left.push_back (buffer.getSample (0, i));
+                out.right.push_back (buffer.getSample (1, i));
+            }
+        }
+
+        return out;
+    }
+
+    struct OffsetStats { float maxAbsDiff; float meanAbsDiff; int numOverThreshold; int numPrimaryJumps; };
+
+    static OffsetStats measureOffsetStability (float modulation, double toneHz)
+    {
+        ShimmerReverbEngine engine;
+        engine.setModulation (modulation);
+        engine.prepare ({ sampleRate, 1, 2 });
+        engine.reset();
+        engine.setShimmerAmount (1.0f);
+        engine.setWidth (1.0f);
+
+        juce::AudioBuffer<float> buffer (2, 1);
+        const int totalSamples = (int) (10.0 * sampleRate);
+        const int measureFrom = totalSamples - (int) (5.0 * sampleRate);
+        const double phaseIncrement = juce::MathConstants<double>::twoPi * toneHz / sampleRate;
+
+        double sumAbsDiff = 0.0;
+        float maxAbsDiff = 0.0f;
+        int over = 0, jumps = 0, count = 0;
+        float previousPrimary = 0.0f;
+
+        for (int i = 0; i < totalSamples; ++i)
+        {
+            const float s = 0.3f * (float) std::sin (phaseIncrement * i);
+            buffer.setSample (0, 0, s);
+            buffer.setSample (1, 0, s);
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+
+            const float primary = engine.peekShifterPrimaryOffset();
+            if (i >= measureFrom)
+            {
+                const float absDiff = std::abs (primary - engine.peekShifterQuadratureOffset());
+                sumAbsDiff += absDiff;
+                maxAbsDiff = juce::jmax (maxAbsDiff, absDiff);
+                over += absDiff > 10.0f ? 1 : 0;
+                jumps += std::abs (primary - previousPrimary) > 10.0f ? 1 : 0;
+                ++count;
+            }
+            previousPrimary = primary;
+        }
+
+        return { maxAbsDiff, (float) (sumAbsDiff / juce::jmax (1, count)), over, jumps };
+    }
+
+    // Schroeder-integrated RT60 of the full engine's impulse response
+    // (same -5..-35 dB fit as DattorroTankSpaceTests::measureRt60()).
+    // `setup` (2026-10-24, shimmer cascade T2) configures the engine before
+    // prepare(), after the Decay.
+    static double measureEngineRt60 (float decay, const std::function<void (ShimmerReverbEngine&)>& setup = {})
+    {
+        const double seconds = 2.0 * decay + 20.0;
+        ShimmerReverbEngine engine;
+        engine.setDecaySeconds (decay);
+        if (setup)
+            setup (engine);
+        engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        engine.reset();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        const int numBlocks = (int) (seconds * sampleRate / blockSize);
+        std::vector<double> energy;
+        energy.reserve ((size_t) (numBlocks * blockSize));
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            buffer.clear();
+            if (b == 0)
+            {
+                buffer.setSample (0, 0, 1.0f);
+                buffer.setSample (1, 0, 1.0f);
+            }
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const double l = buffer.getSample (0, i), r = buffer.getSample (1, i);
+                energy.push_back (l * l + r * r);
+            }
+        }
+
+        for (size_t n = energy.size() - 1; n-- > 0;)
+            energy[n] += energy[n + 1];
+
+        const double total = energy[0];
+        double sumT = 0.0, sumY = 0.0, sumTT = 0.0, sumTY = 0.0;
+        int count = 0;
+        for (size_t n = 0; n < energy.size(); n += 16)
+        {
+            const double db = 10.0 * std::log10 (juce::jmax (1.0e-300, energy[n] / total));
+            if (db > -5.0 || db < -35.0)
+                continue;
+            const double t = (double) n / sampleRate;
+            sumT += t; sumY += db; sumTT += t * t; sumTY += t * db;
+            ++count;
+        }
+        const double slope = (count * sumTY - sumT * sumY) / juce::jmax (1.0e-30, count * sumTT - sumT * sumT);
+        return slope < 0.0 ? -60.0 / slope : 1.0e9;
+    }
+};
+
+static ShimmerReverbEngineSizeTests shimmerReverbEngineSizeTests;
+
+//==============================================================================
+// Shimmer cascade slice 1, step B (2026-10-24, docs/shimmer-character-research.md
+// section 7): the equal-power blend law (DattorroTank::setShimmerBlendLaw())
+// and the un-inverted "Shimmer Feedback" mapping (setShimmerFeedback(x) now
+// sets maxShimmerBlendWeight = x, default 0.55). Its own class so it can be
+// run alone with Main.cpp's name filter ("Cascade"). "Legacy" below always
+// means setLegacyShimmerBlendForTesting (true): the inverted 1 - x mapping
+// and the linear law, i.e. the engine as it was before this slice.
+class ShimmerReverbEngineCascadeTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineCascadeTests() : juce::UnitTest ("ShimmerReverbEngineCascadeTests", "DSP") {}
+
+    using SizeTests = ShimmerReverbEngineSizeTests;
+    static constexpr double sampleRate = SizeTests::sampleRate;
+    static constexpr int blockSize = SizeTests::blockSize;
+
+    // The pre-slice default of the (then inverted) Sustain control.
+    static constexpr float oldDefaultSustain = 0.85f;
+
+    // Sets the recirculating shimmerWeight directly (Shimmer Amount 1): the
+    // new mapping takes it as is, the legacy one needs 1 - weight.
+    static void setShimmerWeight (ShimmerReverbEngine& engine, float weight, bool legacy)
+    {
+        engine.setLegacyShimmerBlendForTesting (legacy);
+        engine.setShimmerAmount (1.0f);
+        engine.setShimmerFeedback (legacy ? 1.0f - weight : weight);
+    }
+
+    // Stereo output of an engine configured by `setup` before prepare(), fed
+    // `source (sampleIndex)` on both channels (0 from silenceFromSample on).
+    static SizeTests::Output runSignal (const std::function<void (ShimmerReverbEngine&)>& setup, double seconds,
+                                        const std::function<float (int)>& source,
+                                        int silenceFromSample = std::numeric_limits<int>::max(),
+                                        const std::function<void (ShimmerReverbEngine&, int)>& perBlock = {})
+    {
+        ShimmerReverbEngine engine;
+        setup (engine);
+        engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        engine.reset();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        const int numBlocks = (int) (seconds * sampleRate / blockSize);
+        SizeTests::Output out;
+        out.left.reserve ((size_t) (numBlocks * blockSize));
+        out.right.reserve ((size_t) (numBlocks * blockSize));
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            if (perBlock)
+                perBlock (engine, b);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const int n = b * blockSize + i;
+                const float s = n < silenceFromSample ? source (n) : 0.0f;
+                buffer.setSample (0, i, s);
+                buffer.setSample (1, i, s);
+            }
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            engine.process (block);
+
+            for (int i = 0; i < blockSize; ++i)
+            {
+                out.left.push_back (buffer.getSample (0, i));
+                out.right.push_back (buffer.getSample (1, i));
+            }
+        }
+
+        return out;
+    }
+
+    static float peakInSecond (const SizeTests::Output& out, double fromSeconds)
+    {
+        float peak = 0.0f;
+        const size_t start = (size_t) (fromSeconds * sampleRate);
+        for (size_t i = start; i < start + (size_t) sampleRate && i < out.left.size(); ++i)
+            peak = juce::jmax (peak, std::abs (out.left[i]), std::abs (out.right[i]));
+        return peak;
+    }
+
+    static double rmsDb (const SizeTests::Output& out, double fromSeconds, double toSeconds)
+    {
+        const size_t from = (size_t) (fromSeconds * sampleRate);
+        const size_t to = juce::jmin (out.left.size(), (size_t) (toSeconds * sampleRate));
+        double sum = 0.0;
+        for (size_t i = from; i < to; ++i)
+            sum += (double) out.left[i] * (double) out.left[i] + (double) out.right[i] * (double) out.right[i];
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, sum / (2.0 * (double) juce::jmax ((size_t) 1, to - from))));
+    }
+
+    // T1 measure: energy (dB, arbitrary but fixed reference) of a 400 ms
+    // Hann-windowed DFT centred at centreSeconds, summed over the 2.5 Hz bins
+    // inside +-1/6 octave of centreHz, over both output channels. A band, not
+    // one bin, so the shifter's known +-12 st pitch oscillation (a slight
+    // detune) stays inside it.
+    static double bandEnergyDb (const SizeTests::Output& out, double centreSeconds, double centreHz)
+    {
+        const int n = (int) (0.4 * sampleRate);
+        const int start = (int) (centreSeconds * sampleRate) - n / 2;
+        const double binHz = sampleRate / n;
+        const int firstBin = (int) std::ceil (centreHz * std::pow (2.0, -1.0 / 6.0) / binHz);
+        const int lastBin = (int) std::floor (centreHz * std::pow (2.0, 1.0 / 6.0) / binHz);
+
+        std::vector<double> window ((size_t) n);
+        for (int i = 0; i < n; ++i)
+            window[(size_t) i] = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1));
+
+        double energy = 0.0;
+        for (const auto* channel : { &out.left, &out.right })
+        {
+            for (int k = firstBin; k <= lastBin; ++k)
+            {
+                const double coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * k / n);
+                double s1 = 0.0, s2 = 0.0;
+                for (int i = 0; i < n; ++i)
+                {
+                    const double s0 = window[(size_t) i] * (double) (*channel)[(size_t) (start + i)] + coeff * s1 - s2;
+                    s2 = s1;
+                    s1 = s0;
+                }
+                energy += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+            }
+        }
+
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, energy));
+    }
+
+    // Boundedness plus decay-to-silence: `source` for loadSeconds, then
+    // 40 s of silence (same window and 1e-3 final-second threshold as
+    // ShimmerReverbEngineTests' decay-to-silence test).
+    void expectBoundedThenSilent (const juce::String& label, const std::function<void (ShimmerReverbEngine&)>& setup,
+                                  double loadSeconds, const std::function<float (int)>& source,
+                                  const std::function<void (ShimmerReverbEngine&, int)>& perBlock = {})
+    {
+        constexpr double silenceSeconds = 40.0;
+        const auto out = runSignal (setup, loadSeconds + silenceSeconds, source, (int) (loadSeconds * sampleRate), perBlock);
+        const auto stats = SizeTests::peakOf (out);
+        const float finalPeak = peakInSecond (out, loadSeconds + silenceSeconds - 1.0);
+
+        logMessage (label + ": peak " + juce::String (stats.peak, 4) + ", final-second peak after "
+                        + juce::String (silenceSeconds, 0) + " s of silence " + juce::String (finalPeak, 6));
+        expectEquals (stats.numNonFinite, 0, label + ": non-finite output");
+        expect (stats.peak <= 10.0f, label + ": exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
+        expect (finalPeak < 1e-3f, label + ": did not decay below 1e-3 within " + juce::String (silenceSeconds, 0)
+                                       + " s (final-second peak " + juce::String (finalPeak, 6) + ")");
+    }
+
+    static std::function<float (int)> noiseSource (juce::int64 seed)
+    {
+        auto random = std::make_shared<juce::Random> (seed);
+        return [random] (int) { return random->nextFloat() * 0.6f - 0.3f; };
+    }
+
+    void runInfiniteHoldTests()
+    {
+        // Audit fix 8 (docs/project-audit-2026-11.md, 2026-11-15): Infinite
+        // with a PARTIAL shimmer weight and a small-to-moderate shift. With
+        // Infinite on the loop gain is pinned near 1.0 and the equal-power law
+        // gives a per-pass amplitude plainWeight + shimmerWeight (up to
+        // ~1.385 at weight 0.55) when the shifted copy is coherent with the
+        // tank's own feedback, which is plausible at 0.5-1 st; only the level
+        // rider and SafetyLimiter bound it. Existing Infinite coverage uses
+        // weight 1 (plainWeight 0) or the tank alone. Reworked to the HOLD
+        // criterion (2026-11-15, DattorroTank's hold-level rider): a 2 s
+        // burst, then 60 s of silence; L0 = output RMS over 2.3-3.3 s (just
+        // after the rider latches 0.5 s after the burst, at about 2.5 s; 3-5 s
+        // is still building), and the RMS at
+        // 10-15, 30-35 and 55-60 s must stay within +-2 dB of L0 (+-3 dB for
+        // the +12 st sine/chord, where the cascade makes the spectrum evolve
+        // and the cap-and-alias losses are not level-proportional). No 1 s
+        // RMS window may exceed L0 + 3 dB, peak <= 2.0. (The limiter fraction
+        // is not observable here; DattorroTankTests probes it at tank level.)
+        {
+            // source: 0 noise 0.05, 1 sine, 2 chord, 3 noise 0.3 (loud)
+            struct InfiniteCase { const char* name; float weight; float semitones; int source; double tolDb; };
+            const InfiniteCase cases[] = {
+                { "weight 0.55, +0.5 st, noise 0.05", 0.55f, 0.5f, 0, 2.0 },
+                { "weight 0.55, +1 st, 440 Hz sine",  0.55f, 1.0f, 1, 2.0 },
+                { "weight 0.55, +12 st, noise 0.05",  0.55f, 12.0f, 0, 2.0 },
+                { "weight 0.55, +12 st, sawtooth chord", 0.55f, 12.0f, 2, 3.0 },
+                { "weight 0.7, +1 st, noise 0.05",    0.7f, 1.0f, 0, 2.0 },
+                { "weight 0.7, +12 st, 440 Hz sine",  0.7f, 12.0f, 1, 3.0 },
+                { "weight 0.7, +0.5 st, 440 Hz sine", 0.7f, 0.5f, 1, 2.0 },
+                { "weight 0.55, +1 st, noise 0.3 (loud)",  0.55f, 1.0f, 3, 2.0 },
+                { "weight 0.55, +12 st, noise 0.3 (loud)", 0.55f, 12.0f, 3, 2.0 },
+            };
+
+            for (const auto& c : cases)
+            {
+                beginTest (juce::String ("Infinite holds its level, partial shimmer weight (") + c.name + "): 2 s burst then 60 s silence, within +-"
+                           + juce::String (c.tolDb, 0) + " dB of L0");
+
+                std::function<float (int)> source;
+                if (c.source == 0 || c.source == 3)
+                {
+                    auto random = std::make_shared<juce::Random> (8080);
+                    const float amp = c.source == 0 ? 0.05f : 0.3f;
+                    source = [random, amp] (int) { return (random->nextFloat() * 2.0f - 1.0f) * amp; };
+                }
+                else if (c.source == 1)
+                {
+                    source = [] (int n) { return 0.05f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * n / sampleRate); };
+                }
+                else
+                {
+                    source = [] (int n)
+                    {
+                        float sum = 0.0f;
+                        for (double hz : { 130.81, 164.81, 196.00 })
+                            sum += 0.1f * (float) (2.0 * std::fmod (hz * n / sampleRate, 1.0) - 1.0);
+                        return sum;
+                    };
+                }
+
+                // The shift is pushed from the first perBlock call, NOT from the
+                // setup lambda: prepare() re-seeds pitchShiftSemitones to its
+                // +12 st default, so a setPitchShiftSemitones() made before
+                // prepare() is silently discarded (measured 2026-11-15: seven
+                // "different shift" runs produced bit-identical output).
+                const float weight = c.weight, semitones = c.semitones;
+                const auto out = runSignal ([weight] (ShimmerReverbEngine& e)
+                                            {
+                                                setShimmerWeight (e, weight, false);
+                                                e.setInfiniteAmount (1.0f);
+                                            },
+                                            62.0, source, (int) (2.0 * sampleRate),
+                                            [semitones] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (semitones);
+                                            });
+                const auto stats = SizeTests::peakOf (out);
+                float peakAfter5s = 0.0f;
+                for (int second = 5; second < 62; ++second)
+                    peakAfter5s = juce::jmax (peakAfter5s, peakInSecond (out, second));
+                const double l0 = rmsDb (out, 2.3, 3.3);
+                const double d10 = rmsDb (out, 10.0, 15.0) - l0, d30 = rmsDb (out, 30.0, 35.0) - l0, d55 = rmsDb (out, 55.0, 60.0) - l0;
+                double maxWindow = -1.0e9;
+                for (int s = 3; s + 1 <= 61; ++s)
+                    maxWindow = juce::jmax (maxWindow, rmsDb (out, (double) s, (double) s + 1.0) - l0);
+
+                logMessage (juce::String ("MEASURE engine hold, ") + c.name + ": L0(2.3-3.3s)=" + juce::String (l0, 2)
+                            + " dB, vs L0: 10-15s=" + juce::String (d10, 2) + " 30-35s=" + juce::String (d30, 2) + " 55-60s=" + juce::String (d55, 2)
+                            + " dB, max 1 s window=" + juce::String (maxWindow, 2) + " dB, peak=" + juce::String (stats.peak, 4)
+                            + ", peakAfter5s=" + juce::String (peakAfter5s, 4));
+
+                expectEquals (stats.numNonFinite, 0, "Non-finite output");
+                expect (stats.peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (stats.peak, 4));
+                expect (l0 > -60.0, "Tail already near-silent at 2.3-3.3 s: " + juce::String (l0, 2) + " dB");
+                expect (std::abs (d10) <= c.tolDb, "10-15 s RMS off L0 by " + juce::String (d10, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (std::abs (d30) <= c.tolDb, "30-35 s RMS off L0 by " + juce::String (d30, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (std::abs (d55) <= c.tolDb, "55-60 s RMS off L0 by " + juce::String (d55, 2) + " dB (bound +-" + juce::String (c.tolDb, 1) + ")");
+                expect (maxWindow <= 3.0, "A 1 s RMS window exceeded L0 + 3 dB (" + juce::String (maxWindow, 2) + " dB)");
+            }
+
+            // Engine-level dedicated cases: dead silence, Freeze, release.
+            auto noise005 = [] (juce::int64 seed)
+            {
+                auto random = std::make_shared<juce::Random> (seed);
+                return std::function<float (int)> ([random] (int) { return random->nextFloat() * 0.1f - 0.05f; });
+            };
+            auto infiniteSetup = [] (float freeze)
+            {
+                return [freeze] (ShimmerReverbEngine& e)
+                {
+                    setShimmerWeight (e, 0.55f, false);
+                    e.setInfiniteAmount (1.0f);
+                    e.setFreezeAmount (freeze);
+                };
+            };
+            auto pitchAtBlock0 = [] (float semitones)
+            {
+                return [semitones] (ShimmerReverbEngine& e, int block)
+                {
+                    if (block == 0)
+                        e.setPitchShiftSemitones (semitones);
+                };
+            };
+
+            beginTest ("Infinite from dead silence (engine, +1 st): output stays exactly 0");
+            {
+                const auto out = runSignal (infiniteSetup (0.0f), 20.0, [] (int) { return 0.0f; }, 0, pitchAtBlock0 (1.0f));
+                size_t nonZero = 0;
+                for (size_t i = 0; i < out.left.size(); ++i)
+                    if (out.left[i] != 0.0f || out.right[i] != 0.0f)
+                        ++nonZero;
+                expectEquals ((int) nonZero, 0, "Dead-silent start produced non-zero output samples");
+            }
+
+            beginTest ("Infinite + Freeze 1.0 engaged at 3 s (engine, +12 st, noise 0.05): finite and bounded, peak <= 2.0");
+            {
+                // Freeze engages at 3 s, once the burst (0-2 s) is in the loop:
+                // freezing at block 0 captures an empty loop and the output is
+                // exactly 0 (measured), which would test nothing.
+                const int freezeBlock = (int) (3.0 * sampleRate / blockSize);
+                const auto out = runSignal (infiniteSetup (0.0f), 62.0, noise005 (8081), (int) (2.0 * sampleRate),
+                                            [freezeBlock] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (12.0f);
+                                                if (block == freezeBlock)
+                                                    e.setFreezeAmount (1.0f);
+                                            });
+                const auto stats = SizeTests::peakOf (out);
+                logMessage ("MEASURE engine Infinite+Freeze: peak=" + juce::String (stats.peak, 4) + ", RMS dB 2.3-3.3s=" + juce::String (rmsDb (out, 2.3, 3.3), 2)
+                            + ", 55-60s=" + juce::String (rmsDb (out, 55.0, 60.0), 2));
+                expectEquals (stats.numNonFinite, 0, "Non-finite output");
+                expect (stats.peak <= 2.0f, "Peak exceeded 2.0: " + juce::String (stats.peak, 4));
+            }
+
+            beginTest ("Infinite release mid-hold (engine, +1 st): decays, no click (no sample step above the held level's own)");
+            {
+                const int releaseBlock = (int) (10.0 * sampleRate / blockSize);
+                const auto out = runSignal (infiniteSetup (0.0f), 24.0, noise005 (8082), (int) (2.0 * sampleRate),
+                                            [releaseBlock] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (1.0f);
+                                                if (block == releaseBlock)
+                                                    e.setInfiniteAmount (0.0f);
+                                            });
+                auto maxStep = [&out] (double from, double to)
+                {
+                    float m = 0.0f;
+                    for (size_t i = (size_t) (from * sampleRate); i < (size_t) (to * sampleRate); ++i)
+                        m = juce::jmax (m, std::abs (out.left[i] - out.left[i - 1]), std::abs (out.right[i] - out.right[i - 1]));
+                    return m;
+                };
+                const float heldStep = maxStep (8.0, 10.0), releaseStep = maxStep (10.0, 12.0);
+                const double heldDb = rmsDb (out, 8.0, 10.0), decayedDb = rmsDb (out, 20.0, 24.0);
+                logMessage ("MEASURE engine release: max step held=" + juce::String (heldStep, 5) + ", during release=" + juce::String (releaseStep, 5)
+                            + "; RMS held=" + juce::String (heldDb, 2) + " dB, 20-24 s=" + juce::String (decayedDb, 2) + " dB");
+                expect (releaseStep <= heldStep * 1.25f, "Release produced a click: max step " + juce::String (releaseStep, 5)
+                                                             + " vs held " + juce::String (heldStep, 5));
+                expect (decayedDb < heldDb - 6.0, "Tail did not decay after release (" + juce::String (decayedDb - heldDb, 2) + " dB)");
+            }
+
+            // Measurement-only control, no assertions: the same run on the
+            // legacy path (linear law, weight 0.55) isolates how much of any
+            // swell above comes from the equal-power law rather than from
+            // Infinite's level rider settling a quiet source.
+            beginTest ("Infinite + partial shimmer weight: legacy linear-law control (weight 0.55, +12 st, noise 0.05), measurement only");
+            {
+                auto random = std::make_shared<juce::Random> (8080);
+                const auto out = runSignal ([] (ShimmerReverbEngine& e)
+                                            {
+                                                setShimmerWeight (e, 0.55f, true);
+                                                e.setInfiniteAmount (1.0f);
+                                            },
+                                            62.0, [random] (int) { return random->nextFloat() * 0.1f - 0.05f; }, (int) (2.0 * sampleRate),
+                                            [] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setPitchShiftSemitones (12.0f);
+                                            });
+                logMessage ("MEASURE engine legacy control, weight 0.55, +12 st, noise 0.05: RMS dB 3-5s=" + juce::String (rmsDb (out, 3.0, 5.0), 2)
+                            + ", 10-15s=" + juce::String (rmsDb (out, 10.0, 15.0), 2) + ", 25-30s=" + juce::String (rmsDb (out, 25.0, 30.0), 2)
+                            + ", 55-60s=" + juce::String (rmsDb (out, 55.0, 60.0), 2) + ", peak=" + juce::String (SizeTests::peakOf (out).peak, 4));
+                expectEquals (SizeTests::peakOf (out).numNonFinite, 0, "Non-finite output");
+            }
+        }
+    }
+
+    void runTest() override
+    {
+        beginTest ("T6: the legacy path reproduces the pre-slice golden hashes bit-for-bit (old default Sustain 0.85)");
+        {
+            // Same runs as the two golden-hash tests (ShimmerReverbEngine-
+            // FreezeCrossfadeTests' mono sum, ShimmerReverbEngineSpaceTests'
+            // left channel), with the legacy switch on and Sustain at the old
+            // default. These two values are the ones those tests asserted
+            // before this slice (re-confirmed on the unmodified tree, Debug and
+            // Release, 2026-10-24); both tests now assert the new default's
+            // hashes instead.
+            //
+            // 2026-11-15, re-recorded 106b8609081503f9 -> 5ad945c92eaae118
+            // (mono) and 918d1cec9419a789 -> f57207430acd5ac8 (left) after the
+            // FormantEnvelopeCorrector LPC conditioning fix (audit fix 4).
+            // legacySlice1Settings() runs with Formant Correction ON, so the
+            // legacy path now goes through the conditioned corrector. The old
+            // values pinned the unconditioned corrector's numerics; the
+            // formant-OFF path is unchanged.
+            //
+            // 2026-11-18, re-recorded 5ad945c92eaae118 -> c01bda38eb9cda50
+            // (mono) and f57207430acd5ac8 -> ed29a30c654e5d39 (left) after
+            // audit fix 9: Shimmer Tone Off no longer bypasses the filter (it
+            // is the +12 st alias cap, 5512.5 Hz), so the legacy path can no
+            // longer reproduce the pre-Tone arithmetic bit-for-bit. These now
+            // pin the legacy blend + capped Off; the legacy blend itself is
+            // still covered by the T2 / legacy-blend tests.
+            constexpr juce::uint64 legacyMonoHash = 0xc01bda38eb9cda50ull;
+            constexpr juce::uint64 legacyLeftHash = 0xed29a30c654e5d39ull;
+
+            // 2026-10-25 (step C): Shimmer Tone Off too (its 10 kHz endpoint;
+            // alias cap only since audit fix 9). Tone defaults to 5 kHz,
+            // which the engine these hashes were recorded on did not have;
+            // legacySlice1Settings() leaves it at that default on purpose, so
+            // the two default golden-hash tests cover the Tone filter.
+            auto legacySetup = [] (ShimmerReverbEngine& engine)
+            {
+                ShimmerReverbEngineFreezeCrossfadeTests::legacySlice1Settings (engine);
+                engine.setLegacyShimmerBlendForTesting (true);
+                engine.setShimmerFeedback (oldDefaultSustain);
+                engine.setShimmerTone (10000.0f);
+            };
+
+            for (bool forceUnityActive : { false, true })
+            {
+                int rampStart = 0;
+                std::vector<float> left, right;
+                const auto mono = ShimmerReverbEngineFreezeCrossfadeTests::runFreezeToggleScenario (
+                    false, 0.5, rampStart, &left, &right, ShimmerReverbEngineFreezeCrossfadeTests::defaultBlockSize,
+                    forceUnityActive, legacySetup);
+                const auto monoHash = ShimmerReverbEngineSpaceTests::fnv1a (mono);
+                const auto leftHash = ShimmerReverbEngineSpaceTests::fnv1a (left);
+                logMessage ("Legacy path fingerprints (unity " + juce::String (forceUnityActive ? "forced" : "idle") + "): mono "
+                                + juce::String::toHexString ((juce::int64) monoHash) + ", left "
+                                + juce::String::toHexString ((juce::int64) leftHash));
+                expect (monoHash == legacyMonoHash, "Legacy mono fingerprint changed: got " + juce::String::toHexString ((juce::int64) monoHash));
+                expect (leftHash == legacyLeftHash, "Legacy left fingerprint changed: got " + juce::String::toHexString ((juce::int64) leftHash));
+            }
+        }
+
+        beginTest ("Turning the legacy switch off mid-run re-pushes the new blend to the tank at once (no other setter call)");
+        {
+            // Legacy at Sustain 0.5 and new at Feedback 0.5 give the same
+            // shimmerWeight (0.5), so the switch only changes the blend LAW.
+            // Turned off before the first process() but after prepare(),
+            // with no other setter call, the output must equal an engine that
+            // ran the new path from the start.
+            const auto fromStart = runSignal ([] (ShimmerReverbEngine& e) { setShimmerWeight (e, 0.5f, false); }, 3.0, noiseSource (1212));
+            const auto toggled = runSignal ([] (ShimmerReverbEngine& e) { setShimmerWeight (e, 0.5f, true); }, 3.0, noiseSource (1212),
+                                            std::numeric_limits<int>::max(),
+                                            [] (ShimmerReverbEngine& e, int block)
+                                            {
+                                                if (block == 0)
+                                                    e.setLegacyShimmerBlendForTesting (false);
+                                            });
+            const auto legacyOnly = runSignal ([] (ShimmerReverbEngine& e) { setShimmerWeight (e, 0.5f, true); }, 3.0, noiseSource (1212));
+            expect (fromStart == toggled, "Turning the legacy switch off did not re-push the new blend law to the tank");
+            expect (! (fromStart == legacyOnly), "The legacy switch made no difference at shimmerWeight 0.5 -- the blend law is not wired");
+        }
+
+        beginTest ("T1: cascade emergence -- 220 Hz burst, the octave band at 1.5 s gains >= 9 dB on the fundamental vs legacy");
+        {
+            // Defaults (Shimmer Feedback 0.55, +12 st) vs the legacy path at
+            // the old default Sustain 0.85 (shimmerWeight 0.15), everything
+            // else at the engine defaults for both. 0.5 s, 0.3-amplitude
+            // 220 Hz burst, then silence.
+            constexpr double burstSeconds = 0.5;
+            const double phaseInc = juce::MathConstants<double>::twoPi * 220.0 / sampleRate;
+            auto sine = [phaseInc] (int n) { return 0.3f * (float) std::sin (phaseInc * n); };
+            const int silenceFrom = (int) (burstSeconds * sampleRate);
+
+            const auto current = runSignal ([] (ShimmerReverbEngine&) {}, 3.5, sine, silenceFrom);
+            const auto legacy = runSignal ([] (ShimmerReverbEngine& e)
+                                           {
+                                               e.setLegacyShimmerBlendForTesting (true);
+                                               e.setShimmerFeedback (oldDefaultSustain);
+                                           },
+                                           3.5, sine, silenceFrom);
+
+            double gapCurrentAt15 = 0.0, gapLegacyAt15 = 0.0;
+            for (double t : { 1.0, 1.5, 2.0, 3.0 })
+            {
+                const double c220 = bandEnergyDb (current, t, 220.0), c440 = bandEnergyDb (current, t, 440.0), c880 = bandEnergyDb (current, t, 880.0);
+                const double l220 = bandEnergyDb (legacy, t, 220.0), l440 = bandEnergyDb (legacy, t, 440.0), l880 = bandEnergyDb (legacy, t, 880.0);
+                logMessage ("T1 t=" + juce::String (t, 1) + " s: new 220/440/880 = " + juce::String (c220, 1) + "/" + juce::String (c440, 1) + "/"
+                                + juce::String (c880, 1) + " dB (440-220 " + juce::String (c440 - c220, 1) + ", 880-220 " + juce::String (c880 - c220, 1)
+                                + "); legacy " + juce::String (l220, 1) + "/" + juce::String (l440, 1) + "/" + juce::String (l880, 1)
+                                + " dB (440-220 " + juce::String (l440 - l220, 1) + ", 880-220 " + juce::String (l880 - l220, 1) + ")");
+                if (t == 1.5)
+                {
+                    gapCurrentAt15 = c440 - c220;
+                    gapLegacyAt15 = l440 - l220;
+                }
+            }
+
+            const double improvement = gapCurrentAt15 - gapLegacyAt15;
+            logMessage ("T1 (440-220) improvement at 1.5 s: " + juce::String (improvement, 2) + " dB");
+            expect (improvement >= 9.0, "Octave did not emerge: (440-220) at 1.5 s improved by only " + juce::String (improvement, 2)
+                                            + " dB over legacy (new " + juce::String (gapCurrentAt15, 2) + ", legacy "
+                                            + juce::String (gapLegacyAt15, 2) + "), expected >= 9 dB");
+        }
+
+        beginTest ("T2: energy-neutral blend -- full-engine RT60 at +12 st, Decay 5 s, shimmerWeight 0 / 0.5 / 0.85 within +-15% (Off now carries the alias cap)");
+        {
+            // Impulse RT60 (SizeTests::measureEngineRt60(), Schroeder
+            // -5..-35 dB fit). The legacy figures are logged to show the drop
+            // the linear law causes.
+            //
+            // 2026-10-25 (step C): asserted with Shimmer Tone Off, so this
+            // stays a test of the blend LAW alone. At the 5 kHz default the
+            // Tone low-pass removes the impulse's top end from the shifted
+            // share on every pass -- an in-loop, frequency-dependent loss that
+            // grows with shimmerWeight, like Damping on the shifted path only.
+            // Measured (Release) at the default: 5.22 / 4.79 / 4.17 s
+            // (-20% at 0.85), which failed the +-10% bound; logged below as
+            // "Tone 5 kHz".
+            //
+            // Audit fix 9: Off no longer bypasses the filter -- at +12 st it is
+            // the 5512.5 Hz alias cap, so even Off now carries a small in-loop
+            // loss on the shifted share. Measured (Release) 5.22 / 4.80 / 4.19 s
+            // (max deviation 11.6% from the mean), so the bound is 15% (was 10%
+            // when Off was unfiltered). The blend law is still what keeps the
+            // drop far under the legacy linear law's (5.22 / 3.46 / 3.56 s).
+            double rt[3] {}, legacyRt[3] {}, toneRt[3] {};
+            const float weights[3] { 0.0f, 0.5f, 0.85f };
+            for (int i = 0; i < 3; ++i)
+            {
+                const float w = weights[i];
+                rt[i] = SizeTests::measureEngineRt60 (5.0f, [w] (ShimmerReverbEngine& e) { setShimmerWeight (e, w, false); e.setShimmerTone (10000.0f); });
+                legacyRt[i] = SizeTests::measureEngineRt60 (5.0f, [w] (ShimmerReverbEngine& e) { setShimmerWeight (e, w, true); e.setShimmerTone (10000.0f); });
+                toneRt[i] = SizeTests::measureEngineRt60 (5.0f, [w] (ShimmerReverbEngine& e) { setShimmerWeight (e, w, false); });
+                logMessage ("T2 shimmerWeight " + juce::String (w, 2) + ": RT60 new " + juce::String (rt[i], 2) + " s, legacy (linear) "
+                                + juce::String (legacyRt[i], 2) + " s, new with Tone 5 kHz (default) " + juce::String (toneRt[i], 2) + " s");
+            }
+
+            const double mean = (rt[0] + rt[1] + rt[2]) / 3.0;
+            for (int i = 0; i < 3; ++i)
+                expect (std::abs (rt[i] - mean) <= 0.15 * mean, "RT60 at shimmerWeight " + juce::String (weights[i], 2) + " is "
+                                                                   + juce::String (rt[i], 2) + " s, more than 15% from the mean "
+                                                                   + juce::String (mean, 2) + " s");
+        }
+
+        beginTest ("T4: near-unity guard -- 0 st and +-0.5 st, Shimmer Feedback 1.0, 180 s noise: bounded, then decays to silence");
+        {
+            for (float semitones : { 0.0f, 0.5f, -0.5f })
+                expectBoundedThenSilent ("T4 " + juce::String (semitones, 1) + " st",
+                                         [] (ShimmerReverbEngine& e) { setShimmerWeight (e, 1.0f, false); },
+                                         180.0, noiseSource (4040 + (juce::int64) (semitones * 10.0f)),
+                                         // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                         [semitones] (ShimmerReverbEngine& e, int block)
+                                         {
+                                             if (block == 0)
+                                                 e.setPitchShiftSemitones (semitones);
+                                         });
+        }
+
+        beginTest ("Freeze guard: Freeze 1 at Shimmer Feedback 1.0 stays bounded and holds its level like the legacy path");
+        {
+            // Why processSample() scales the equal-power amount by
+            // (1 - freezeAmount): when frozen, the engine's unity crossfade
+            // feeds an UNSHIFTED copy that is correlated with feedbackFromB,
+            // and equal-power weights on correlated signals sum above 1 (at
+            // the 0.01 frozen cap, 0.99995 + 0.01 ~= 1.01) in a near-lossless
+            // loop. Noise for 5 s, then Freeze ramped 0 -> 1 over 50 ms the
+            // way PluginProcessor does, held for 180 s. Compared with the
+            // legacy path at its old default (Sustain 0.85), the shipped
+            // frozen behaviour.
+            constexpr double prefillSeconds = 5.0, frozenSeconds = 180.0;
+            const int freezeBlock = (int) (prefillSeconds * sampleRate / blockSize);
+
+            auto runFrozen = [&] (bool legacy)
+            {
+                auto smoothed = std::make_shared<juce::SmoothedValue<float>>();
+                smoothed->reset (sampleRate, 0.05);
+                smoothed->setCurrentAndTargetValue (0.0f);
+                return runSignal ([legacy] (ShimmerReverbEngine& e)
+                                  {
+                                      if (legacy)
+                                      {
+                                          e.setLegacyShimmerBlendForTesting (true);
+                                          e.setShimmerFeedback (oldDefaultSustain);
+                                      }
+                                      else
+                                      {
+                                          setShimmerWeight (e, 1.0f, false);
+                                      }
+                                  },
+                                  prefillSeconds + frozenSeconds, noiseSource (5150), std::numeric_limits<int>::max(),
+                                  [smoothed, freezeBlock] (ShimmerReverbEngine& e, int block)
+                                  {
+                                      if (block == freezeBlock)
+                                          smoothed->setTargetValue (1.0f);
+                                      e.setFreezeAmount (smoothed->skip (blockSize));
+                                  });
+            };
+
+            const auto current = runFrozen (false);
+            const auto legacy = runFrozen (true);
+            const double end = prefillSeconds + frozenSeconds;
+
+            struct Frozen { float peak; int numNonFinite; double firstDb, lastDb; };
+            auto measure = [&] (const SizeTests::Output& out)
+            {
+                SizeTests::Output frozenPart;
+                const auto from = (std::ptrdiff_t) ((prefillSeconds + 0.5) * sampleRate);
+                frozenPart.left.assign (out.left.begin() + from, out.left.end());
+                frozenPart.right.assign (out.right.begin() + from, out.right.end());
+                const auto stats = SizeTests::peakOf (frozenPart);
+                return Frozen { stats.peak, stats.numNonFinite, rmsDb (out, prefillSeconds + 1.0, prefillSeconds + 2.0), rmsDb (out, end - 1.0, end) };
+            };
+
+            const auto c = measure (current), l = measure (legacy);
+            const double currentChange = c.lastDb - c.firstDb, legacyChange = l.lastDb - l.firstDb;
+            logMessage ("Freeze guard, 180 s frozen: new peak " + juce::String (c.peak, 4) + ", level " + juce::String (c.firstDb, 2) + " -> "
+                            + juce::String (c.lastDb, 2) + " dB (" + juce::String (currentChange, 2) + " dB); legacy peak "
+                            + juce::String (l.peak, 4) + ", level " + juce::String (l.firstDb, 2) + " -> " + juce::String (l.lastDb, 2)
+                            + " dB (" + juce::String (legacyChange, 2) + " dB)");
+
+            expectEquals (c.numNonFinite, 0, "Non-finite output while frozen");
+            expect (c.peak <= 10.0f, "Frozen output exceeded the 10.0 bound: " + juce::String (c.peak, 4));
+            expect (currentChange <= 1.0, "Frozen level grew by " + juce::String (currentChange, 2) + " dB over 180 s");
+            expect (std::abs (currentChange - legacyChange) <= 2.0, "Frozen level change " + juce::String (currentChange, 2)
+                                                                       + " dB differs from legacy " + juce::String (legacyChange, 2)
+                                                                       + " dB by more than 2 dB");
+        }
+
+        beginTest ("Infinite at Shimmer Feedback 1.0, +12 st: 120 s of sustained noise -- no growth (peak <= 2.0 after 20 s), onset no worse than legacy");
+        {
+            // Measured 2026-10-24 (Release, this seed): the whole-run peak is
+            // 2.61, over the 2.0 bound ShimmerReverbEngineTests' Infinite
+            // tests use, but only in the first 20 s (per-20 s peaks 2.61,
+            // 1.87, 1.87, 1.90, 1.92, 1.75) and with flat RMS (-8.60 dB over
+            // 0-20 s, -8.85 dB over 100-120 s): the level controller's onset
+            // overshoot, not growth. It is not the equal-power law: at
+            // shimmerWeight 1 both laws give plainWeight 0, and the legacy path
+            // at the same weight (Sustain 0) peaks 2.56 there too (legacy at
+            // weight 0.85: 2.38; the old default, weight 0.15: 1.70; the new
+            // default 0.55: 2.15). With Width 0 the onset is 1.67, so the extra
+            // comes through the shimmer side term. So: the tight 2.0 bound
+            // after a 20 s settle, the 10.0 safety bound over the whole run, no
+            // RMS growth, and the onset within 10% of legacy at the same weight.
+            auto run = [] (bool legacy)
+            {
+                return runSignal ([legacy] (ShimmerReverbEngine& e)
+                                  {
+                                      setShimmerWeight (e, 1.0f, legacy);
+                                      e.setInfiniteAmount (1.0f);
+                                  },
+                                  120.0, noiseSource (6060));
+            };
+
+            const auto out = run (false);
+            const auto legacyOut = run (true);
+            const auto stats = SizeTests::peakOf (out);
+            float onsetPeak = 0.0f, legacyOnsetPeak = 0.0f, settledPeak = 0.0f;
+            for (int second = 0; second < 120; ++second)
+            {
+                if (second < 20)
+                {
+                    onsetPeak = juce::jmax (onsetPeak, peakInSecond (out, second));
+                    legacyOnsetPeak = juce::jmax (legacyOnsetPeak, peakInSecond (legacyOut, second));
+                }
+                else
+                {
+                    settledPeak = juce::jmax (settledPeak, peakInSecond (out, second));
+                }
+            }
+            const double firstDb = rmsDb (out, 0.0, 20.0), lastDb = rmsDb (out, 100.0, 120.0);
+
+            logMessage ("Infinite, Shimmer Feedback 1.0, 120 s: onset (0-20 s) peak " + juce::String (onsetPeak, 4) + " (legacy, same weight: "
+                            + juce::String (legacyOnsetPeak, 4) + "), settled (20-120 s) peak " + juce::String (settledPeak, 4) + ", RMS "
+                            + juce::String (firstDb, 2) + " dB (0-20 s) -> " + juce::String (lastDb, 2) + " dB (100-120 s)");
+            expectEquals (stats.numNonFinite, 0, "Non-finite output with Infinite");
+            expect (stats.peak <= 10.0f, "Infinite exceeded the 10.0 safety bound: " + juce::String (stats.peak, 4));
+            expect (settledPeak <= 2.0f, "Infinite exceeded the 2.0 bound after settling: " + juce::String (settledPeak, 4));
+            expect (lastDb <= firstDb + 1.0, "Infinite RMS grew: " + juce::String (firstDb, 2) + " -> " + juce::String (lastDb, 2) + " dB");
+            expect (lastDb > -60.0, "Infinite output went near-silent (bounded only trivially): " + juce::String (lastDb, 2) + " dB");
+            expect (onsetPeak <= 1.1f * legacyOnsetPeak, "Infinite onset peak " + juce::String (onsetPeak, 4) + " is more than 10% above legacy's "
+                                                             + juce::String (legacyOnsetPeak, 4) + " at the same weight");
+        }
+
+        beginTest ("T5: harmonic stress -- sawtooth chord, +12 st, Shimmer Feedback 1.0, Decay 20 s, Size 2, Modulation 1, 180 s: bounded");
+        {
+            // C3-E3-G3 naive sawtooths, 0.1 each: the 2nd harmonic of every
+            // note overlaps the shifted fundamental, the partially correlated
+            // case the equal-power law is weakest on.
+            auto chord = [] (int n)
+            {
+                float sum = 0.0f;
+                for (double hz : { 130.81, 164.81, 196.00 })
+                {
+                    const double phase = std::fmod (hz * n / sampleRate, 1.0);
+                    sum += 0.1f * (float) (2.0 * phase - 1.0);
+                }
+                return sum;
+            };
+
+            const auto out = runSignal ([] (ShimmerReverbEngine& e)
+                                        {
+                                            SizeTests::stressSettings (e);
+                                            setShimmerWeight (e, 1.0f, false);
+                                        },
+                                        180.0, chord);
+            const auto stats = SizeTests::peakOf (out);
+            logMessage ("T5 sawtooth chord, 180 s: peak " + juce::String (stats.peak, 4) + ", last-second RMS "
+                            + juce::String (rmsDb (out, 179.0, 180.0), 2) + " dB");
+            expectEquals (stats.numNonFinite, 0, "Non-finite output under harmonic stress");
+            expect (stats.peak <= 10.0f, "Harmonic stress exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
+        }
+
+        runInfiniteHoldTests();
+    }
+};
+
+static ShimmerReverbEngineCascadeTests shimmerReverbEngineCascadeTests;
+
+// Formant Correction toggle (2026-10-25, see ShimmerReverbEngine::
+// setFormantCorrection() and docs/reverb-dev-journal.md). Measured before
+// the toggle existed: with FormantEnvelopeCorrector always in the loop, a
+// +12 st shift of a 440 Hz sine lost ~59 dB of its 880 Hz octave, the
+// corrector rang at 440 Hz with peaks ~2.6e6 and safetyLimiter clipped it
+// into broadband noise. These tests pin the new default (off: the octave
+// cascade is there), the off path's independence from the corrector, the
+// setting surviving prepare()/reset(), and a click-free switch.
+class ShimmerReverbEngineFormantToggleTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineFormantToggleTests() : juce::UnitTest ("ShimmerReverbEngineFormantToggleTests", "DSP") {}
+
+    using SizeTests = ShimmerReverbEngineSizeTests;
+    using CascadeTests = ShimmerReverbEngineCascadeTests;
+    static constexpr double sampleRate = SizeTests::sampleRate;
+    static constexpr int blockSize = SizeTests::blockSize;
+
+    static std::function<float (int)> sineSource (double hz, float amplitude)
+    {
+        return [hz, amplitude] (int n) { return amplitude * (float) std::sin (juce::MathConstants<double>::twoPi * hz * n / sampleRate); };
+    }
+
+    // Share (dB) of the Hann-windowed energy over [fromSeconds, toSeconds),
+    // both channels, that falls in the DFT bins within +-1/6 octave of
+    // centreHz. Parseval: the N bins of a windowed block hold N * sum (w x)^2,
+    // and a real signal's positive-frequency half holds half of it, so
+    // 2 * band / (N * sum (w x)^2) is the band's fraction of the total
+    // (0 dB = everything in the band). A band, not one bin, so the
+    // shifter's slight detune stays inside it.
+    static double bandShareDb (const SizeTests::Output& out, double fromSeconds, double toSeconds, double centreHz)
+    {
+        const int start = (int) (fromSeconds * sampleRate);
+        const int n = (int) ((toSeconds - fromSeconds) * sampleRate);
+        const double binHz = sampleRate / n;
+        const int firstBin = (int) std::ceil (centreHz * std::pow (2.0, -1.0 / 6.0) / binHz);
+        const int lastBin = (int) std::floor (centreHz * std::pow (2.0, 1.0 / 6.0) / binHz);
+
+        std::vector<double> windowed ((size_t) n);
+        double band = 0.0, total = 0.0;
+
+        for (const auto* channel : { &out.left, &out.right })
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                const double w = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1));
+                windowed[(size_t) i] = w * (double) (*channel)[(size_t) (start + i)];
+                total += windowed[(size_t) i] * windowed[(size_t) i];
+            }
+
+            for (int k = firstBin; k <= lastBin; ++k)
+            {
+                const double coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * k / n);
+                double s1 = 0.0, s2 = 0.0;
+                for (int i = 0; i < n; ++i)
+                {
+                    const double s0 = windowed[(size_t) i] + coeff * s1 - s2;
+                    s2 = s1;
+                    s1 = s0;
+                }
+                band += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+            }
+        }
+
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, 2.0 * band / juce::jmax (1.0e-30, (double) n * total)));
+    }
+
+    // Largest |x[i] - x[i - 1]| over both channels in [fromSample, toSample).
+    static float maxDelta (const SizeTests::Output& out, size_t fromSample, size_t toSample)
+    {
+        float m = 0.0f;
+        for (size_t i = juce::jmax ((size_t) 1, fromSample); i < toSample && i < out.left.size(); ++i)
+            m = juce::jmax (m, std::abs (out.left[i] - out.left[i - 1]), std::abs (out.right[i] - out.right[i - 1]));
+        return m;
+    }
+
+    static void fullShimmer (ShimmerReverbEngine& engine)
+    {
+        engine.setShimmerAmount (1.0f);
+        engine.setShimmerFeedback (1.0f);
+        engine.setPitchShiftSemitones (12.0f);
+    }
+
+    void runTest() override
+    {
+        beginTest ("Default is off: a 440 Hz burst at +12 st, Shimmer Feedback 1 leaves a strong 880 Hz octave in the tail, bounded");
+        {
+            // Fresh engine, setFormantCorrection() never called. With the
+            // corrector in the loop the 880 Hz band measured ~59 dB down.
+            const auto out = CascadeTests::runSignal (fullShimmer, 2.0, sineSource (440.0, 0.3f), (int) sampleRate);
+            const auto stats = SizeTests::peakOf (out);
+            const double octaveShareDb = bandShareDb (out, 1.0, 1.5, 880.0);
+            const double fundamentalShareDb = bandShareDb (out, 1.0, 1.5, 440.0);
+
+            logMessage ("Formant off (default), 1.0-1.5 s after a 1 s 440 Hz burst: 880 Hz band share " + juce::String (octaveShareDb, 2)
+                            + " dB, 440 Hz band share " + juce::String (fundamentalShareDb, 2) + " dB, peak " + juce::String (stats.peak, 4));
+            expectEquals (stats.numNonFinite, 0, "Non-finite output with Formant Correction off");
+            expect (stats.peak <= 2.0f, "Output exceeded 2.0 with Formant Correction off: " + juce::String (stats.peak, 4));
+            expect (octaveShareDb > -15.0, "The 880 Hz octave is " + juce::String (octaveShareDb, 2)
+                                               + " dB below the total tail energy (bound -15 dB) -- the cascade is being suppressed");
+        }
+
+        beginTest ("Off after a full on/off cycle is bit-identical to never enabling it (corrector not run while off)");
+        {
+            // Same input and history for both engines; one switches Formant
+            // Correction on at block 20 and off at block 60 (~0.46 s later,
+            // far past the 20 ms ramp), both reset() at block 100. From there
+            // the corrector, idle, must leave no trace at all.
+            static constexpr int onBlock = 20, offBlock = 60, resetBlock = 100;
+            auto run = [] (bool toggle)
+            {
+                return CascadeTests::runSignal (fullShimmer, 4.0, sineSource (440.0, 0.3f), std::numeric_limits<int>::max(),
+                                                [toggle] (ShimmerReverbEngine& e, int block)
+                                                {
+                                                    if (toggle && block == onBlock)  e.setFormantCorrection (true);
+                                                    if (toggle && block == offBlock) e.setFormantCorrection (false);
+                                                    if (block == resetBlock)         e.reset();
+                                                });
+            };
+
+            const auto never = run (false);
+            const auto cycled = run (true);
+            const size_t onSample = (size_t) onBlock * blockSize;
+            const size_t resetSample = (size_t) resetBlock * blockSize;
+
+            int mismatchesWhileOn = 0, mismatchesAfterReset = 0;
+            for (size_t i = onSample; i < resetSample; ++i)
+                mismatchesWhileOn += (never.left[i] != cycled.left[i] || never.right[i] != cycled.right[i]) ? 1 : 0;
+            for (size_t i = resetSample; i < never.left.size(); ++i)
+                mismatchesAfterReset += (never.left[i] != cycled.left[i] || never.right[i] != cycled.right[i]) ? 1 : 0;
+
+            logMessage ("Formant on/off cycle: mismatching samples while on " + juce::String (mismatchesWhileOn)
+                            + ", after reset " + juce::String (mismatchesAfterReset));
+            expect (mismatchesWhileOn > 0, "Turning Formant Correction on changed nothing -- the toggle is not wired");
+            expectEquals (mismatchesAfterReset, 0, "Output after an on/off cycle and reset() differs from a never-enabled engine");
+        }
+
+        beginTest ("The setting survives prepare() and reset(), and reset() snaps the crossfade (no ramp)");
+        {
+            // Set before prepare() (the golden-hash path) vs set after
+            // prepare() followed by reset(): both must start fully corrected
+            // on the first sample, so the outputs are identical, and differ
+            // from the default (off) engine.
+            auto run = [] (int mode)
+            {
+                ShimmerReverbEngine engine;
+                fullShimmer (engine);
+                if (mode == 1)
+                    engine.setFormantCorrection (true);
+                engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                if (mode == 2)
+                    engine.setFormantCorrection (true);
+                engine.reset();
+
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                std::vector<float> left;
+                const auto source = sineSource (440.0, 0.3f);
+                for (int b = 0; b < 100; ++b)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                        for (int ch = 0; ch < 2; ++ch)
+                            buffer.setSample (ch, i, source (b * blockSize + i));
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+                    for (int i = 0; i < blockSize; ++i)
+                        left.push_back (buffer.getSample (0, i));
+                }
+                return left;
+            };
+
+            const auto off = run (0);
+            const auto beforePrepare = run (1);
+            const auto afterPrepareThenReset = run (2);
+            expect (beforePrepare == afterPrepareThenReset, "Formant Correction set after prepare() + reset() differs from set before prepare()");
+            expect (beforePrepare != off, "Formant Correction set before prepare() was lost (output equals the default, off)");
+        }
+
+        beginTest ("Switching Formant Correction on and off mid-tail is click-free");
+        {
+            // Sustained 440 Hz tone, default Shimmer Feedback, switched on at
+            // ~1.5 s and off at ~2.5 s on block boundaries. Same "transition
+            // delta vs. steady delta, bounded multiple" methodology as the
+            // high cut activation click test: the largest sample-to-sample
+            // jump in the 30 ms after each switch must stay within 3x the
+            // largest one in the 0.5 s before it. Measured 2026-10-25 (Release):
+            // ratios ~0.79 (on) and ~0.86 (off). A guard, not a proof of the
+            // ramp: with formantRampSeconds forced to 0 (a hard switch) the
+            // ratios measured the same, also with Width 2 on the side signal
+            // and with a 110 Hz input -- the switch happens inside the loop,
+            // so the tank's delay network smooths it before the output, and a
+            // freshly reset corrector starts as a passthrough. The 20 ms ramp
+            // is kept because a hard step between two different in-loop
+            // signals is a discontinuity by construction (same reasoning as
+            // the freeze unityWeight ramp).
+            const int onBlock = (int) (1.5 * sampleRate / blockSize);
+            const int offBlock = (int) (2.5 * sampleRate / blockSize);
+            const auto out = CascadeTests::runSignal ([] (ShimmerReverbEngine& e) { e.setShimmerAmount (1.0f); }, 3.0, sineSource (440.0, 0.3f),
+                                                      std::numeric_limits<int>::max(),
+                                                      [onBlock, offBlock] (ShimmerReverbEngine& e, int block)
+                                                      {
+                                                          if (block == onBlock)  e.setFormantCorrection (true);
+                                                          if (block == offBlock) e.setFormantCorrection (false);
+                                                      });
+
+            const auto stats = SizeTests::peakOf (out);
+            expectEquals (stats.numNonFinite, 0, "Non-finite output around the Formant Correction switches");
+
+            for (const auto& edge : { std::make_pair (onBlock, juce::String ("on")), std::make_pair (offBlock, juce::String ("off")) })
+            {
+                const size_t switchSample = (size_t) edge.first * blockSize;
+                const float steadyDelta = maxDelta (out, switchSample - (size_t) (0.5 * sampleRate), switchSample);
+                const float transitionDelta = maxDelta (out, switchSample, switchSample + (size_t) (0.03 * sampleRate));
+                logMessage ("Formant switch " + edge.second + ": maxSteadyDelta=" + juce::String (steadyDelta, 6)
+                                + ", maxTransitionDelta (first 30 ms)=" + juce::String (transitionDelta, 6)
+                                + ", ratio=" + juce::String (transitionDelta / juce::jmax (1.0e-9f, steadyDelta), 3));
+                expect (steadyDelta > 0.0f, "No steady tail to measure against (" + edge.second + ")");
+                expect (transitionDelta <= 3.0f * steadyDelta,
+                        "Switching Formant Correction " + edge.second + " clicks: transition delta " + juce::String (transitionDelta, 6)
+                            + " exceeds 3x the steady-state delta " + juce::String (steadyDelta, 6));
+            }
+        }
+    }
+};
+
+static ShimmerReverbEngineFormantToggleTests shimmerReverbEngineFormantToggleTests;
+
+//==============================================================================
+// Shimmer cascade slice 1, step C (2026-10-25, docs/shimmer-character-
+// research.md section 7.1 item 3): Shimmer Tone, a 4th-order low-pass (two
+// cascaded TPT sections) on the signal entering the main shifter, with a
+// ratio-tracking alias cap: effective cutoff min (Tone, fs / (4 * max (ratio,
+// 1)), 0.49 fs). The top endpoint (10 kHz) is Off: the filters keep running
+// warm but the shifter gets the raw signal, the legacy path. Not on the
+// Freeze unity path. Its own class so it can be run alone with Main.cpp's
+// name filter ("Tone").
+class ShimmerReverbEngineToneTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineToneTests() : juce::UnitTest ("ShimmerReverbEngineToneTests", "DSP") {}
+
+    using SizeTests = ShimmerReverbEngineSizeTests;
+    using CascadeTests = ShimmerReverbEngineCascadeTests;
+    using FormantTests = ShimmerReverbEngineFormantToggleTests;
+    static constexpr double sampleRate = SizeTests::sampleRate;
+    static constexpr int blockSize = SizeTests::blockSize;
+
+    // The Off endpoint (ShimmerReverbEngine's private maxShimmerToneHz) and
+    // the setting just below it: active, so only the ratio cap limits it.
+    static constexpr float toneOffHz = 10000.0f;
+    static constexpr float toneJustBelowOffHz = 9999.0f;
+
+    // Energy (dB, arbitrary but fixed reference) of a 400 ms Hann-windowed
+    // DFT centred at centreSeconds, summed over the bins within
+    // +-halfWidthHz of centreHz, both channels. Same Goertzel measure as
+    // CascadeTests::bandEnergyDb(), with an explicit band width so an alias
+    // line can be measured next to a strong input line.
+    static double narrowBandEnergyDb (const SizeTests::Output& out, double centreSeconds, double centreHz, double halfWidthHz)
+    {
+        const int n = (int) (0.4 * sampleRate);
+        const int start = (int) (centreSeconds * sampleRate) - n / 2;
+        const double binHz = sampleRate / n;
+        const int firstBin = (int) std::ceil ((centreHz - halfWidthHz) / binHz);
+        const int lastBin = (int) std::floor ((centreHz + halfWidthHz) / binHz);
+
+        double energy = 0.0;
+        for (const auto* channel : { &out.left, &out.right })
+        {
+            for (int k = firstBin; k <= lastBin; ++k)
+            {
+                const double coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * k / n);
+                double s1 = 0.0, s2 = 0.0;
+                for (int i = 0; i < n; ++i)
+                {
+                    const double w = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1));
+                    const double s0 = w * (double) (*channel)[(size_t) (start + i)] + coeff * s1 - s2;
+                    s2 = s1;
+                    s1 = s0;
+                }
+                energy += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+            }
+        }
+
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, energy));
+    }
+
+    // Sum (in dB) of CascadeTests::bandEnergyDb() over several +-1/6 octave bands.
+    static double summedBandsDb (const SizeTests::Output& out, double centreSeconds, std::initializer_list<double> centresHz)
+    {
+        double energy = 0.0;
+        for (double hz : centresHz)
+            energy += std::pow (10.0, CascadeTests::bandEnergyDb (out, centreSeconds, hz) / 10.0);
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, energy));
+    }
+
+    static int countMismatches (const SizeTests::Output& a, const SizeTests::Output& b, size_t from, size_t to)
+    {
+        int mismatches = 0;
+        for (size_t i = from; i < to && i < a.left.size(); ++i)
+            mismatches += (a.left[i] != b.left[i] || a.right[i] != b.right[i]) ? 1 : 0;
+        return mismatches;
+    }
+
+    void runTest() override
+    {
+        beginTest ("Effective cutoff: Tone is relative to the alias cap, Off is the cap itself, no dead zone (44.1 kHz)");
+        {
+            ShimmerReverbEngine engine;
+            engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            engine.reset();
+
+            // Default: 5 kHz at +12 st (cap 5512.5 Hz, scale 0.55125).
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 2756.25f, 0.01f, "Default Tone at +12 st scales to 2756.25 Hz");
+
+            // +12 st: Off is exactly the cap, Tone scales by cap / 10 kHz.
+            engine.setPitchShiftSemitones (12.0f);
+            engine.setShimmerTone (toneOffHz);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 5512.5f, 0.01f, "+12 st Off == cap (fs / 8)");
+            engine.setShimmerTone (3000.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 1653.75f, 0.01f, "+12 st Tone 3 kHz scales by 0.55125");
+            engine.setShimmerTone (1500.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 826.875f, 0.01f, "+12 st Tone 1.5 kHz scales by 0.55125");
+
+            // No dead zone: every Tone step across the range moves the cutoff.
+            for (float semitones : { 7.0f, 12.0f, 19.0f, 24.0f })
+            {
+                engine.setPitchShiftSemitones (semitones);
+                float previous = 0.0f;
+                for (float toneHz = 1500.0f; toneHz <= toneOffHz + 0.5f; toneHz += 500.0f)
+                {
+                    engine.setShimmerTone (toneHz);
+                    const float cutoff = engine.getShimmerToneCutoffHzForTesting();
+                    expect (cutoff > previous + 1.0f, "Dead zone at " + juce::String (semitones, 0) + " st, Tone " + juce::String (toneHz, 0)
+                                                          + " Hz: cutoff " + juce::String (cutoff, 2) + " vs previous " + juce::String (previous, 2));
+                    previous = cutoff;
+                }
+            }
+
+            // +24 st: monotonic, above the floor, Off == cap (fs / 16).
+            engine.setPitchShiftSemitones (24.0f);
+            engine.setShimmerTone (toneOffHz);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 2756.25f, 0.01f, "+24 st Off == cap (fs / 16)");
+            engine.setShimmerTone (1500.0f);
+            expect (engine.getShimmerToneCutoffHzForTesting() >= 20.0f, "+24 st lowest Tone must stay above the filter floor");
+
+            // 0 st: the cap (11025 Hz) is above the Tone range, so the cutoff is
+            // Tone itself, Off included (10 kHz, not bypassed).
+            engine.setPitchShiftSemitones (0.0f);
+            for (float toneHz : { 1500.0f, 5000.0f, 9999.0f, toneOffHz })
+            {
+                engine.setShimmerTone (toneHz);
+                expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), toneHz, 0.01f, "0 st: cutoff == Tone at " + juce::String (toneHz, 0));
+            }
+
+            // Downward shifts count as ratio 1.
+            engine.setPitchShiftSemitones (-12.0f);
+            engine.setShimmerTone (3000.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 3000.0f, 0.01f, "-12 st: downward shifts are not capped");
+
+            // Continuity at the Off endpoint: no jump between 9999 Hz and Off.
+            for (float semitones : { 0.0f, 12.0f, 24.0f })
+            {
+                engine.setPitchShiftSemitones (semitones);
+                engine.setShimmerTone (toneJustBelowOffHz);
+                const float below = engine.getShimmerToneCutoffHzForTesting();
+                engine.setShimmerTone (toneOffHz);
+                const float off = engine.getShimmerToneCutoffHzForTesting();
+                expect (off >= below && off - below <= 2.0f, "Cutoff jumps at the Off endpoint at " + juce::String (semitones, 0) + " st: "
+                                                                 + juce::String (below, 3) + " -> " + juce::String (off, 3));
+            }
+
+            // Clamping: below the range -> 1.5 kHz, above -> Off.
+            engine.setPitchShiftSemitones (-12.0f);
+            engine.setShimmerTone (100.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), 1500.0f, 0.01f, "Tone below the range clamps to 1.5 kHz");
+            engine.setShimmerTone (50000.0f);
+            expectWithinAbsoluteError (engine.getShimmerToneCutoffHzForTesting(), toneOffHz, 0.01f, "Tone above the range clamps to Off");
+
+            // Survives prepare()/reset(). At 8 kHz the cap (fs / 4 = 2000 Hz)
+            // scales the Tone range: Off -> 2000 Hz, 5 kHz -> 1000 Hz.
+            ShimmerReverbEngine lowRate;
+            lowRate.setShimmerTone (toneOffHz);
+            lowRate.prepare ({ 8000.0, (juce::uint32) blockSize, 2 });
+            lowRate.reset();
+            lowRate.setPitchShiftSemitones (-12.0f); // prepare() re-seeds the pitch to +12 st, by design
+            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 2000.0f, 0.01f, "fs / 4 cap at 8 kHz, Off, -12 st");
+            lowRate.setShimmerTone (5000.0f);
+            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 1000.0f, 0.01f, "8 kHz: Tone 5 kHz scales by 0.2");
+            lowRate.setShimmerTone (2000.0f);
+            lowRate.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            lowRate.reset();
+            lowRate.setPitchShiftSemitones (-12.0f);
+            expectWithinAbsoluteError (lowRate.getShimmerToneCutoffHzForTesting(), 2000.0f, 0.01f, "Tone must survive prepare() and reset()");
+
+            // Other sample rates: Off at +12 st is min(fs / 8, 10 kHz), and the range never collapses.
+            for (double fs : { 48000.0, 96000.0 })
+            {
+                ShimmerReverbEngine e;
+                e.prepare ({ fs, (juce::uint32) blockSize, 2 });
+                e.reset();
+                e.setPitchShiftSemitones (12.0f);
+                e.setShimmerTone (toneOffHz);
+                const float cap = (float) (fs / 8.0);
+                // Off is the cap, except where the cap exceeds the 10 kHz Tone range (96 kHz).
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), juce::jmin (cap, toneOffHz), 0.01f, "+12 st Off at " + juce::String (fs, 0));
+                e.setShimmerTone (5000.0f);
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), 5000.0f * juce::jmin (1.0f, cap / 10000.0f), 0.01f,
+                                           "+12 st Tone 5 kHz at " + juce::String (fs, 0));
+                e.setPitchShiftSemitones (0.0f);
+                e.setShimmerTone (7000.0f);
+                expectWithinAbsoluteError (e.getShimmerToneCutoffHzForTesting(), 7000.0f, 0.01f, "0 st cutoff == Tone at " + juce::String (fs, 0));
+            }
+        }
+
+        beginTest ("Tone darkens the shifted path: the 7040 Hz+ octaves drop >= 12 dB at 2 kHz vs Off, the 880 Hz octave survives at 5 kHz");
+        {
+            // 1 s 440 Hz burst, Amount 1, Feedback 1 (the whole cross-feed is
+            // shifted), +12 st, 3.5 s run. Each pass shifts up one octave
+            // AFTER the filter, so an output octave is attenuated by the
+            // filter's response at the octave BELOW it: 3520 Hz comes from a
+            // 1760 Hz input (just under a 2 kHz cutoff, ~-2 dB per section),
+            // 7040 Hz from 3520 Hz (well above it). So the assertion is on the
+            // 7040 Hz and 14080 Hz bands (+-1/6 octave, 400 ms window) at
+            // 2.75 s, once the cascade has reached them (~one octave per
+            // 0.5 s); the 3520 Hz+ sum is logged. The 880 Hz octave is
+            // checked at 1.25 s, its peak, with Tone at the 5 kHz default.
+            auto run = [] (float toneHz)
+            {
+                return CascadeTests::runSignal ([toneHz] (ShimmerReverbEngine& e)
+                                                {
+                                                    FormantTests::fullShimmer (e);
+                                                    e.setShimmerTone (toneHz);
+                                                },
+                                                3.5, FormantTests::sineSource (440.0, 0.3f), (int) sampleRate);
+            };
+
+            const auto off = run (toneOffHz), dark = run (2000.0f), mid = run (5000.0f);
+            constexpr double upperT = 2.75, octaveT = 1.25;
+            const double offHigh = summedBandsDb (off, upperT, { 3520.0, 7040.0, 14080.0 }), darkHigh = summedBandsDb (dark, upperT, { 3520.0, 7040.0, 14080.0 });
+            const double offTop = summedBandsDb (off, upperT, { 7040.0, 14080.0 }), darkTop = summedBandsDb (dark, upperT, { 7040.0, 14080.0 });
+            const double off880 = CascadeTests::bandEnergyDb (off, octaveT, 880.0), mid880 = CascadeTests::bandEnergyDb (mid, octaveT, 880.0);
+            const double dark880 = CascadeTests::bandEnergyDb (dark, octaveT, 880.0);
+
+            logMessage ("Tone darkening at t=2.75 s: 3520+ bands Off " + juce::String (offHigh, 2) + " / 2 kHz " + juce::String (darkHigh, 2)
+                            + " dB (" + juce::String (darkHigh - offHigh, 2) + "); 7040+ bands Off " + juce::String (offTop, 2) + " / 2 kHz "
+                            + juce::String (darkTop, 2) + " dB (" + juce::String (darkTop - offTop, 2) + "). 880 band at t=1.25 s: Off "
+                            + juce::String (off880, 2) + " / 5 kHz " + juce::String (mid880, 2) + " / 2 kHz " + juce::String (dark880, 2) + " dB");
+
+            for (const auto* out : { &off, &dark, &mid })
+            {
+                const auto stats = SizeTests::peakOf (*out);
+                expectEquals (stats.numNonFinite, 0, "Non-finite output in the darkening runs");
+                expect (stats.peak <= 2.0f, "Darkening run exceeded 2.0: " + juce::String (stats.peak, 4));
+            }
+            expect (darkTop <= offTop - 12.0, "7040 Hz and above dropped only " + juce::String (offTop - darkTop, 2) + " dB at 2 kHz (bound 12 dB)");
+            expect (mid880 >= off880 - 3.0, "The 880 Hz octave lost " + juce::String (off880 - mid880, 2) + " dB at 5 kHz (bound 3 dB)");
+        }
+
+        beginTest ("T3: anti-alias -- Off is the ratio cap alone (no unfiltered path): alias lines match Tone 9999 Hz and stay far below the pre-fix unfiltered level");
+        {
+            // History: Off used to bypass the Tone filter (unfiltered shifter
+            // input), and this test asserted the capped run was >= 30 dB
+            // below Off. Since audit fix 9 Off applies the alias cap, so the
+            // Off run must now equal the 9999 Hz run (measured 0.00 dB apart:
+            // 17.87 dB (a), 28.17 dB (b)) and stay under 40 dB. Pre-fix
+            // unfiltered Off measured 61.12 dB (a) and >= 58.2 dB (b).
+            // Default shimmer settings except Modulation 0, a 2 s
+            // 0.3-amplitude sine, measured at 1.5 s in a +-150 Hz band around
+            // the first-generation alias:
+            // (a) +12, 15 kHz -> 30 kHz folds to 14.1 kHz (cap 5512.5 Hz);
+            // (b) +24, 8 kHz -> 32 kHz folds to 12.1 kHz (cap 2756.25 Hz).
+            // The input line itself is >= 900 Hz away, outside the band.
+            // Modulation 0: at the 0.1 default, the tank's allpass modulation
+            // spreads the 15 kHz input line into a skirt that put the alias
+            // band's floor at 34.65 dB even with Shimmer Amount 0 (no shifter
+            // at all), only 26.5 dB under the Off alias (61.12 dB); the capped
+            // run already sat on that floor (33.94 dB). The floor without the
+            // shifter (Amount 0) is logged for each case.
+            struct Case { const char* name; float semitones; double inputHz, aliasHz; };
+            for (const auto& c : { Case { "(a) +12 st, 15 kHz", 12.0f, 15000.0, 14100.0 }, Case { "(b) +24 st, 8 kHz", 24.0f, 8000.0, 12100.0 } })
+            {
+                auto run = [&c] (float toneHz, float amount)
+                {
+                    return CascadeTests::runSignal ([&c, toneHz, amount] (ShimmerReverbEngine& e)
+                                                    {
+                                                        e.setModulation (0.0f);
+                                                        e.setShimmerTone (toneHz);
+                                                        e.setShimmerAmount (amount);
+                                                    },
+                                                    2.0, FormantTests::sineSource (c.inputHz, 0.3f), std::numeric_limits<int>::max(),
+                                                    // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                                    [&c] (ShimmerReverbEngine& e, int block)
+                                                    {
+                                                        if (block == 0)
+                                                            e.setPitchShiftSemitones (c.semitones);
+                                                    });
+                };
+
+                const auto off = run (toneOffHz, 1.0f), capped = run (toneJustBelowOffHz, 1.0f), noShifter = run (toneOffHz, 0.0f);
+                const double offDb = narrowBandEnergyDb (off, 1.5, c.aliasHz, 150.0), cappedDb = narrowBandEnergyDb (capped, 1.5, c.aliasHz, 150.0);
+                const double floorDb = narrowBandEnergyDb (noShifter, 1.5, c.aliasHz, 150.0);
+                logMessage ("T3 " + juce::String (c.name) + ": alias band Off " + juce::String (offDb, 2) + " dB, capped " + juce::String (cappedDb, 2)
+                                + " dB (" + juce::String (cappedDb - offDb, 2) + " dB); floor with Shimmer Amount 0: " + juce::String (floorDb, 2) + " dB");
+                expect (offDb <= 40.0, "T3 " + juce::String (c.name) + ": Off alias band " + juce::String (offDb, 2)
+                                           + " dB (bound 40 dB) -- Off is not capped");
+                expect (std::abs (offDb - cappedDb) <= 0.5, "T3 " + juce::String (c.name) + ": Off and Tone 9999 Hz differ by "
+                                                                + juce::String (offDb - cappedDb, 2) + " dB (bound 0.5 dB)");
+            }
+        }
+
+        beginTest ("Off leaves no trace: Off after 2 kHz and back + reset() equals Off throughout");
+        {
+            // Both engines Off from the start with the same input; one moves
+            // to 2 kHz at block 20 and back to Off at block 60, both reset()
+            // at block 100. From there the filters (warm or not) must leave no
+            // trace.
+            static constexpr int moveBlock = 20, backBlock = 60, resetBlock = 100;
+            auto run = [] (bool move)
+            {
+                return CascadeTests::runSignal ([] (ShimmerReverbEngine& e)
+                                                {
+                                                    FormantTests::fullShimmer (e);
+                                                    e.setShimmerTone (toneOffHz);
+                                                },
+                                                4.0, FormantTests::sineSource (440.0, 0.3f), std::numeric_limits<int>::max(),
+                                                [move] (ShimmerReverbEngine& e, int block)
+                                                {
+                                                    if (move && block == moveBlock) e.setShimmerTone (2000.0f);
+                                                    if (move && block == backBlock) e.setShimmerTone (toneOffHz);
+                                                    if (block == resetBlock)        e.reset();
+                                                });
+            };
+
+            const auto steady = run (false), moved = run (true);
+            const size_t resetSample = (size_t) resetBlock * blockSize;
+            const int whileMoved = countMismatches (steady, moved, (size_t) moveBlock * blockSize, resetSample);
+            const int afterReset = countMismatches (steady, moved, resetSample, steady.left.size());
+            logMessage ("Tone Off bit-identity: mismatching samples while moved " + juce::String (whileMoved) + ", after reset " + juce::String (afterReset));
+            expect (whileMoved > 0, "Moving Shimmer Tone to 2 kHz changed nothing -- the filter is not wired");
+            expectEquals (afterReset, 0, "Off after a 2 kHz excursion and reset() differs from Off throughout");
+        }
+
+        beginTest ("Freeze is unaffected: at full Freeze, moving Tone Off -> 1.5 kHz leaves the output bit-identical");
+        {
+            // At freezeAmount 1 the unity weight is exactly 1, so the main
+            // shifter's output enters the loop (and the side term) multiplied
+            // by exactly 0 and only unityShifter's output remains -- and the
+            // Tone filter is not on the unity path. So switching Tone once the
+            // engine is fully frozen must not change a single output sample.
+            // Control: the same switch at Freeze 0 does change the output.
+            // Noise for 2 s, Freeze ramped 0 -> 1 over 50 ms the way
+            // PluginProcessor does, Tone moved ~0.23 s later (ramp long done).
+            const int freezeBlock = (int) (2.0 * sampleRate / blockSize);
+            const int toneBlock = freezeBlock + 20;
+            auto run = [&] (bool freeze, bool moveTone)
+            {
+                auto smoothed = std::make_shared<juce::SmoothedValue<float>>();
+                smoothed->reset (sampleRate, 0.05);
+                smoothed->setCurrentAndTargetValue (0.0f);
+                return CascadeTests::runSignal ([] (ShimmerReverbEngine& e) { e.setShimmerTone (toneOffHz); }, 4.0, CascadeTests::noiseSource (7070),
+                                                std::numeric_limits<int>::max(),
+                                                [=] (ShimmerReverbEngine& e, int block)
+                                                {
+                                                    if (freeze && block == freezeBlock)
+                                                        smoothed->setTargetValue (1.0f);
+                                                    e.setFreezeAmount (smoothed->skip (blockSize));
+                                                    if (moveTone && block == toneBlock)
+                                                        e.setShimmerTone (1500.0f);
+                                                });
+            };
+
+            const size_t toneSample = (size_t) toneBlock * blockSize;
+            const auto frozenOff = run (true, false), frozenMoved = run (true, true);
+            const auto liveOff = run (false, false), liveMoved = run (false, true);
+            const int frozenMismatches = countMismatches (frozenOff, frozenMoved, toneSample, frozenOff.left.size());
+            const int liveMismatches = countMismatches (liveOff, liveMoved, toneSample, liveOff.left.size());
+            logMessage ("Freeze + Tone: mismatching samples after the Tone move, frozen " + juce::String (frozenMismatches) + ", live (control) "
+                            + juce::String (liveMismatches));
+            expect (liveMismatches > 0, "Control failed: moving Tone at Freeze 0 changed nothing");
+            expectEquals (frozenMismatches, 0, "Moving Tone at full Freeze changed the frozen output -- the filter reaches the unity path");
+        }
+
+        beginTest ("Extremes: Tone 1.5 kHz, Shimmer Feedback 1, +24 and -24 st, 180 s noise: bounded, then decays to silence");
+        {
+            // Same bound (10.0), silence window (40 s) and final-second
+            // threshold (1e-3) as ShimmerReverbEngineCascadeTests' T4.
+            for (float semitones : { 24.0f, -24.0f })
+            {
+                constexpr double loadSeconds = 180.0, silenceSeconds = 40.0;
+                const auto out = CascadeTests::runSignal ([semitones] (ShimmerReverbEngine& e)
+                                                          {
+                                                              CascadeTests::setShimmerWeight (e, 1.0f, false);
+                                                              e.setShimmerTone (1500.0f);
+                                                          },
+                                                          loadSeconds + silenceSeconds, CascadeTests::noiseSource (8080 + (juce::int64) semitones),
+                                                          (int) (loadSeconds * sampleRate),
+                                                          // prepare() re-seeds the pitch to +12 st, so the shift must be set after it
+                                                          [semitones] (ShimmerReverbEngine& e, int block)
+                                                          {
+                                                              if (block == 0)
+                                                                  e.setPitchShiftSemitones (semitones);
+                                                          });
+                const auto stats = SizeTests::peakOf (out);
+                const float finalPeak = CascadeTests::peakInSecond (out, loadSeconds + silenceSeconds - 1.0);
+                const juce::String label ("Tone 1.5 kHz, " + juce::String (semitones, 0) + " st");
+                logMessage (label + ": peak " + juce::String (stats.peak, 4) + ", final-second peak after 40 s of silence " + juce::String (finalPeak, 6));
+                expectEquals (stats.numNonFinite, 0, label + ": non-finite output");
+                expect (stats.peak <= 10.0f, label + ": exceeded the 10.0 bound: " + juce::String (stats.peak, 4));
+                expect (finalPeak < 1e-3f, label + ": did not decay below 1e-3 (final-second peak " + juce::String (finalPeak, 6) + ")");
+            }
+        }
+
+        beginTest ("Moving Tone between Off and 1.5 kHz mid-tail is click-free");
+        {
+            // Sustained 440 Hz tone, default shimmer settings, Tone Off ->
+            // 1.5 kHz at ~1.5 s and back to Off at ~2.5 s, on block
+            // boundaries. Same "transition delta vs. steady delta, at most 3x"
+            // bound as the Formant Correction and high cut click tests. The
+            // transition window is 300 ms, not 30 ms: the change happens on
+            // the shifter's INPUT, which reaches the output only after the
+            // shifter's ~80 ms base delay and a pass through the tank.
+            const int onBlock = (int) (1.5 * sampleRate / blockSize);
+            const int offBlock = (int) (2.5 * sampleRate / blockSize);
+            const auto out = CascadeTests::runSignal ([] (ShimmerReverbEngine& e) { e.setShimmerTone (toneOffHz); }, 3.0,
+                                                      FormantTests::sineSource (440.0, 0.3f), std::numeric_limits<int>::max(),
+                                                      [onBlock, offBlock] (ShimmerReverbEngine& e, int block)
+                                                      {
+                                                          if (block == onBlock)  e.setShimmerTone (1500.0f);
+                                                          if (block == offBlock) e.setShimmerTone (toneOffHz);
+                                                      });
+
+            const auto stats = SizeTests::peakOf (out);
+            expectEquals (stats.numNonFinite, 0, "Non-finite output around the Tone moves");
+
+            for (const auto& edge : { std::make_pair (onBlock, juce::String ("Off -> 1.5 kHz")), std::make_pair (offBlock, juce::String ("1.5 kHz -> Off")) })
+            {
+                const size_t switchSample = (size_t) edge.first * blockSize;
+                const float steadyDelta = FormantTests::maxDelta (out, switchSample - (size_t) (0.5 * sampleRate), switchSample);
+                const float transitionDelta = FormantTests::maxDelta (out, switchSample, switchSample + (size_t) (0.3 * sampleRate));
+                logMessage ("Tone move " + edge.second + ": maxSteadyDelta=" + juce::String (steadyDelta, 6) + ", maxTransitionDelta (first 300 ms)="
+                                + juce::String (transitionDelta, 6) + ", ratio=" + juce::String (transitionDelta / juce::jmax (1.0e-9f, steadyDelta), 3));
+                expect (steadyDelta > 0.0f, "No steady tail to measure against (" + edge.second + ")");
+                expect (transitionDelta <= 3.0f * steadyDelta, "Moving Tone " + edge.second + " clicks: transition delta " + juce::String (transitionDelta, 6)
+                                                                   + " exceeds 3x the steady-state delta " + juce::String (steadyDelta, 6));
+            }
+        }
+    }
+};
+
+static ShimmerReverbEngineToneTests shimmerReverbEngineToneTests;
+
+//==============================================================================
+// Oversized host blocks. A host may call process() with more samples than the
+// maximumBlockSize it passed to prepare(). The engine must then behave exactly
+// as if the caller had sent the same audio in prepared-size blocks, one after
+// another, and must not write past its pre-sized scratch buffer. Own class
+// (same .cpp, so no Projucer resave) so it runs in isolation via Main.cpp's
+// name filter ("OversizedBlock").
+class ShimmerReverbEngineOversizedBlockTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineOversizedBlockTests() : juce::UnitTest ("ShimmerReverbEngineOversizedBlockTests", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Oversized block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 4096);
+        }
+
+        beginTest ("Oversized block whose length is not a multiple of the prepared size matches prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (2, 64, 1000);
+        }
+
+        beginTest ("Oversized mono block matches the same audio sent in prepared-size blocks");
+        {
+            expectOversizedMatchesChunked (1, 64, 1000);
+        }
+    }
+
+private:
+    // Non-default settings, applied after prepare() so the per-sample
+    // smoothers (pre-delay) and the per-block ramps (Freeze) are moving
+    // when processing starts. Mix below 1 keeps both dry and wet in the output.
+    static void configure (ShimmerReverbEngine& engine, int numChannels, int preparedBlockSize)
+    {
+        engine.prepare ({ 44100.0, (juce::uint32) preparedBlockSize, (juce::uint32) numChannels });
+        engine.setMix (0.6f);
+        engine.setWidth (1.3f);
+        engine.setPreDelayMs (20.0f);
+        engine.setLowCutHz (200.0f);
+        engine.setHighCutHz (8000.0f);
+        engine.setShimmerTone (3000.0f);
+        engine.setShimmerFeedback (0.8f);
+        engine.setDecaySeconds (4.0f);
+        engine.setPitchShiftSemitones (7.0f);
+        engine.setFreezeAmount (0.3f);
+    }
+
+    void expectOversizedMatchesChunked (int numChannels, int preparedBlockSize, int totalSamples)
+    {
+        juce::AudioBuffer<float> input (numChannels, totalSamples);
+        juce::Random random (20261114);
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < totalSamples; ++i)
+                input.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+        // Reference: the caller splits the audio into prepared-size blocks.
+        juce::AudioBuffer<float> chunkedOut;
+        chunkedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::AudioBuffer<float> chunk (numChannels, preparedBlockSize);
+
+            for (int offset = 0; offset < totalSamples; offset += preparedBlockSize)
+            {
+                const int length = juce::jmin (preparedBlockSize, totalSamples - offset);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunk.copyFrom (ch, 0, input, ch, offset, length);
+
+                juce::dsp::AudioBlock<float> block (chunk.getArrayOfWritePointers(), (size_t) numChannels, (size_t) length);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    chunkedOut.copyFrom (ch, offset, chunk, ch, 0, length);
+            }
+        }
+
+        // Under test: the same audio in ONE block, larger than the prepared size.
+        juce::AudioBuffer<float> oversizedOut;
+        oversizedOut.makeCopyOf (input);
+        {
+            ShimmerReverbEngine engine;
+            configure (engine, numChannels, preparedBlockSize);
+
+            juce::dsp::AudioBlock<float> block (oversizedOut);
+            engine.process (block);
+        }
+
+        int numNonFinite = 0;
+        int numMismatches = 0;
+        int numChangedFromInput = 0;
+        int firstMismatch = -1;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            for (int i = 0; i < totalSamples; ++i)
+            {
+                const float oversized = oversizedOut.getSample (ch, i);
+                const float chunked = chunkedOut.getSample (ch, i);
+
+                if (! std::isfinite (oversized) || ! std::isfinite (chunked))
+                    ++numNonFinite;
+
+                if (oversized != chunked)
+                {
+                    ++numMismatches;
+
+                    if (firstMismatch < 0)
+                        firstMismatch = i;
+                }
+
+                if (oversized != input.getSample (ch, i))
+                    ++numChangedFromInput;
+            }
+        }
+
+        expectEquals (numNonFinite, 0, "Non-finite samples in the output");
+        expectEquals (numMismatches, 0, "One " + juce::String (totalSamples) + "-sample block differs from "
+                                            + juce::String (preparedBlockSize) + "-sample blocks (first mismatch at sample "
+                                            + juce::String (firstMismatch) + ")");
+        expect (numChangedFromInput > totalSamples / 2, "The engine left the oversized block (almost) untouched: only "
+                                                            + juce::String (numChangedFromInput) + " samples changed");
+    }
+};
+
+static ShimmerReverbEngineOversizedBlockTests shimmerReverbEngineOversizedBlockTests;
+
+// Host tail length (audit 2026-11): ShimmerReverbEngine::computeTailSeconds()
+// is the pure function PluginProcessor::getTailLengthSeconds() forwards to.
+class ShimmerReverbEngineTailLengthTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineTailLengthTests() : juce::UnitTest ("ShimmerReverbEngineTailLengthTests", "DSP") {}
+
+    void runTest() override
+    {
+        // The tank clamps its per-half-loop gain at 0.85, so its RT60 never
+        // exceeds -3 * 0.3627 * size / log10 (0.85) = ~15.42 * size seconds.
+        const double capAtSizeOne = DattorroTank::maxReachableRt60Seconds (1.0f);
+        constexpr double margin = 1.15;
+
+        beginTest ("Default decay (7 s, size 1, no pre-delay) gives about 1.15 * 7 s");
+        {
+            const double tail = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (tail, margin * 7.0, 1.0e-6);
+        }
+
+        beginTest ("Pre-delay adds to the tail");
+        {
+            const double without = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, false);
+            const double with250 = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 250.0f, false);
+            expectWithinAbsoluteError (with250 - without, 0.25, 1.0e-6);
+        }
+
+        beginTest ("Tail grows with decay");
+        {
+            const double shortTail = ShimmerReverbEngine::computeTailSeconds (2.0f, 1.0f, 0.0f, false);
+            const double longTail = ShimmerReverbEngine::computeTailSeconds (6.0f, 1.0f, 0.0f, false);
+            expect (longTail > shortTail, "Tail did not grow with decay");
+        }
+
+        beginTest ("The 0.85 gain clamp caps the tail below the requested decay");
+        {
+            // Size 0.5: cap = 15.42 * 0.5 = ~7.71 s, so 20 s is cut to it.
+            const double atHalf = ShimmerReverbEngine::computeTailSeconds (20.0f, 0.5f, 0.0f, false);
+            expectWithinAbsoluteError (atHalf, margin * 0.5 * capAtSizeOne, 1.0e-6);
+            expect (atHalf < margin * 20.0 * 0.5, "Tail was not capped at size 0.5");
+            expectWithinAbsoluteError (atHalf, margin * 15.42 * 0.5, 0.05);
+
+            // Size 1: cap = ~15.42 s, so 20 s is cut to it too.
+            const double atOne = ShimmerReverbEngine::computeTailSeconds (20.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (atOne, margin * capAtSizeOne, 1.0e-6);
+            expectWithinAbsoluteError (atOne, margin * 15.42, 0.05);
+        }
+
+        beginTest ("Size scales the cap");
+        {
+            const double small = ShimmerReverbEngine::computeTailSeconds (20.0f, 0.5f, 0.0f, false);
+            const double medium = ShimmerReverbEngine::computeTailSeconds (20.0f, 1.0f, 0.0f, false);
+            expectWithinAbsoluteError (medium, 2.0 * small, 1.0e-6);
+
+            // Size 2: the cap (~30.8 s) is above the 20 s Decay maximum, so Decay binds.
+            const double large = ShimmerReverbEngine::computeTailSeconds (20.0f, 2.0f, 0.0f, false);
+            expectWithinAbsoluteError (large, margin * 20.0, 1.0e-6);
+        }
+
+        beginTest ("Sustained returns +infinity");
+        {
+            const double tail = ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, 0.0f, true);
+            expect (std::isinf (tail) && tail > 0.0, "Sustained tail is not +infinity");
+        }
+
+        beginTest ("The result is never NaN or negative over the full parameter ranges");
+        {
+            int numBad = 0;
+
+            for (float decay = 0.3f; decay <= 20.0f; decay += 0.7f)
+                for (float size = 0.5f; size <= 2.0f; size += 0.25f)
+                    for (float preDelay = 0.0f; preDelay <= 250.0f; preDelay += 25.0f)
+                    {
+                        const double tail = ShimmerReverbEngine::computeTailSeconds (decay, size, preDelay, false);
+                        if (std::isnan (tail) || tail < 0.0 || std::isinf (tail))
+                            ++numBad;
+                    }
+
+            // Out-of-range and non-finite inputs are clamped, not propagated.
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            for (double tail : { ShimmerReverbEngine::computeTailSeconds (nan, 1.0f, 0.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (7.0f, nan, 0.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (7.0f, 1.0f, nan, false),
+                                 ShimmerReverbEngine::computeTailSeconds (-5.0f, -1.0f, -10.0f, false),
+                                 ShimmerReverbEngine::computeTailSeconds (1.0e9f, 1.0e9f, 1.0e9f, false) })
+                if (std::isnan (tail) || tail < 0.0 || std::isinf (tail))
+                    ++numBad;
+
+            expectEquals (numBad, 0, "Non-finite or negative tail estimates");
+        }
+
+        beginTest ("The engine's output is below -60 dB of its early peak once the estimated tail has passed");
+        {
+            constexpr double sampleRate = 44100.0;
+            constexpr int blockSize = 512;
+            const float decay = 7.0f;
+            const double tailSeconds = ShimmerReverbEngine::computeTailSeconds (decay, 1.0f, 0.0f, false);
+
+            ShimmerReverbEngine engine;
+            engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            engine.reset();
+            engine.setDecaySeconds (decay);
+            engine.setSize (1.0f);
+            engine.setShimmerAmount (0.0f);
+
+            const int totalSamples = (int) ((tailSeconds + 3.0) * sampleRate);
+            const int tailStart = (int) (tailSeconds * sampleRate);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            float earlyPeak = 0.0f, latePeak = 0.0f;
+            double lateSquares = 0.0;
+            int lateCount = 0;
+
+            for (int done = 0; done < totalSamples; done += blockSize)
+            {
+                buffer.clear();
+                if (done == 0)
+                {
+                    buffer.setSample (0, 0, 1.0f);
+                    buffer.setSample (1, 0, 1.0f);
+                }
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int i = 0; i < blockSize; ++i)
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        const float v = std::abs (buffer.getSample (ch, i));
+                        const int index = done + i;
+
+                        if (index < (int) sampleRate)
+                            earlyPeak = juce::jmax (earlyPeak, v);
+
+                        if (index >= tailStart)
+                        {
+                            latePeak = juce::jmax (latePeak, v);
+                            lateSquares += (double) v * v;
+                            ++lateCount;
+                        }
+                    }
+            }
+
+            const double lateRms = std::sqrt (lateSquares / (double) juce::jmax (1, lateCount));
+            const double peakDb = 20.0 * std::log10 (juce::jmax (1.0e-30, (double) latePeak / (double) juce::jmax (1.0e-30f, earlyPeak)));
+            const double rmsDb = 20.0 * std::log10 (juce::jmax (1.0e-30, lateRms / (double) juce::jmax (1.0e-30f, earlyPeak)));
+            logMessage ("Tail " + juce::String (tailSeconds, 3) + " s: early peak " + juce::String (earlyPeak, 5)
+                        + ", late peak " + juce::String (latePeak, 7) + " (" + juce::String (peakDb, 2)
+                        + " dB), late RMS " + juce::String (lateRms, 8) + " (" + juce::String (rmsDb, 2) + " dB)");
+            expect (earlyPeak > 0.0f, "No early output");
+            expect (peakDb < -60.0, "Output after the estimated tail is only " + juce::String (peakDb, 2) + " dB below the early peak");
+        }
+    }
+};
+
+static ShimmerReverbEngineTailLengthTests shimmerReverbEngineTailLengthTests;
+
+// ShimmerReverbEngine::isTailSustained() decides when the host is told the tail
+// is infinite; Bypass and a silent Mix cancel it because the wet path is muted.
+class ShimmerReverbEngineTailSustainTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineTailSustainTests() : juce::UnitTest ("ShimmerReverbEngineTailSustainTests", "DSP") {}
+
+    void runTest() override
+    {
+        using Engine = ShimmerReverbEngine;
+
+        beginTest ("Each sustained condition alone makes the tail sustained");
+        {
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 0.0f, 0.0f), "Infinite 1.0 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.5f, 0.0f, 0.0f), "Infinite exactly 0.5 was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 0.51f, 0.0f, 0.0f), "Infinite 0.51 was not sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.9f, 0.0f), "Freeze 0.9 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.8999f, 0.0f), "Freeze 0.8999 was sustained");
+
+            expect (Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.002f), "Loop Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.001f), "Loop Mix exactly 0.001 was sustained");
+        }
+
+        beginTest ("Bypass cancels the sustained tail");
+        {
+            expect (! Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f), "Bypass with all modes engaged was sustained");
+            expect (Engine::isTailSustained (false, 1.0f, 1.0f, 1.0f, 1.0f), "All modes engaged without bypass was not sustained");
+        }
+
+        beginTest ("A silent Mix cancels the sustained tail");
+        {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+
+            expect (! Engine::isTailSustained (false, 0.0f, 1.0f, 1.0f, 1.0f), "Mix 0.0 was sustained");
+            expect (! Engine::isTailSustained (false, 0.001f, 1.0f, 1.0f, 1.0f), "Mix 0.001 was sustained");
+            expect (Engine::isTailSustained (false, 0.002f, 1.0f, 1.0f, 1.0f), "Mix 0.002 was not sustained");
+            expect (! Engine::isTailSustained (false, nan, 1.0f, 1.0f, 1.0f), "NaN Mix was sustained");
+        }
+
+        beginTest ("Nothing engaged is not sustained");
+        {
+            expect (! Engine::isTailSustained (false, 1.0f, 0.0f, 0.0f, 0.0f), "Idle parameters were sustained");
+        }
+
+        beginTest ("Bypass with all modes engaged reports the finite estimate");
+        {
+            const bool sustained = Engine::isTailSustained (true, 1.0f, 1.0f, 1.0f, 1.0f);
+            const double tail = Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, sustained);
+
+            expect (std::isfinite (tail), "Tail was not finite");
+            expectWithinAbsoluteError (tail, Engine::computeTailSeconds (7.0f, 1.0f, 0.0f, false), 1.0e-12);
+        }
+    }
+};
+
+static ShimmerReverbEngineTailSustainTests shimmerReverbEngineTailSustainTests;

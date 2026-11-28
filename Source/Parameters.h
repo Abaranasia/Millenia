@@ -13,17 +13,28 @@
 namespace ParamIDs
 {
     constexpr auto pitchShift = "pitchShift";
-    constexpr auto feedback   = "feedback";
+
+    // Slice 2 (docs/reverb-space-research.md section 9): `decay` (RT60 in
+    // seconds) REPLACES the old `feedback` (raw tank gain 0..0.85). The old
+    // ID is removed rather than retyped in place: nothing has shipped, so no
+    // preset or automation depends on it (same pre-release reasoning as the
+    // loopMix rename below), and a gain-flavoured ID would be misleading for
+    // a value in seconds. `size` scales the tank, `modulation` sets the
+    // always-on allpass modulation depth. Ranges/defaults must match
+    // DattorroTank::min/max/default* constants.
+    constexpr auto decay      = "decay";
+    constexpr auto size       = "size";
+    constexpr auto modulation = "modulation";
     constexpr auto shimmerAmount = "shimmerAmount";
 
-    // "Shimmer Sustain" task: backs ShimmerReverbEngine::setShimmerSustain()
+    // "Shimmer Sustain" task: backs ShimmerReverbEngine::setShimmerFeedback()
     // -- see that method's header comment for its two effects (DattorroTank's
-    // recirculation cap, inverted, plus a direct gate on the audible Width
-    // injection). Default (0.85f) matches
-    // ShimmerReverbEngine::defaultShimmerSustainAmount, a freshly-chosen
+    // recirculation cap, direct since 2026-10-24, plus a direct gate on the
+    // audible Width injection); shown as "Shimmer Feedback". Default (0.55f) matches
+    // ShimmerReverbEngine::defaultShimmerFeedbackAmount, a freshly-chosen
     // default for this control, not a preserved match to any prior hardcoded
     // constant.
-    constexpr auto shimmerSustain = "shimmerSustain";
+    constexpr auto shimmerFeedback = "shimmerFeedback";
 
     constexpr auto damping    = "damping";
     constexpr auto width      = "width";
@@ -44,11 +55,22 @@ namespace ParamIDs
     // "Infinite mode" section and DattorroTank::setInfiniteAmount()): the
     // tail never decays AND fresh input keeps layering on top -- unlike
     // Freeze above, nothing mutes the input. A separate, independent toggle
-    // from Feedback/Freeze. juce::AudioParameterBool, same reasoning as
+    // from Decay/Freeze. juce::AudioParameterBool, same reasoning as
     // freeze's original bool and bypass (audible, must be host-automatable/
     // state-saveable); the 0/1 jump is ramped sample-accurately inside
     // DattorroTank, so PluginProcessor reads it raw.
     constexpr auto infinite   = "infinite";
+
+    // Formant Correction on/off (2026-10-25, see ShimmerReverbEngine::
+    // setFormantCorrection() and docs/shimmer-character-research.md): the
+    // LPC formant corrector used to run on the shimmer feedback path
+    // unconditionally. Measured: on tonal input it is numerically unstable
+    // (a +12 st shift of a 440 Hz sine lost ~59 dB of its 880 Hz octave,
+    // with ~2.6e6 internal peaks that safetyLimiter clipped into broadband
+    // noise), which kept the octave cascade from ever forming. Default OFF;
+    // juce::AudioParameterBool read RAW, the 20 ms crossfade lives in the
+    // engine, same convention as infinite above.
+    constexpr auto formantCorrection = "formantCorrection";
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md and
     // Source/DSP/LoopCapture.h): a NEW, fully independent feature alongside
@@ -76,8 +98,8 @@ namespace ParamIDs
     // setLoopLengthMs() -> LoopCapture::setLoopLengthMs(). Range MUST
     // exactly match LoopCapture::minLoopLengthMs/maxLoopLengthMs (see
     // LoopCapture.h) -- there is no compile-time-shared-constant mechanism
-    // in this codebase, same as e.g. DattorroTank::defaultDecayGain vs. the
-    // feedback parameter's default above, so keep both in sync by hand if
+    // in this codebase, same as e.g. DattorroTank::defaultDecaySeconds vs.
+    // the decay parameter's default above, so keep both in sync by hand if
     // either ever changes.
     constexpr auto loopLength = "loopLength";
 
@@ -88,12 +110,23 @@ namespace ParamIDs
     constexpr auto preDelay = "preDelay";
     constexpr auto lowCut   = "lowCut";
     constexpr auto highCut  = "highCut";
+
+    // Air: wet-only high shelf, 0..+6 dB at a fixed 7 kHz corner, backing
+    // ShimmerReverbEngine::setAirDb(). Range must match the engine's maxAirDb.
+    constexpr auto air = "air";
+
+    // Shimmer Tone (2026-10-25, shimmer cascade slice 1 step C, docs/
+    // shimmer-character-research.md section 7.1 item 3): low-pass cutoff in
+    // Hz on the signal entering the pitch shifter, backing
+    // ShimmerReverbEngine::setShimmerTone(). Its top endpoint (10 kHz) is
+    // Off. Range/default must match the engine's min/max/defaultShimmerToneHz.
+    constexpr auto shimmerTone = "shimmerTone";
 }
 
 // Builds the full parameter layout backing MilleniaAudioProcessor::apvts.
 // Every default here must match the corresponding ShimmerReverbEngine/
 // DattorroTank/PitchShifter default exactly (see those classes'
-// defaultPitchShiftSemitones/defaultDecayGain/defaultDampingCoefficient/
+// defaultPitchShiftSemitones/defaultDecaySeconds/defaultDampingCoefficient/
 // defaultWidth/defaultMix/defaultBypassed) so wiring up APVTS in
 // this step is not a silent behavior change.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

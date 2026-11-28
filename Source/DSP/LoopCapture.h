@@ -202,7 +202,7 @@ public:
     // currentLoopLengthSamples or resize/reinterpret any buffer. Takes effect
     // only at the next capture event -- exact edge, armed rise, or deferred
     // landing (see the class comment above). Clamped to [minLoopLengthMs, maxLoopLengthMs] here (unlike,
-    // say, DattorroTank::setDecay()'s deliberately-unclamped convention):
+    // say, DattorroTank::setDecaySeconds()'s deliberately-unclamped convention):
     // there, an out-of-APVTS-range value is only an audio/tuning concern the
     // parameter layer is responsible for; here, an unclamped value would
     // become a real out-of-bounds buffer index at the next capture, which is

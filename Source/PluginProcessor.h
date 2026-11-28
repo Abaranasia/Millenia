@@ -10,7 +10,9 @@
 
 #include <JuceHeader.h>
 #include "DSP/ShimmerReverbEngine.h"
+#include "EngineParameterSmoothing.h"
 #include "Parameters.h"
+#include "StateSchema.h"
 
 //==============================================================================
 /**
@@ -54,6 +56,11 @@ public:
     bool isMidiEffect() const override;
     double getTailLengthSeconds() const override;
 
+    // Exposes the "Bypass" parameter as the host-facing bypass control, see
+    // the definition for why processBlockBypassed() is deliberately not
+    // overridden.
+    juce::AudioProcessorParameter* getBypassParameter() const override;
+
     //==============================================================================
     int getNumPrograms() override;
     int getCurrentProgram() override;
@@ -83,9 +90,9 @@ private:
     // APVTS-backed value is still a float (0.0/1.0) -- cached and loaded the
     // same way as the others, compared with `> 0.5f`.
     std::atomic<float>* pitchShiftParam = nullptr;
-    std::atomic<float>* feedbackParam   = nullptr;
+    std::atomic<float>* decayParam      = nullptr;
     std::atomic<float>* shimmerAmountParam = nullptr;
-    std::atomic<float>* shimmerSustainParam = nullptr;
+    std::atomic<float>* shimmerFeedbackParam = nullptr;
     std::atomic<float>* dampingParam    = nullptr;
     std::atomic<float>* widthParam      = nullptr;
     std::atomic<float>* mixParam        = nullptr;
@@ -102,6 +109,11 @@ private:
     // hard 0/1 -- DattorroTank owns the sample-accurate ramp, same "DSP owns
     // its own smoothing" convention as loopMixParam below.
     std::atomic<float>* infiniteParam   = nullptr;
+
+    // Formant Correction (see ParamIDs::formantCorrection): bool read RAW
+    // every block, same as infiniteParam -- the engine owns the 20 ms
+    // crossfade.
+    std::atomic<float>* formantCorrectionParam = nullptr;
 
     // Phase 10 (see docs/shimmer-reverb-implementation-plan.md): Loop Mix --
     // additive, fully independent of freezeParam above. loopMixParam is read
@@ -122,39 +134,46 @@ private:
 
     // Slice 1 space controls (docs/reverb-space-research.md section 8).
     // preDelayParam is read RAW: the engine smooths the delay time per
-    // sample itself. lowCut/highCut go through block-rate smoothers below,
-    // like every other continuous parameter (the engine updates filter
-    // cutoffs once per block).
+    // sample itself. lowCut/highCut go through the smoothers below, like
+    // every other continuous parameter (stepped in 32-sample chunks, so the
+    // engine updates filter cutoffs once per chunk).
     std::atomic<float>* preDelayParam = nullptr;
     std::atomic<float>* lowCutParam = nullptr;
     std::atomic<float>* highCutParam = nullptr;
+    std::atomic<float>* airParam = nullptr; // smoothed like highCut
 
-    // Phase 5: one smoother per continuous parameter, driven from the cached
-    // atomics above and .skip()'d once per block in processBlock() before
-    // pushing into shimmerReverbEngine -- see that method's comment for why
-    // bypass has no smoother of its own (it drives smoothedMix instead).
-    juce::SmoothedValue<float> smoothedPitchShift;
-    juce::SmoothedValue<float> smoothedFeedback;
-    juce::SmoothedValue<float> smoothedShimmerAmount;
-    juce::SmoothedValue<float> smoothedShimmerSustain;
-    juce::SmoothedValue<float> smoothedDamping;
-    juce::SmoothedValue<float> smoothedWidth;
-    juce::SmoothedValue<float> smoothedMix;
-    juce::SmoothedValue<float> smoothedLowCut;
-    juce::SmoothedValue<float> smoothedHighCut;
+    // Shimmer Tone (see ParamIDs::shimmerTone): smoothed like lowCut/highCut
+    // -- the engine also updates this cutoff once per 32-sample chunk.
+    std::atomic<float>* shimmerToneParam = nullptr;
 
-    // Phase 9: Freeze gets the exact same click-free smoothing treatment as
-    // every other continuous parameter here -- even a hard 0->1 jump on
-    // decayGain/dry-mute inside the tank would click, same reasoning as
-    // bypass driving smoothedMix instead of a hard switch (see
-    // processBlock()'s comment).
-    juce::SmoothedValue<float> smoothedFreeze;
+    // Slice 2 (docs/reverb-space-research.md section 9). decayParam (above)
+    // goes through a chunk-stepped smoother like the other continuous values;
+    // size and modulation are read RAW because DattorroTank glides both per
+    // sample itself (300 ms / 50 ms) -- a second, chunk-rate ramp here would
+    // only stair-step the target the tank is already ramping toward.
+    std::atomic<float>* sizeParam = nullptr;
+    std::atomic<float>* modulationParam = nullptr;
 
-    // Schema v1 -- the first version ever; no migration logic exists yet.
-    // A future schema bump needs an explicit migration branch in
-    // setStateInformation() that reads the OLD version's property layout
-    // before calling apvts.replaceState(), not a silent overwrite.
-    static constexpr int currentSchemaVersion = 1;
+    // Phase 5 / audit fix 6: one 50 ms linear smoother per continuous
+    // parameter (pitch shift, decay, shimmer amount/feedback, damping, width,
+    // mix, low/high cut, shimmer tone, and Freeze -- Phase 9: even a hard 0->1
+    // jump on decayGain/dry-mute would click), now owned by
+    // EngineParameterSmoothing, which advances them in fixed 32-sample chunks
+    // inside the host block so the zipper step does not scale with the host
+    // block size. Bypass has no smoother of its own: it drives the mix
+    // smoother toward 0 (see processBlock()'s comment).
+    EngineParameterSmoothing engineSmoothing;
+
+    // Builds the smoothing targets from the cached atomics (bypass folded
+    // into mix). Audio thread safe: atomic loads only.
+    EngineParameterSmoothing::Targets readSmoothingTargets() const noexcept;
+
+    // Schema v1 -- the first version ever (see StateSchema.h). The
+    // "schemaVersion" property is read on load: a state stamped with a NEWER
+    // version than this is rejected. Older/unversioned states load without
+    // value migration. A future bump must add an explicit migration step
+    // (reading the OLD layout) before apvts.replaceState().
+    static constexpr int currentSchemaVersion = StateSchema::currentVersion;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MilleniaAudioProcessor)
 };

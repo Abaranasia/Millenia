@@ -47,7 +47,7 @@ void LoopCapture::setLoopFreezeAmount (float newAmount) noexcept
 void LoopCapture::setLoopLengthMs (float newLoopLengthMs) noexcept
 {
     // See this setter's header comment: clamped here (unlike
-    // DattorroTank::setDecay()'s deliberately-unclamped convention) because
+    // DattorroTank::setDecaySeconds()'s deliberately-unclamped convention) because
     // an out-of-range value here would become a real out-of-bounds buffer
     // index at the next capture, not just a differently-tuned sound.
     pendingLoopLengthMs = juce::jlimit (minLoopLengthMs, maxLoopLengthMs, newLoopLengthMs);

@@ -240,6 +240,310 @@ The default-settings sine fingerprint changed by design, from `be7b4e1487c0ce8b`
 - The width parameter's range changed in place under the same ID. This is acceptable because no presets have shipped.
 - Next slices: always-on modulation, RT60 decay, and a Size control (section 7, items 3–5).
 
+## 2026-10-11 — Reverb space, slice 2: Decay in seconds, Size, Modulation
+
+Branch `feat/reverb-size`. Plan: [`reverb-space-research.md`](./reverb-space-research.md) section 9; deviations are in 9.7.
+
+### What changed
+
+- **Decay (RT60).** A new `decay` parameter (0.3–20 s, log skew, default 7.0 s) replaces `feedback`. The tank derives `g = 10^(−3·L_half·size/RT60)` from it, with `L_half` = 362.70 ms (the mean branch length, since the gain is applied once per branch). g is clamped to 0.85 and recomputed whenever Decay or the smoothed Size changes. Freeze and Infinite override it as before. 7.0 s gives g = 0.6993.
+- **Size.** A new `size` parameter (0.5–2×, default 1). It scales both branches' allpass1/delay1/allpass2/delay2 and all 14 output taps. The input diffusers are not scaled. Lines are allocated for 2× plus modulation headroom in `prepare()`. Size glides per sample over 300 ms (linear), and only `setDelay()` runs while it moves.
+- **Modulation.** A new `modulation` parameter (0–1 → 0–1 ms, default 0.3) on both allpass1 lines, reusing Infinite's Thiran lines and its 0.5/0.7 Hz LFOs. Effective depth is `max(user, infinite × 0.5 ms)`. It is ramped per sample over 50 ms.
+- **Tap restore.** `peekTap()` now restores the configured delay from the branch's stored value instead of `getDelay()`. At fractional delays, `getDelay()` can be off by one ulp.
+- **Editor.** Feedback became Decay (seconds, with a tooltip about the ceiling). Size and Modulation joined the second row. The window size is unchanged.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| Golden hashes at Modulation 0 + `decaySecondsForGain(0.7f)` (7.024514 s) | tank `475497026ccf0ceb`, engine L `918d1cec9419a789`, engine sine `106b8609081503f9`: all unchanged |
+| Bare-tank RT60, Schroeder T30 fit (Size 1: 2 s / 5 s) | 2.248 s (+12.4%) / 5.522 s (+10.4%) |
+| Bare-tank RT60 (Size 2: 2 s / 5 s) | 2.274 s (+13.7%) / 5.611 s (+12.2%) |
+| RT60 4 s at Size 0.5 vs Size 2 | 4.164 s vs 4.522 s (ratio 1.086) |
+| Max g over a Decay × Size sweep, and while Size glides | 0.850000 / 0.850000 |
+| First tap arrival, Size 1 → 2 | 392 → 786 samples (ratio 2.005) |
+| Size glide 1→2 (Thiran), max sample delta glide/steady | 1.046× |
+| Tank Size automation, Modulation 1, g 0.85, 20 s noise | peak 2.08 |
+| Frozen tank at Size 2 + Modulation 1 + g 0.85, 180 s noise | peak 8.85 (bound 10) |
+| Engine Size automation / 180 s stress (Size 2, Modulation 1, Decay 20 s, Freeze from 60 s) | peak 1.89 / 1.96 |
+| Engine decay to silence at those settings | final-second peak 0 at 40 s (3.05e-4 at 20 s) |
+| Full-engine RT60, Decay 2 s / 7 s | 2.07 s / 6.20 s |
+| Real-time factor at defaults (Release) | 0.043 (slice 1: ~0.037) |
+
+The bare tank runs 10–14% long against the nominal value. The cause is allpass energy storage: the energy-weighted delay of an allpass is `M/(1−g²)`, which gives an effective `L_half` of about 413 ms. Correcting for it would move the 7 s default to g ≈ 0.666, so that change is left open.
+
+**PitchShifter offset stability** (block size 1, last 5 s of 10 s, Shimmer Amount 1). Each cell is the mean primary−quadrature offset divergence / the number of primary-offset jumps over 10 samples.
+
+| Tone | Mod 0 | Mod 0.3 | Mod 1.0 |
+|---|---|---|---|
+| 220 Hz | 164.3 / 6 | 185.8 / 7 | 70.0 / 89 |
+| 330 Hz | 27.4 / 16 | 91.9 / 13 | 24.0 / 70 |
+
+At 0.3, the jump count matches Mod 0, but the divergence rises (×1.1 at 220 Hz, ×3.4 at 330 Hz). At 1.0, jumps rise 5–15×.
+
+**Shimmer Sustain vs Modulation.** The tail-decay gap between Sustain 0 and Sustain 1 is 2.4 dB at Modulation 0, about 0 at 0.2–0.3, and −0.6 dB at 1.0. Modulation decorrelates the direct and shifter-delayed loop copies, and the comb loss Sustain relies on goes with that correlation. The Sustain test is now pinned to Modulation 0, and the dependence is logged.
+
+### Still open
+
+- **Resolved, 2026-10-11:** the user compared 0 / 0.1 / 0.3 by ear and chose 0.1 as the Modulation default. 0.3 had removed Sustain's decay effect and raised the shifter's offset divergence. The diagnostics at 0.1 have not been measured yet.
+- Whether to calibrate `L_half` for allpass storage (+14%).
+- The Thiran glide measured as click-free (1.05×). Lagrange reads at fractional Size add a slight per-pass HF loss off Size 1.
+
+## 2026-10-25 — Formant Correction toggle (default off)
+
+**Status: code complete, unit-tested in Debug and Release. Not ear-verified.**
+
+### Why
+
+A measured diagnosis showed that `FormantEnvelopeCorrector` is numerically unstable on tonal input inside the feedback loop. After a +12 st shift of a 440 Hz sine it removed about 59 dB of the 880 Hz octave. It also rang at 440 Hz with internal peaks near 2.6e6, and `SafetyLimiter` clipped that into broadband noise inside the loop. With the corrector bypassed, the octave cascade is clean: 880 → 1760 → 3520 Hz, about one octave per 0.5 s. The user chose a toggle, off by default. Fixing the corrector itself is a separate task.
+
+### What changed
+
+- **Engine.** `ShimmerReverbEngine::setFormantCorrection (bool)`, with `defaultFormantCorrection = false`. A 20 ms per-sample linear crossfade (`juce::SmoothedValue`) blends the raw shifted signal with the corrected one, on both the primary and the quadrature paths, at the corrector's old chain position. While the weight rests at 0, the corrector is not run at all. That makes "off" bit-identical to having no corrector in the chain. On the idle → active edge the corrector is `reset()` first, which is allocation-free (`std::fill` and array fills only). The setting survives `prepare()`/`reset()`, and `reset()` snaps the crossfade to its target.
+- **Parameter.** `formantCorrection` (`AudioParameterBool`, version 1, "Formant Correction", default false). PluginProcessor reads it raw every block and before `prepare()`, the same way as Infinite.
+- **Editor.** A "Formant Correction" toggle in the top bar, to the left of Infinite, with a `ButtonAttachment`.
+
+### Measured
+
+| Check | Result |
+|---|---|
+| 880 Hz band share, 1.0–1.5 s after a 1 s 440 Hz burst (+12 st, Shimmer Feedback 1), off / on | −5.45 dB / −19.79 dB (bound > −15 dB) |
+| Peak in that run, off | 0.83 |
+| Golden hashes with correction on (mono `933a970f88302962`, left `e30cadee8d7121fb`, legacy T6 `106b8609081503f9` / `918d1cec9419a789`) | all unchanged, no re-baseline |
+| On → off → `reset()` vs a never-enabled engine with the same history | bit-identical after the reset |
+| Switch click test (max delta in the 30 ms after the switch / in the 0.5 s before it), on / off | 0.79 / 0.86 (bound 3) |
+
+The click test is a guard, not proof that the ramp is needed. A hard switch measured the same, because the tank's delay network smooths the in-loop step before it reaches the output. The ramp is kept anyway, since a hard step between two in-loop signals is a discontinuity by construction.
+
+Opted into correction on, to keep the pre-change measurements they encode: the three golden-hash tests (via `legacySlice1Settings()`), and the legacy-path "Shimmer Sustain: a HIGH value decays slower" test. With correction off, that test measured −31.34 / −31.38 dB, so its gap disappears.
+
+### Still open
+
+- Fix `FormantEnvelopeCorrector`'s instability on tonal input (separate bug).
+- Ear check of the default-off cascade and of the toggle.
+- `FormantEnvelopeCorrector::reset()` zeroes `currentSemitones` but keeps `armed`. That matches the state after `prepare()` that the golden hashes encode, so it was left as is.
+
+## 2026-10-25 — Rename: Shimmer Sustain → Shimmer Feedback identifiers
+
+**Status: rename only, no behaviour change. Unit-tested in Debug and Release; golden hashes unchanged.**
+
+The dial has been un-inverted and labelled "Shimmer Feedback" since 2026-10-24, but its identifiers still said "Sustain", which suggested the old inverted meaning. Nothing has shipped, so they were renamed now.
+
+- **Parameter.** `ParamIDs::shimmerSustain` → `ParamIDs::shimmerFeedback`, string ID `"shimmerSustain"` → `"shimmerFeedback"` (`ParameterID` version stays 1). A saved state from before (including the user's Standalone state) loses this one value and falls back to the default, 0.55.
+- **Engine and plugin.** `setShimmerSustain` → `setShimmerFeedback`, `shimmerSustainAmount` → `shimmerFeedbackAmount`, `defaultShimmerSustainAmount` → `defaultShimmerFeedbackAmount`; `shimmerFeedbackParam`, `smoothedShimmerFeedback` and the editor's `shimmerFeedback*` slider, label and attachment.
+- **Tank.** `DattorroTank::setShimmerFeedbackGain` / `shimmerFeedbackGain` / `defaultShimmerFeedbackGain` → `setShimmerAmountGain` / `shimmerAmountGain` / `defaultShimmerAmountGain`. They are driven by Shimmer Amount, and the old names would now read as the Feedback dial.
+- **Tests.** Calls and test names updated. Legacy-path tests are named "Shimmer Feedback (legacy path)"; their inverted mapping is untouched. Dated comments that say "Shimmer Sustain" are kept as history.
+
+## 2026-10-25 — Shimmer Tone (slice 1, step C)
+
+**Status: code complete, unit-tested in Debug and Release, plugin builds. Not ear-verified.**
+
+### Why
+
+Step C of [`shimmer-character-research.md`](./shimmer-character-research.md) section 7.1 item 3. The shifted path had no band-limiting. Content above fs / (2 · ratio) folded back as aliases, and nothing made the upper generations of the cascade roll off. That becomes a problem now that the shifted share is large (step B). The user chose the ratio-tracking alias cap (section 8, decision 6).
+
+### What changed
+
+- **Engine.** `ShimmerReverbEngine::setShimmerTone (float hz)`, clamped to 1.5–10 kHz, default 5 kHz (`min/max/defaultShimmerToneHz`). Two cascaded mono `StateVariableTPTFilter` lowpass sections (4th order) filter `dryFeedback` before it reaches `shifter` and the formant corrector's dry analysis. `unityShifter` still gets the raw signal, so Freeze is untouched. The effective cutoff is `min(Tone, fs / (4 · max(ratio, 1)), 0.49 fs)` with ratio = 2^(st / 12), recomputed once per block. At 44.1 kHz that is 5512.5 Hz at +12 st and 2756.25 Hz at +24 st. Downward shifts count as ratio 1, so their cap is fs / 4, which is above the range from 40 kHz up.
+- **Off endpoint.** At 10 kHz the filters keep running warm, but the shifter gets the raw signal. This is the same pattern as the wet EQ endpoints. Off is the legacy path and applies no alias cap. The setting survives `prepare()`/`reset()`.
+- **Parameter.** `shimmerTone` ("Shimmer Tone", version 1), skewed so the geometric midpoint (~3.87 kHz) sits at the knob's centre, like the wet EQ corners. Its value text reads "5000 Hz" and "Off" at the top. That text lives in the parameter (`AudioParameterFloatAttributes`), not in an editor lambda: `SliderAttachment` overwrites the slider's `textFromValueFunction` with the parameter's own text, and a slider suffix would read "Off Hz". So hosts show "Off" too. PluginProcessor caches the raw pointer, pushes the value before `prepare()`, and runs it through a 50 ms block-rate `SmoothedValue` every block, like Low Cut/High Cut.
+- **Editor.** A "Shimmer Tone" knob right after Shimmer Feedback in the first row, with a tooltip about the cap. The window grows from 1020 to 1120 px to keep ~100 px per knob. The second row now uses the 11-knob width.
+- **Tests.** A new `ShimmerReverbEngineToneTests` class (8 tests). T6 and the legacy "decays slower" test now set Tone Off explicitly. T2 is asserted with Tone Off (see below).
+
+### Measured (Release)
+
+| Check | Result |
+|---|---|
+| Effective cutoff at 44.1 kHz: +12 / +24 / −12 (Tone 3 kHz) / Off | 5512.5 / 2756.25 / 3000 Hz / inactive |
+| T3 alias band, Tone 9999 Hz vs Off, Modulation 0: (a) +12, 15 kHz → 14.1 kHz | 17.87 vs 66.73 dB (−48.86 dB); floor with Amount 0: 13.21 dB |
+| T3 (b) +24, 8 kHz → 12.1 kHz | −1.49 vs 38.13 dB (−39.62 dB); floor 0.10 dB |
+| Darkening, 440 Hz burst, Feedback 1, +12: 7040 Hz+ bands at 2.75 s, 2 kHz vs Off | 6.96 vs 33.18 dB (−26.22 dB) |
+| Same run, 3520 Hz+ bands | 47.63 vs 48.20 dB (−0.57 dB) |
+| 880 Hz band at 1.25 s, Off / 5 kHz / 2 kHz | 65.04 / 64.85 / 64.86 dB |
+| Off after a 2 kHz excursion + `reset()` vs Off throughout | 0 mismatching samples |
+| Full Freeze, Tone Off → 1.5 kHz | 0 mismatching samples (control at Freeze 0: 74997) |
+| Tone 1.5 kHz, Feedback 1, +24 / −24 st, 180 s noise | peak 1.52 / 1.65; final-second peak after 40 s of silence 0 / 0 |
+| Click test, Off → 1.5 kHz / 1.5 kHz → Off (ratio of max deltas, bound 3) | 1.07 / 1.29 |
+| Golden hashes, default (mono / left) | `933a970f88302962` → `7149627bc88d4fcf`, `e30cadee8d7121fb` → `380d36dfca706ba2` (by design, 5 kHz default) |
+| Legacy T6 hashes (Tone Off + legacy blend + formant on) | `106b8609081503f9` / `918d1cec9419a789`, unchanged |
+| T1 (440−220) improvement at 1.5 s | 11.18 dB (bound 9) |
+| Real-time factor at Freeze 0 (unity idle) | 0.0347 |
+
+Notes on the measurements:
+
+- **The 3520 Hz band barely moves at 2 kHz.** Each pass filters before it shifts, so an output octave is attenuated by the filter's response at the octave below it. 3520 Hz comes from a 1760 Hz input, just under the cutoff. The darkening test therefore asserts on 7040 Hz and up.
+- **T3 needs Modulation 0.** At the 0.1 default, the tank's allpass modulation spreads the 15 kHz input into a skirt. That put the alias band's floor at 34.65 dB even with no shifter, only 26.5 dB under the Off alias. The capped run already sat on that floor.
+- **T2 (energy-neutral blend) failed at the default Tone.** RT60 at shimmerWeight 0 / 0.5 / 0.85 measured 5.22 / 4.79 / 4.17 s, against a ±10% bound. The low-pass removes the impulse's top end from the shifted share on every pass. That is an in-loop, frequency-dependent loss that grows with the share, like Damping applied to the shifted path only. T2 is now asserted with Tone Off, so it stays a test of the blend law: 5.22 / 5.29 / 5.40 s, within ±10%. The Tone-on figures are logged.
+- **Spec T3 asked for "Tone at its 10 kHz maximum (not Off)".** 10 kHz is Off, so 9999 Hz stands in for it.
+
+### Still open
+
+- Ear check of builds B → C: the 3 / 5 / 8 kHz sweep, and +19/+24, where the cap darkens the shimmer.
+- Whether the shorter broadband tail at high Shimmer Feedback with the Tone filter (−20% RT60 at 0.85) is acceptable by ear.
+- No APVTS round-trip test for `shimmerTone`: the test project has no `juce_audio_processors`, a documented gap. pluginval was not run.
+
+## 2026-11-15 — FormantEnvelopeCorrector LPC conditioning (audit fix 4)
+
+**Status: code complete, unit-tested in Debug. Not ear-verified. Formant Correction stays default off.**
+
+### Why
+
+Audit fix 4 of [`project-audit-2026-11.md`](./project-audit-2026-11.md). The corrector was numerically unstable on tonal input. Three root causes:
+
+- **Singular autocorrelation on tonal input.** A near-pure sine gives a near-singular autocorrelation matrix, so Levinson-Durbin returned an ill-conditioned LPC fit.
+- **Poles and zeros on the unit circle.** The fitted envelope filters had no margin, so they rang instead of decaying.
+- **Unbounded gain ratio.** The correction gain (target envelope over source envelope) had no limit, so a deep notch in one envelope became a huge gain or cut in the ratio.
+
+The failure in the measured case was not a blow-up. It was an octave notch: after a +12 st shift of 440 Hz the 880 Hz octave sat at −68.43 dB.
+
+### What changed
+
+Conditioning constants in `FormantEnvelopeCorrector`:
+
+| Constant | Value |
+|---|---|
+| `whiteNoiseCorrection` | 1e-4 |
+| `lagWindowBandwidthHz` | 30 |
+| `maxReflectionCoefficient` | 0.995 |
+| `bandwidthExpansionGamma` | 0.98 |
+| Gain ratio clamp | 0.1 to 10 |
+
+### Measured
+
+| Check | Result |
+|---|---|
+| 880 Hz octave level, corrected, before / after fix | −68.43 dB / −8.22 dB (uncorrected reference −6.02 dB) |
+| 440 Hz residual | −85 dB |
+| Peak in the test run | 0.39 |
+| Stereo-width margin | thin: 45.4% against the 45% floor |
+
+The stereo-width margin is the one to watch. A small change to the corrector could push it under the floor.
+
+### Goldens re-recorded
+
+Seven assertions failed after the fix. All run through `ShimmerReverbEngineFreezeCrossfadeTests::legacySlice1Settings()`, which has Formant Correction ON, so they pinned the old corrector numerics. They were re-recorded from the failure output, deliberately:
+
+| Test | Old | New |
+|---|---|---|
+| FreezeCrossfade default (Freeze 0), mono, 2 assertions | `7149627bc88d4fcf` | `d0a32dcfc2df8430` |
+| Space, Width = 1 left channel | `380d36dfca706ba2` | `9ece884b8f1eb6b2` |
+| Cascade T6 legacy mono, 2 assertions | `106b8609081503f9` | `5ad945c92eaae118` |
+| Cascade T6 legacy left, 2 assertions | `918d1cec9419a789` | `f57207430acd5ac8` |
+
+No other golden changed. The formant-OFF path is unchanged: the default-off tests still pass bit-identically and were not touched.
+
+### Still open
+
+- Ear check of Formant Correction on, now that it is stable. Whether to flip the default is a separate decision.
+- The thin stereo-width margin (45.4% vs 45%).
+
+## 2026-11-15 — Infinite holds the level it was played at (audit fix 8)
+
+**Status: code complete, unit-tested (Release and Debug full suites pass, no golden changed). Not ear-verified.** The first pass of this entry only measured the problem (equal-power blend plus Infinite: quiet sources swelled +8 to +13 dB, small shifts died). The user then decided the contract: with Infinite on the tail must HOLD THE LEVEL IT WAS PLAYED AT, not settle at a fixed ceiling, not decay, not swell. That is now implemented as a hold-level rider on top of the existing level rider.
+
+### What was built
+
+`DattorroTank::processSample()` plus `updateHoldRegulator()`. The existing rider (follower on `|feedbackFromB|`, cut above `levelCeiling` 0.25) is untouched. New, all gated on `infiniteAmount > 0`:
+
+- Target T tracks a mean-|x| follower of the OUTPUT taps (`0.5 * (|left| + |right|)`, tau 0.15 s) while the input envelope (50 ms follower on `|input|`) is above -70 dBFS.
+- Once the input has stayed under the gate for 0.5 s, T is latched. Input above the gate unlatches it and T re-tracks.
+- Latched, a regulator runs every 32 samples (log2/exp2, no per-sample pow): `g = clamp(gI * (T/env)^k, 0.5, 1.41)`. `gI` is a log-domain integrator (tau 5 s), clamped to the same bounds, not integrated upward while the ceiling cut is active. `g` becomes the target of the existing 100 ms level-gain smoother, so the ceiling cut (`min`) always wins over a boost.
+- Boost scaled by `(1 - freezeAmount)`. No boost when `env < T * 1e-3`. `env <= 1e-9` leaves `g = 1`, so a dead-silent start stays exactly 0. No latch if T < 1e-6.
+- `infiniteAmount` reaching 0 resets T, latch and integrator. Release keeps the existing 0.2 s ramp on `(levelGain - 1)`. Re-engage captures a fresh T.
+- `levelGainEffective = 1.0f + infiniteAmount * (levelGain - 1.0f)` is unchanged, so Infinite = 0 is bit-identical.
+
+Constants (all in the header with a tuning table): gate 3.16e-4, input follower 0.05 s, latch 0.5 s, output follower 0.15 s, k 0.5, gMin 0.5, gMax 1.41, integral tau 5 s, boost floor ratio 1e-3, min target 1e-6, update interval 32.
+
+### Deviations from the approved design (all measured)
+
+| Design said | Implemented | Why |
+|---|---|---|
+| Measure the slow envelope of `feedbackFromB`, T clamped to `levelCeiling` | Mean of the output taps, 0.15 s; no clamp, the ceiling cut wins in `min()` | On `feedbackFromB` the held tail sat 3.4 dB below the output level just after the latch (the output/feedbackFromB ratio drifts ~3 dB while energy spreads over the lines). Units of the ceiling are feedbackFromB's, so T cannot be clamped to it. |
+| Latch after ~300 ms | 0.5 s | At 0.3 s T was taken while the tail was still moving: engine +0.5 st noise overshot +5.5 dB and settled +2.2 dB. |
+| k ~0.25 | 0.5 | With a later latch, k 0.25 let the tank tail overshoot 3.2 to 3.5 dB after the latch. k 0.5 cut that to <= 1.5 dB. No ringing seen. |
+
+Tried and dropped: gMax 1.2 (no help), integral tau 10 s and 20 s (chord at +12 st fell to -3.4 dB), latch 0.8 (tank overshoot), k 0.7 (no better than 0.5).
+
+### Before and after
+
+Reference L0 = output RMS over 2.3-3.3 s. Values are dB relative to L0 at 10-15 / 30-35 / 55-60 s, and the worst 1 s RMS window above L0 from 3 s on. "Before" is the same test run on the DSP at HEAD (no hold rider), Release.
+
+Tank probe, coherent external copy (SafetyLimiter on the copy, 2 s noise burst, 60 s silence):
+
+| Weight | rho | Burst | Before: 10-15 / 30-35 / 55-60 s | Before: worst window | After: 10-15 / 30-35 / 55-60 s | After: worst window |
+|---|---|---|---|---|---|---|
+| 0.55 | 1.0 | 0.05 | +3.35 / +3.43 / +3.59 | +3.80 | -0.89 / -0.91 / -0.91 | +1.35 |
+| 0.55 | 0.7 | 0.05 | +5.48 / +5.57 / +5.73 | +5.82 | -0.53 / -0.54 / -0.54 | +0.85 |
+| 0.707 | 1.0 | 0.05 | +2.97 / +3.06 / +3.21 | +3.28 | -0.95 / -0.97 / -0.97 | +1.43 |
+| 0.707 | 0.7 | 0.05 | +5.72 / +5.80 / +5.96 | +6.02 | -0.49 / -0.50 / -0.50 | +0.78 |
+| 0.55 | 1.0 | 0.30 | +1.27 / +1.37 / +1.51 | +1.55 | -0.28 / -0.30 / -0.31 | +1.34 |
+| 0.55 | 0.7 | 0.30 | +1.40 / +1.49 / +1.64 | +1.70 | -0.21 / -0.21 / -0.22 | +1.19 |
+| 0.707 | 0.7 | 0.30 | +1.41 / +1.51 / +1.66 | +1.73 | -0.20 / -0.20 / -0.20 | +1.11 |
+
+Limiter fraction (last 20 s) is 0.000% after (was 0.010-0.012% on the rho 1.0 cases). Peak after 2.3 s is <= 1.47 (was <= 1.77). The burst peak (before the latch, regulator inactive) is unchanged: 2.1353 for weight 0.55 / rho 1.0 / burst 0.30, so the "peak <= 2.0" bound is asserted from 2.3 s on and the burst itself is pinned at 2.2.
+
+Engine, shift applied per block (partial weight, 2 s burst, 60 s silence):
+
+| Case | Before: 10-15 / 30-35 / 55-60 s | Before: worst window | After: 10-15 / 30-35 / 55-60 s | After: worst window | Bound |
+|---|---|---|---|---|---|
+| w0.55, +0.5 st, noise 0.05 | -17.95 / -31.60 / -73.24 | -4.24 | +1.30 / +0.95 / +0.34 | +2.44 | 2 dB |
+| w0.55, +1 st, 440 Hz sine | +2.05 / +9.47 / +7.57 | +10.98 | +0.54 / +0.26 / -0.41 | +1.24 | 2 dB |
+| w0.55, +12 st, noise 0.05 | -11.05 / +0.21 / +8.37 | +8.63 | +0.43 / +0.29 / +0.29 | +0.74 | 2 dB |
+| w0.55, +12 st, sawtooth chord | -2.89 / -10.13 / -3.16 | +0.15 | -0.12 / -2.49 / -1.66 | +0.28 | **3 dB** |
+| w0.7, +1 st, noise 0.05 | +9.95 / +8.01 / +10.76 | +14.03 | +0.50 / +0.31 / +0.72 | +1.50 | 2 dB |
+| w0.7, +12 st, 440 Hz sine | -13.62 / -28.03 / -6.99 | -0.77 | -0.81 / -0.48 / -0.68 | +0.43 | 3 dB |
+| w0.7, +0.5 st, 440 Hz sine | -29.00 / -88.20 / -108.78 | -3.40 | +0.68 / +0.51 / +0.56 | +1.21 | 2 dB |
+| w0.55, +1 st, noise 0.3 | +2.42 / +2.53 / -0.89 | +3.54 | +0.41 / +0.16 / +0.39 | +1.70 | 2 dB |
+| w0.55, +12 st, noise 0.3 | -12.00 / -1.66 / +0.50 | +0.95 | +0.22 / -0.09 / +0.02 | +0.62 | 2 dB |
+
+The bound is +-2 dB except the two +12 st tonal cases, widened to +-3 dB because the cascade makes the spectrum evolve and part of the loss is the Shimmer Tone alias cap, which is not level-proportional. Measured, only the chord needs it (-2.49 dB at 30-35 s); the +12 st sine (w0.7) is within 0.81 dB and could go back to +-2 dB. Peak is <= 1.75 everywhere.
+
+### Dedicated cases
+
+- Release mid-hold (tank): max sample step 0.91 during release vs 1.14 while held (no click); tail falls from -13.9 dB to -53.8 dB by 18-20 s. Engine: 0.075 vs 0.131; -21.4 dB to -91.8 dB.
+- Re-engage (tank): after a release at 5 s and a decay to -30.1 dB, re-engaging at 9 s holds -29.7 / -29.7 dB (20-25 / 30-35 s), a NEW target 16.5 dB below the first (L0 -13.2 dB).
+- Infinite + Freeze 1.0: tank peak 0.49; engine (Freeze engaged at 3 s) peak 0.38, RMS -22.5 dB to -26.0 dB. Both bounded, boost off.
+- Dead silence: tank (30 s) and engine (20 s, +1 st) output is exactly 0.
+- Existing tests: T3 (tank, burst then silence) now holds, +0.19 dB over 28 s (was -0.30 dB); its bound was tightened from +-3 dB to +-1 dB. Layering (second burst raises level) +1.67 dB (was +2.34 dB). T2 (180 s noise, peak 1.6877) and T5 (engine 120 s: 1.5982 / 1.7186, -10.23 / -10.17 dB; chord 180 s: 1.3263) are bit-for-bit the same numbers as at HEAD, because the regulator never latches while input plays.
+- Cascade T4 (near-unity guard, 0 / +0.5 / -0.5 st): peaks 1.5326 / 1.7683 / 1.6761, silent after 40 s. It now truly runs at those shifts since its pitch is pushed per block 0; no assertion changed.
+
+### Golden hashes
+
+ShimmerReverbEngine, Cascade T6, FreezeCrossfade, Space and DattorroTank "Infinite OFF is bit-identical" all unchanged and passing.
+
+### Surprises
+
+- `ShimmerReverbEngine::prepare()` re-seeds `pitchShiftSemitones` to +12 st. A `setPitchShiftSemitones()` made in a `runSignal` setup lambda runs before `prepare()` and is discarded; the tests push shift (and Freeze) from the first `perBlock` call.
+- Freeze at block 0 captures an empty loop and the engine output is exactly 0, which tests nothing; the Freeze case engages at 3 s.
+- Without the regulator the tank swells even at weight 0.55 / rho 1.0 (+3.4 dB): the "still building" 3-5 s window of the first measurement was real, not an artifact. L0 at 2.3-3.3 s is itself mid-swell; the held level is the level at the latch, which sits between the post-burst peak and the dip (engine +0.5 st dips -3 dB at 3-5 s before recovering).
+- Boost instability: none observed. gMax 1.41 was never the limiting factor.
+
+### Still open
+
+- Whether a held tail that sits slightly below the post-burst peak (about -1 dB) is what the user wants by ear.
+- Burst peak 2.1353 in the loud tank probe (weight 0.55, rho 1.0): present before this change, the regulator is inactive while input plays.
+
+## 2026-11-18 — Shimmer Tone relative to the alias cap (audit fix 9)
+
+### What changed
+
+- `computeShimmerToneCutoffHz()` was `min(Tone, cap, maxFilterCutoffHz)`, `cap = fs / (4 * max(ratio, 1))`. At +12 st / 44.1 kHz the cap is 5512.5 Hz, so Tone 5.5-10 kHz changed nothing (dead zone; worse at +24 st).
+- Now `min(maxFilterCutoffHz, Tone * min(1, cap / 10 kHz))`, floored at 20 Hz and NaN-safe. The knob's whole range maps to distinct cutoffs, Off (10 kHz) is exactly the cap, and where the cap is >= 10 kHz (0 st and downward at 44.1 kHz and up) cutoff == Tone, unchanged.
+- Off no longer bypasses the filter. `shimmerToneActive` and `isShimmerToneActiveForTesting()` are gone; the filter always feeds the main shifter and the formant corrector's dry analysis. `unityShifter` still gets the raw `dryFeedback` (Freeze untouched). Before, Off was brighter and more aliased than Tone 9.9 kHz (a jump).
+
+### Behaviour change
+
+- Default Tone 5 kHz: unchanged only where the cap is >= 10 kHz (ratio <= 1.1025, i.e. up to about +1.68 st at 44.1 kHz); at +12 st 5000 -> 2756.25 Hz, at +24 st 5000 -> 1378.1 Hz. Off at 0 st is a 10 kHz 4th-order low-pass instead of no filter.
+
+### Tests
+
+- Cutoff test rewritten (44.1 / 48 / 96 kHz, 8 kHz, +24 st floor, monotonic/no dead zone, continuity at Off). T3 now asserts Off equals Tone 9999 Hz and stays under 40 dB (pre-fix Off was >= 58 dB). T2's RT60 bound widened 10% -> 15% (Off now carries the cap's in-loop loss: 5.22 / 4.80 / 4.19 s).
+- Golden hashes re-recorded on purpose (default mono d0a32dcfc2df8430 -> 710e1b3591f3e7ba, default left 9ece884b8f1eb6b2 -> 5497270224afda5f, legacy mono 5ad945c92eaae118 -> c01bda38eb9cda50, legacy left f57207430acd5ac8 -> ed29a30c654e5d39). The legacy hashes no longer prove bit-identity with the pre-Tone engine, because Off cannot bypass any more.
+
+### Still open
+
+- The parameter's value text still reads the knob value in Hz ("5000 Hz"), which is no longer the applied cutoff at large shifts.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

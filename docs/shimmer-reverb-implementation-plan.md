@@ -11,6 +11,13 @@ This is the phased, checklist-level build plan for Millenia's shimmer reverb DSP
 
 **Explicitly out of scope**: the goniometer/Lissajous-curve stereo visualizer. That work is deliberately deferred to a later, separate plan and is not referenced or scheduled here.
 
+**Renamed identifiers (2026-10-25, `9c68bc6`)**: this plan is a historical record and keeps the names used at the time. In the current code:
+
+| Name in this plan | Current name | Notes |
+|---|---|---|
+| `ParamIDs::shimmerSustain` | `ParamIDs::shimmerFeedback` | Includes the setter `setShimmerSustain()` and its members. The dial is now "Shimmer Feedback", with a direct, un-inverted mapping since `9e6b0fb`. |
+| `DattorroTank::setShimmerFeedbackGain()` / `shimmerFeedbackGain` | `setShimmerAmountGain()` / `shimmerAmountGain` | Driven by Shimmer **Amount**, not by the Feedback dial. |
+
 ## Current state
 
 *Updated after Phase 0 and Phase 1 — see [`reverb-dev-journal.md`](./reverb-dev-journal.md) for the full account.*

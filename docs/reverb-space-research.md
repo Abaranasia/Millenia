@@ -176,7 +176,75 @@ Three new rotary knobs (Pre-Delay, Low Cut, High Cut) with `SliderAttachment`. G
 4. Wet EQ: high cut at 2 kHz reduces wet energy above 8 kHz by more than 12 dB. Endpoints are bit-identical to the filters being absent.
 5. The existing 3-minute freeze-boundedness, decay-to-silence and full `MilleniaTests` suite stay green.
 
-## 9. Open questions
+## 9. Slice 2 plan: modulation, decay in seconds, Size
+
+Branch: `feat/reverb-size` (stacked on `feat/reverb-stereo-space`). Covers section 7 items 3, 4 and 5.
+
+**Order is fixed:** decay (RT60) first, then Size, then modulation. Size needs RT60 to stay constant while the tank grows, and modulation is easiest to judge once size and decay are settled.
+
+### 9.1 Decay as RT60 (seconds)
+
+- Replace `feedback` (raw gain 0–0.85) with a new `decay` parameter: 0.3–20 s, log skew, default 7.0 s. At Size 1 this default reproduces today's `g ≈ 0.7`.
+- Today the decay gain is applied twice per figure-eight loop (once per branch). Each application therefore covers half the loop, `L_half ≈ 362 ms × size`, which gives `g = 10^(−3·L_half/RT60)`.
+  - Check: RT60 = 7.0 s at size 1 gives g = 0.700, consistent with the earlier estimate.
+- **Stability ceiling stays:** g is clamped to ≤ 0.85, the value already proven with the shimmer path in the loop. The RT60 that is actually reachable therefore depends on Size:
+  - about 7.6 s at Size 0.5
+  - about 15 s at Size 1
+  - about 30 s at Size 2
+
+  Requests above the ceiling clamp silently. This is documented in the parameter comment and in the editor tooltip.
+- **Freeze and Infinite** keep overriding the gain exactly as today.
+- **The figure is nominal:** the shimmer path adds its own loss (documented comb-filter energy loss), so RT60 is the tank's value, not a guarantee for the full chain.
+
+### 9.2 Size (0.5–2.0×)
+
+- New `size` parameter, 0.5–2.0, default 1.0.
+- It scales every length that defines the space: the 4 tank allpasses, the 4 tank delays and all 14 output taps.
+- The **input diffusers stay unscaled.** They set the onset texture, not the room dimensions. This keeps the early transient tight, which is the Valhalla/Surge practice.
+- Buffers are allocated once in `prepare()` for 2.0× (+ modulation headroom). Nothing is allocated when Size changes.
+- Smoothing is **per sample, about 300 ms**. Moving the knob therefore produces a short pitch glide, the classic tape/"Doppler" artifact of algorithmic reverbs. **Decided 2026-10-11 (user): smooth glide.** Crossfading a second tank and applying the change on knob release were both rejected.
+- **RT60 is held constant across Size**, because g is recomputed from `L_half × size` (section 9.1).
+- **Modal density:** Size 2 doubles the total delay length (about 1.45 s), so the M ≥ 0.15·T60·fs rule holds up to about 9.6 s RT60, instead of the current about 4.8 s.
+
+### 9.3 Always-on modulation
+
+- New `modulation` parameter, 0–1, default 0.3. It maps to a depth of 0–1 ms on both tank `allpass1` lines. That reuses the existing Infinite code path: Thiran interpolation, LFOs at 0.5/0.7 Hz with a 90° offset.
+- Effective depth is `max(userDepth, infiniteAmount × 0.5 ms)`, so Infinite behaves as before at modulation 0.
+- **Risk:** the in-loop `PitchShifter` alignment search is already sensitive (the known pitch-oscillation issue). Modulated tank content could change how often its anchor flips.
+  - Measure this with the existing offset-stability diagnostics at modulation 0 vs 0.3 vs 1.0 before choosing the default.
+  - If it degrades, cap the depth or modulate only the output-side lines.
+
+### 9.4 Editor
+
+- Feedback becomes **Decay**, labelled in seconds.
+- Add **Size** and **Modulation** knobs.
+
+### 9.5 Tests (written first)
+
+1. **RT60 mapping:** measured decay of the bare tank at Size 1 and 2, RT60 2 s and 5 s, within ±15%.
+2. **RT60 independent of Size:** the measured RT60 at Size 0.5 and at Size 2 differs by ≤ 15% for the same setting below the ceiling.
+3. **Ceiling:** g never exceeds 0.85 for any decay/size combination.
+4. **Size changes the space:** the first output-tap arrival scales with Size (onset ratio ≈ 2 between Size 1 and 2). No allocation happens on Size changes, and Size automation stays bounded (no NaN or overload).
+5. **Modulation:** depth 0 is bit-identical to the slice 1 left/right fingerprints, and modulated output stays bounded.
+6. **Stability:** the 3-minute freeze-boundedness and decay-to-silence tests pass at Size 2 + modulation 1 + RT60 at its ceiling.
+7. **Pitch-shifter offset stability** at modulation 0 / 0.3 / 1.0 is logged for a decision. This is a diagnostic, not an assertion.
+
+### 9.6 PR size
+
+- Estimate: about 900–1100 changed lines including tests, similar to slice 1.
+- If you want smaller PRs, it splits cleanly into two:
+  - **PR A:** RT60 + Size, which are coupled.
+  - **PR B:** modulation, which is independent.
+
+### 9.7 Implementation notes (2026-10-11)
+
+Built as planned, with these deviations and findings:
+
+- **RT60 formula kept, with a measured bias.** `L_half` is derived from the tank constants (A 357.69 ms, B 367.71 ms, mean 362.70 ms), and the gain really is applied twice per loop (B→A and A→B cross-feeds). The bare tank's Schroeder-measured RT60 still runs **10–14% long** (2 s → 2.25–2.27 s, 5 s → 5.52–5.61 s). That is within the ±15% test, and it has a known cause: a Schroeder allpass stores energy, so its energy-weighted delay is `M/(1−g²)` (1.96·M for the 0.7 allpasses, 1.33·M for the 0.5 ones), giving an effective half loop of about 413 ms (+14%). Using 413 ms in the formula would remove the bias, but it would move the 7 s default to g ≈ 0.666. That is left as a user decision.
+- **The 0.85 ceiling is unreachable at Size 2 from the UI.** At Size 2 it would need about 30.8 s, beyond Decay's 20 s maximum, so the strongest reachable gain there is g ≈ 0.778. Above Size ≈ 1.3 the 20 s knob limit binds before the ceiling does. The engine stress tests use Decay 20 s. The bare-tank stress tests drive g = 0.85 at Size 2 directly.
+- **Modulation smoothing.** Modulation is ramped per sample inside the tank (50 ms), like Size (300 ms, linear), so the processor passes both raw.
+
+## 10. Open questions
 
 - Exact Dattorro right-channel tap constants: verify against the paper's table before implementing item 1.
 - Signalsmith example repo license: unverified.

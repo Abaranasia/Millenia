@@ -174,6 +174,28 @@ private:
     // unvalidated intermediate coefficient set.
     static constexpr float crossfadeMs = 5.0f;
 
+    // LPC conditioning (audit fix 4, 2026-11). Without these a tonal input
+    // gives a singular autocorrelation, poles/zeros on the unit circle and an
+    // unbounded dry/shifted gain ratio.
+    //
+    // Relative white-noise correction: r[0] *= 1 + this (about -40 dB floor).
+    // Tuned from 1e-3: that value kept tonal input safe but cut stereo-width
+    // retention to 43.6% (test floor 45%); 1e-4 gives 45.4% with the octave kept.
+    static constexpr double whiteNoiseCorrection = 1.0e-4;
+    // Gaussian lag-window width in Hz (smooths the spectral peaks the fit sees).
+    // Tuned from 60 Hz: at 60 the shifted octave on a pure tone was 6.8 dB down
+    // (test limit 6 dB); 30 Hz keeps it within the limit.
+    static constexpr float lagWindowBandwidthHz = 30.0f;
+    // Hard cap on every Levinson-Durbin reflection coefficient.
+    static constexpr double maxReflectionCoefficient = 0.995;
+    // Bandwidth expansion: a[k] *= gamma^k (moves roots inside the unit circle).
+    static constexpr double bandwidthExpansionGamma = 0.98;
+    // Applied dry/shifted loudness ratio is clamped to [min, max].
+    static constexpr double minGainRatio = 0.1;
+    static constexpr double maxGainRatio = 10.0;
+
+    static double clampedGainRatio (double numerator, double denominator) noexcept;
+
     void runAnalysis() noexcept;
 
     // Shared LPC-fit machinery factored out of runAnalysis() (2026-08-29,
@@ -286,6 +308,7 @@ private:
     std::vector<double> hammingWindowCoeffs;            // size windowSamples, precomputed in prepare()
     std::vector<double> windowedScratch;                // size windowSamples, reused every hop -- no allocation in processSample()
     std::vector<double> autocorrelationScratch;         // size lpcOrder+1, reused every hop
+    std::array<double, lpcOrder + 1> lagWindow {};      // Gaussian lag window, precomputed in prepare()
 
     // Output-crossfade state (see crossfadeMs above). aDry/aShifted are the
     // OUTGOING filter's coefficients (already in use before this hop);

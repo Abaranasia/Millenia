@@ -57,7 +57,7 @@ public:
     // run it as a whole-block operation. Takes one mono input sample and an
     // externally-supplied signal that claims a capped SHARE of the tank's
     // fixed recirculation budget (see maxShimmerBlendWeight and
-    // setShimmerFeedbackGain()), crossfaded against the tank's own natural
+    // setShimmerAmountGain()), crossfaded against the tank's own natural
     // feedbackFromB -- NOT added independently on top of it. Passing the
     // tank's own shifted feedback here (e.g.
     // shifter.processSample(peekFeedbackSignal())) is what lets
@@ -72,7 +72,7 @@ public:
     // all (e.g. process() below, or DattorroTankTests.cpp): 0.0f means the
     // externalFeedback term above contributes nothing, leaving only the
     // tank's own natural feedbackFromB recirculation -- identical behavior
-    // to the plain (no-shimmer) tank, since shimmerFeedbackGain * 0.0f is
+    // to the plain (no-shimmer) tank, since shimmerAmountGain * 0.0f is
     // always exactly zero regardless of its value.
     float processSample (float input) { return processSample (input, 0.0f); }
 
@@ -80,7 +80,76 @@ public:
     // Phase 5 wires these up to real APVTS parameters; this class owns no
     // parameter knowledge itself.
     void setDamping (float newDampingCoefficient);
-    void setDecay (float newDecayGain);
+
+    // Slice 2 (docs/reverb-space-research.md section 9.1): Decay as RT60 in
+    // seconds, replacing the old raw-gain setDecay(). The gain is applied
+    // twice per figure-eight loop (once on each cross-feed, see
+    // processSample()), so each application covers half the loop and
+    //     g = 10^(-3 * L_half * size / RT60),   clamped to <= maxDecayGain
+    // with L_half = halfLoopSeconds (the mean of the two branches'
+    // allpass1 + delay1 + allpass2 + delay2 lengths, 362.70 ms at Size 1).
+    // Recomputed whenever Decay or the smoothed Size changes, so RT60
+    // holds while the tank grows. Not clamped here (same convention as the
+    // other setters; ShimmerReverbEngine clamps to [minDecaySeconds,
+    // maxDecaySeconds]). Freeze and Infinite still override the resulting
+    // gain exactly as before.
+    void setDecaySeconds (float newDecaySeconds);
+
+    // Slice 2 (section 9.2): scales the tank allpass/delay lengths of both
+    // branches and all 14 output taps by `newSize` (0.5..2), leaving the
+    // input diffusers alone. Smoothed per sample over sizeRampSeconds, so
+    // a change glides (a short pitch bend, chosen 2026-10-11) instead of
+    // jumping. Every line is allocated for maxSize in prepare(); a Size
+    // change only calls setDelay(). Not clamped here; the engine clamps.
+    void setSize (float newSize);
+
+    // Slice 2 (section 9.3): 0..1 user modulation depth, mapped linearly to
+    // 0..maxModulationDepthMs on both allpass1 lines through the same LFOs
+    // and Thiran lines Infinite uses (see modDepthMs). The effective depth
+    // is max(user depth, Infinite ramp * modDepthMs), so Infinite behaves as
+    // before at 0. Smoothed per sample over modulationRampSeconds. 0 is
+    // bit-identical to the unmodulated tank.
+    void setModulation (float newModulation);
+
+    // The cross-feed decay gain processSample() is currently using (before
+    // the Freeze/Infinite overrides). For tests.
+    float getCurrentDecayGain() const noexcept { return decayGain; }
+
+    // The RT60 -> g mapping above, exposed so tests and callers share one
+    // formula. decaySecondsForGain() is its inverse, refined to the float
+    // RT60 whose decayGainFor() returns `gain` exactly when one exists
+    // (used to reproduce the old fixed g = 0.7f bit-for-bit). Not for the
+    // audio thread.
+    static float decayGainFor (float decaySeconds, float size) noexcept;
+    static float decaySecondsForGain (float gain, float size) noexcept;
+
+    // Ranges/defaults shared with ShimmerReverbEngine and the APVTS
+    // layout (Parameters.cpp keeps its own literals in sync by hand).
+    // defaultDecaySeconds gives g = 0.6993 at Size 1, i.e. the old fixed
+    // 0.7f default to within 0.1% (see the decay-gain history below).
+    static constexpr float minDecaySeconds = 0.3f;
+    static constexpr float maxDecaySeconds = 20.0f;
+    static constexpr float defaultDecaySeconds = 7.0f;
+    static constexpr float minSize = 0.5f;
+    static constexpr float maxSize = 2.0f;
+    static constexpr float defaultSize = 1.0f;
+    static constexpr float defaultModulation = 0.1f; // by ear, see Parameters.cpp
+
+    // Stability ceiling on g, unchanged from Phase 4 (the old Feedback
+    // parameter's 0.85 maximum, validated with the shifter in the loop).
+    // The longest reachable RT60 therefore grows with Size: ~7.7 s at 0.5,
+    // ~15.4 s at 1, ~30.8 s at 2 (where the 20 s Decay maximum binds first).
+    static constexpr float maxDecayGain = 0.85f;
+
+    // The longest RT60 the decay-gain clamp lets the tank reach at `size`:
+    // solving g = 10^(-3 * L_half * size / RT60) for the clamped g =
+    // maxDecayGain gives RT60 = -3 * L_half * size / log10 (maxDecayGain),
+    // ~15.42 s at Size 1. A Decay above this has no further effect. Used by
+    // ShimmerReverbEngine::computeTailSeconds(); not for the audio thread.
+    static double maxReachableRt60Seconds (float size) noexcept
+    {
+        return -3.0 * halfLoopSeconds * (double) size / std::log10 ((double) maxDecayGain);
+    }
 
     // Crossfade weight (0..1) controlling how much of the tank's fixed
     // recirculation budget (see maxShimmerBlendWeight and processSample())
@@ -89,20 +158,36 @@ public:
     // maxShimmerBlendWeight's comment for why that was a real bug). The
     // COMBINED total feedback gain reaching the tank stays bounded by
     // decayGain alone at every setting. Not clamped here (same convention
-    // as setDecay()/setDamping() -- the APVTS parameter range is the source
+    // as setDecaySeconds()/setDamping() -- the APVTS parameter range is the source
     // of truth); ShimmerReverbEngine::setShimmerAmount() clamps to [0, 1]
     // before calling this.
-    void setShimmerFeedbackGain (float newShimmerFeedbackGain);
+    void setShimmerAmountGain (float newShimmerAmountGain);
 
     // "Shimmer Sustain" task: runtime setter for maxShimmerBlendWeight (see
     // that member's comment above and processSample()'s
     // effectiveMaxShimmerBlendWeight) -- how long the shimmer layer itself
-    // sustains, independent of decayGain (Feedback) and shimmerFeedbackGain
-    // (Shimmer Amount). Not clamped here, same convention as setDecay()/
-    // setDamping()/setShimmerFeedbackGain()/setFreezeAmount() -- the APVTS
+    // sustains, independent of decayGain (Decay) and shimmerAmountGain
+    // (Shimmer Amount). Not clamped here, same convention as setDecaySeconds()/
+    // setDamping()/setShimmerAmountGain()/setFreezeAmount() -- the APVTS
     // parameter range is the source of truth; ShimmerReverbEngine::
-    // setShimmerSustain() clamps to [0, 1] before calling this.
+    // setShimmerFeedback() clamps to [0, 1] before calling this, and since
+    // 2026-10-24 passes the "Shimmer Feedback" value straight through
+    // (no longer inverted, see setShimmerBlendLaw()).
     void setMaxShimmerBlendWeight (float newMaxShimmerBlendWeight);
+
+    // Shimmer cascade slice 1 (2026-10-24, docs/shimmer-character-research.md
+    // section 7.1 item 1): how processSample() derives plainWeight from
+    // shimmerWeight. 0 = the linear law (plainWeight = 1 - shimmerWeight,
+    // amplitudes sum to 1, the only law before this date and still the
+    // default, so an untouched tank keeps the old arithmetic bit-for-bit);
+    // 1 = equal-power (plainWeight = sqrt (1 - shimmerWeight^2), energies
+    // sum to 1, which keeps the loop's energy when the two feeds are
+    // uncorrelated, i.e. when the external signal is pitch-shifted by a
+    // semitone or more); linear crossfade in between. Not clamped here, same
+    // convention as the other setters; ShimmerReverbEngine derives it from
+    // the pitch shift and keeps it in [0, 1]. See shimmerEqualPowerAmount and
+    // processSample() for why Freeze forces the linear law regardless.
+    void setShimmerBlendLaw (float equalPowerAmount);
 
     // Phase 9 (see docs/shimmer-reverb-implementation-plan.md): 0..1 crossfade
     // between the live, APVTS-driven decayGain (0.0f) and frozenDecayGain
@@ -170,6 +255,16 @@ private:
 
     using AllpassStage = AllpassStageOf<DelayLineType>;
 
+    // Every recirculating tank line (allpass1, delay1, allpass2, delay2)
+    // reads through this Thiran type. Size scales the lengths to fractional
+    // values, and Lagrange3rd at a fractional read is a low-pass whose loss
+    // compounds on every pass around the loop: measured plain-tank RT60 at
+    // 16 kHz was 7.1 s at Size 1 but 3.8 s at 0.75 and 2.4 s at 0.5
+    // (docs/dull-tone-research.md section 4.4). Thiran is flat in magnitude,
+    // so the high end decays the same at every Size. The output taps are
+    // the exception: they read Lagrange3rd mirrors (TankBranch::tapDelay1
+    // etc.), see there.
+    //
     // Infinite mode (see modDepthMs): each branch's allpass1 is the one
     // stage whose read delay gets modulated, and it uses first-order Thiran
     // (allpass) interpolation instead of Lagrange3rd -- Dattorro's own paper
@@ -189,22 +284,52 @@ private:
     // against the pre-Infinite tank during development, see the plan doc).
     // The rate here (<= ~0.0022 samples of delay change per sample) is far
     // below the "fast modulation" regime JUCE's Thiran docs warn about.
+    //
+    // Slice 2 adds two faster movers on these same lines. User Modulation at
+    // 1 ms / 0.7 Hz is ~0.0044 samples per sample. A Size glide is much
+    // faster: 0.5 -> 2 over sizeRampSeconds moves branch B's allpass1 by
+    // 1.5 * 30.51 ms in 300 ms, ~0.153 samples per sample at any sample rate
+    // (one integer crossing every ~6.5 samples). That cannot destabilise
+    // JUCE's Thiran: it keeps the fraction in [0.618, 1.618), so its one
+    // pole |alpha| stays <= 0.236 whatever the rate. The "fast modulation"
+    // cost is only a short transient where alpha jumps at each integer
+    // crossing, decaying by ~12.5 dB per sample. Measured as a click
+    // (DattorroTankSpaceTests' "Size glide 1 -> 2 is click-free"): max sample
+    // delta during the glide vs steady state, logged there, asserted <= 3x.
     using ModulatedDelayLineType = juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran>;
     using ModulatedAllpassStage = AllpassStageOf<ModulatedDelayLineType>;
 
     // One cross-feeding tank branch: allpass -> delay -> damping -> allpass -> delay.
+    // The *BaseSamples are the Size-1 lengths (rounded to whole samples, as
+    // before Size existed); the *Samples are those times the applied Size,
+    // set by applySize(). allpass1Samples is the unmodulated centre the
+    // modulation offset is added to each sample.
     struct TankBranch
     {
         ModulatedAllpassStage allpass1;
-        DelayLineType delay1;
+        ModulatedDelayLineType delay1;
         float dampState = 0.0f;
-        AllpassStage allpass2;
-        DelayLineType delay2;
+        ModulatedAllpassStage allpass2;
+        ModulatedDelayLineType delay2;
+
+        // Lagrange3rd mirrors of delay1, allpass2's line and delay2, fed the
+        // same samples and advanced in lockstep. Only the 14 output taps
+        // read them (peekTap); the recirculating path reads the Thiran
+        // lines above. A Thiran read carries one sample of state, so
+        // peeking it at tap offsets would corrupt the loop, and the taps
+        // stay on Lagrange so their sound is unchanged.
+        DelayLineType tapDelay1;
+        DelayLineType tapAllpass2;
+        DelayLineType tapDelay2;
+
+        float allpass1BaseSamples = 0.0f, delay1BaseSamples = 0.0f, allpass2BaseSamples = 0.0f, delay2BaseSamples = 0.0f;
+        float allpass1Samples = 0.0f, delay1Samples = 0.0f, allpass2Samples = 0.0f, delay2Samples = 0.0f;
     };
 
     template <typename Stage>
     float processAllpass (float input, Stage& stage);
-    float processDelay (float input, DelayLineType& delay);
+    float processDelay (float input, ModulatedDelayLineType& delay, DelayLineType& tapMirror);
+    float processAllpass2 (float input, TankBranch& branch);
     float processBranch (float input, TankBranch& branch);
 
     // Non-consuming "peek" read at an absolute sample offset within a delay
@@ -218,11 +343,20 @@ private:
     // original configured delay afterwards, it would silently corrupt the
     // tank's recirculating path on the very next sample -- exactly the kind
     // of regression this additive feature must not reintroduce.
-    float peekTap (DelayLineType& delay, float offsetSamples);
+    // Slice 2: the configured delay to restore is passed in (the branch's
+    // current *Samples value) rather than read back with getDelay(). At an
+    // integer delay the two are identical, but at the fractional delays
+    // Size produces, getDelay()'s frac + int re-sum can round by an ulp and
+    // the restore would drift.
+    float peekTap (DelayLineType& delay, float offsetSamples, float configuredDelay);
 
     void prepareBranch (TankBranch& branch, const juce::dsp::ProcessSpec& monoSpec,
                          float allpass1Ms, float delay1Ms, float allpass2Ms, float delay2Ms);
     void resetBranch (TankBranch& branch);
+
+    // Scales every tank line and output tap to `size` (see setSize()).
+    // Only setDelay() calls and multiplies -- allocation-free.
+    void applySize (float size);
 
     //==============================================================================
     // Input diffuser: 4 series allpass stages, mono, applied once before the
@@ -242,6 +376,29 @@ private:
     static constexpr float branchBDelay1Ms   = 141.6752f;
     static constexpr float branchBAllpass2Ms = 89.2451f;
     static constexpr float branchBDelay2Ms   = 106.2837f;
+
+    // L_half for the RT60 mapping (see setDecaySeconds()): the gain is
+    // applied on the B -> A and on the A -> B cross-feed, so one full loop
+    // (branch A + branch B = 725.41 ms at Size 1) sees it twice. Each
+    // application covers the mean branch length, A 357.69 ms and B
+    // 367.71 ms -> 362.70 ms. Derived from the constants above, so it
+    // cannot drift from them.
+    static constexpr double halfLoopSeconds = 0.0005 * ((double) branchAAllpass1Ms + (double) branchADelay1Ms
+                                                         + (double) branchAAllpass2Ms + (double) branchADelay2Ms
+                                                         + (double) branchBAllpass1Ms + (double) branchBDelay1Ms
+                                                         + (double) branchBAllpass2Ms + (double) branchBDelay2Ms);
+
+    // Size glide time (section 9.2: per sample, ~300 ms, linear). Linear
+    // rather than multiplicative so the largest delay change per sample
+    // (and so the Thiran rate discussed at ModulatedDelayLineType) is a
+    // fixed, known bound: 1.5 * length / 300 ms for a full 0.5 <-> 2 move.
+    static constexpr double sizeRampSeconds = 0.3;
+
+    // User Modulation: full scale 1 ms (section 9.3), twice Infinite's
+    // modDepthMs. 50 ms smoothing, the same ramp the processor's block-rate
+    // smoothers use, so a knob move cannot step the depth.
+    static constexpr float maxModulationDepthMs = 1.0f;
+    static constexpr double modulationRampSeconds = 0.05;
 
     static constexpr float branchAllpass1Feedback = -0.7f;
     static constexpr float branchAllpass2Feedback = 0.5f;
@@ -266,7 +423,8 @@ private:
     // "sounds like a delay, not a reverb").
     static constexpr float defaultDampingCoefficient = 0.0005f;
 
-    // Bumped from 0.5f to 0.7f, then walked back down to 0.6f during Phase 2
+    // Decay-gain history (the former fixed defaultDecayGain constant, removed
+    // in slice 2): bumped from 0.5f to 0.7f, then walked back down to 0.6f during Phase 2
     // (plain, unshifted tank): a live listening pass after the 0.7f bump
     // reported still hearing distinct spaced-out echoes -- 0.7f means the
     // ~725ms full cross-feed round trip needs ~10 repeats to decay past
@@ -292,25 +450,29 @@ private:
     // range, meaningfully higher than Phase 2/3's 0.6f, and re-verified
     // stable (bounded + decays to silence with real margin) with the
     // shifter in the loop via ShimmerReverbEngineTests before shipping.
-    static constexpr float defaultDecayGain = 0.7f;
+    //
+    // Slice 2 (2026-10-11): the fixed gain became Decay in seconds (see
+    // setDecaySeconds()); defaultDecaySeconds = 7.0 s maps to g = 0.6993 at
+    // Size 1, i.e. this history's 0.7f to within 0.1%. The golden-hash tests
+    // reproduce 0.7f exactly via decaySecondsForGain (0.7f, 1.0f).
 
     // Default for the new independent shimmer-injection gain (see
-    // setShimmerFeedbackGain()). 1.0f matches
+    // setShimmerAmountGain()). 1.0f matches
     // ShimmerReverbEngine::defaultShimmerAmount's own default so "shimmer at
     // full strength" is the out-of-the-box behavior, same convention as
     // decayGain/dampingCoefficient's defaults mirroring their APVTS
     // parameter defaults.
-    static constexpr float defaultShimmerFeedbackGain = 1.0f;
+    static constexpr float defaultShimmerAmountGain = 1.0f;
 
     // Structural-fix correction (docs/shimmer-reverb-implementation-plan.md's
     // Phase 8 note, 2026-08-18, second pass): caps how much of the tank's
     // recirculating budget the shimmer path can ever claim, so the COMBINED
     // total feedback gain reaching the tank (see processSample()) stays
     // bounded by decayGain alone -- the same ceiling Phase 4 already
-    // validated safe (decayGain <= 0.85) -- regardless of shimmerFeedbackGain's
+    // validated safe (decayGain <= 0.85) -- regardless of shimmerAmountGain's
     // value. The first attempt at this fix (now corrected) let decayGain and
-    // shimmerFeedbackGain add independently, so the EFFECTIVE combined loop
-    // gain could reach decayGain + shimmerFeedbackGain (e.g. ~1.7 at
+    // shimmerAmountGain add independently, so the EFFECTIVE combined loop
+    // gain could reach decayGain + shimmerAmountGain (e.g. ~1.7 at
     // defaults) -- well past the validated-safe ceiling, kept only
     // technically bounded by SafetyLimiter's hard clipping, which is exactly
     // what produced the reported "oscillating, unnatural, psychedelic"
@@ -334,8 +496,8 @@ private:
     // "Shimmer Sustain" task: promoted from a compile-time constant to a
     // plain, runtime-adjustable instance member (see setMaxShimmerBlendWeight()
     // below) so the user can directly control how long the shimmer layer
-    // itself sustains, independent of decayGain (Feedback) and
-    // shimmerFeedbackGain (Shimmer Amount). The safety argument above --
+    // itself sustains, independent of decayGain (Decay) and
+    // shimmerAmountGain (Shimmer Amount). The safety argument above --
     // shimmerWeight + plainWeight == 1.0 exactly, for ANY value in [0, 1] --
     // holds unchanged regardless of who sets this value or when.
     float maxShimmerBlendWeight = 0.85f;
@@ -456,8 +618,8 @@ private:
     // i.e. ~0.5 ms), which smears those modes so no single one can build up
     // coherently. Applied to allpass1 of BOTH branches with incommensurate
     // rates and a 90-degree phase offset so the two branches never detune
-    // in lockstep. The delay lines are Lagrange3rd, so the fractional,
-    // per-sample-changing read delay is interpolated smoothly.
+    // in lockstep. allpass1's line is Thiran (see ModulatedDelayLineType), so
+    // the fractional, per-sample-changing read delay keeps a flat magnitude.
     static constexpr float modDepthMs = 0.5f;
     static constexpr float modRateHzA = 0.5f;
     static constexpr float modRateHzB = 0.7f;
@@ -515,6 +677,65 @@ private:
     static constexpr float levelReleaseSeconds = 0.5f;
     static constexpr float levelGainSmoothingSeconds = 0.1f;
 
+    // (c2) Hold-level rider (2026-11-15, audit fix 8). The rider above only
+    // CUTS, so a tail below the ceiling was left to whatever the loop did
+    // (swell to ~-14 dB from a quiet source, or decay to nothing at small
+    // shifts). With Infinite on the tail must hold the level it was played
+    // at. While input plays, a target T tracks a mean-|x| envelope of the
+    // OUTPUT taps (mean of the left and right sets). Once the INPUT envelope
+    // has stayed under holdInputGate for holdLatchSeconds T is latched, and
+    // a two-sided regulator steers the envelope back to T:
+    //   g = clamp (gI * (T / env)^holdProportionalExponent, holdGainMin, holdGainMax)
+    // gI is a slow log-domain integrator (holdIntegralSeconds, clamped to the
+    // same bounds = anti-windup, and not integrated upward while the ceiling
+    // cut is active) that removes the steady-state error. The proportional
+    // exponent stays below 1 because the plant is an integrator in the log
+    // domain with a one-pass delay. The boost bound is small on purpose: g
+    // scales the loop gain on every pass, a +12 dB cap would run away. Boost
+    // is scaled by (1 - freezeAmount); the cut (g < 1) is kept, and the
+    // ceiling cut (levelCeiling, on feedbackFromB) always wins over a boost.
+    // T is fixed at latch time and never re-tracks a decayed tail, so the
+    // noise floor is never amplified: boost is also off when env < T *
+    // holdBoostFloorRatio, and a dead-silent start has nothing to latch.
+    // Input resuming above the gate unlatches and T re-tracks;
+    // infiniteAmount reaching 0 resets everything. Updated every
+    // holdUpdateInterval samples (log2/exp2 are not per-sample).
+    //
+    // Why the OUTPUT taps and not feedbackFromB (which the ceiling cut uses):
+    // right after a burst the energy is unevenly spread over the lines, so
+    // output/feedbackFromB drifts by ~3 dB while the tail settles. A target
+    // captured on feedbackFromB held a tail 3.4 dB below the output level
+    // just after the latch (tank probe, weight 0.55, rho 1.0). For the same
+    // reason T is NOT clamped to levelCeiling (different units); the cut
+    // always wins in processSample()'s min() instead.
+    //
+    // Tuned 2026-11-15 on the Infinite hold probes (DattorroTankTests: 7
+    // coherent-copy cases + release/re-engage/Freeze; ShimmerReverbEngine-
+    // CascadeTests: 9 engine cases). L0 = output RMS over 2.3-3.3 s, "dev" =
+    // worst RMS deviation from L0 at 10-15/30-35/55-60 s, "win" = worst 1 s
+    // RMS window above L0 (bounds: dev 2 dB, win 3 dB):
+    //   env 0.5 s on feedbackFromB, k 0.25, latch 0.3 -> tank quiet dev -3.5 dB (see above)
+    //   env 0.15 s on output, k 0.25, latch 0.3 -> tank dev -1.7 / win 1.6; engine +0.5 st noise
+    //                                              dev +2.2 / win 5.5 (T taken at the transient peak)
+    //   same, gMax 1.2 or tau 10 s                  -> engine win still 5.2 / 5.5 (no help; tau 20 s: chord -3.4 dB)
+    //   latch 0.5, k 0.25                           -> engine only +0.5 st noise win 4.0
+    //   latch 0.8, k 0.25                           -> engine all pass; tank win 3.5 / 3.2 (T taken late, tail still swelling)
+    //   latch 0.8, k 0.5                            -> engine dev <= 1.4 / win <= 2.1; tank dev 0.2 / win 2.5
+    //   latch 0.5, k 0.5 (CHOSEN)                   -> engine dev <= 1.3 (2.5 on the +12 st chord) / win <= 2.4;
+    //                                                  tank dev <= 1.0 / win <= 1.5
+    //   latch 0.5, k 0.7                            -> same quality, chord -2.3; not worth the extra loop gain
+    static constexpr float holdInputGate = 3.1623e-4f;       // -70 dBFS
+    static constexpr float holdInputEnvelopeSeconds = 0.05f; // input follower
+    static constexpr float holdLatchSeconds = 0.5f;          // input quiet this long => latch T
+    static constexpr float holdEnvelopeSeconds = 0.15f;      // symmetric mean-|x| follower of the output taps
+    static constexpr float holdProportionalExponent = 0.5f;  // k
+    static constexpr float holdGainMin = 0.5f;
+    static constexpr float holdGainMax = 1.41f;              // ~ +3 dB
+    static constexpr float holdIntegralSeconds = 5.0f;       // tau of gI
+    static constexpr float holdBoostFloorRatio = 1.0e-3f;    // no boost when env < T * this
+    static constexpr float holdMinTarget = 1.0e-6f;          // below this there is nothing to latch
+    static constexpr int holdUpdateInterval = 32;
+
     // Real Dattorro (1997) output tap formula -- replaces an earlier
     // ad-hoc scheme (a dominant 0.5f*(tankA_out+tankB_out) "main path" plus
     // small extra peeks) that still let the two full-branch-length taps
@@ -554,12 +775,50 @@ private:
     static constexpr float outputTapRightBAllpass2Ms = 11.2563f;  // node 55_59 -335
     static constexpr float outputTapRightBDelay2Ms   = 4.0657f;   // node 59_63 -121
 
+    // Slice 2: the 14 tap offsets as one table, so applySize() can scale
+    // them in a loop. Order = the order processSample() sums them in.
+    enum OutputTap
+    {
+        tapBDelay1a, tapBDelay1b, tapBAllpass2, tapBDelay2, tapADelay1, tapAAllpass2, tapADelay2,
+        tapRightADelay1a, tapRightADelay1b, tapRightAAllpass2, tapRightADelay2, tapRightBDelay1, tapRightBAllpass2, tapRightBDelay2,
+        numOutputTaps
+    };
+
+    static constexpr std::array<float, numOutputTaps> outputTapMs {
+        outputTapBDelay1aMs, outputTapBDelay1bMs, outputTapBAllpass2Ms, outputTapBDelay2Ms,
+        outputTapADelay1Ms, outputTapAAllpass2Ms, outputTapADelay2Ms,
+        outputTapRightADelay1aMs, outputTapRightADelay1bMs, outputTapRightAAllpass2Ms, outputTapRightADelay2Ms,
+        outputTapRightBDelay1Ms, outputTapRightBAllpass2Ms, outputTapRightBDelay2Ms
+    };
+
     std::array<AllpassStage, numDiffuserStages> diffuserStages;
     TankBranch branchA, branchB;
 
     float dampingCoefficient = defaultDampingCoefficient;
-    float decayGain = defaultDecayGain;
-    float shimmerFeedbackGain = defaultShimmerFeedbackGain;
+    float shimmerAmountGain = defaultShimmerAmountGain;
+
+    // Blend law (see setShimmerBlendLaw()). 0.0f default = the linear law,
+    // bit-identical to the pre-2026-10-24 tank.
+    float shimmerEqualPowerAmount = 0.0f;
+
+    // Decay (see setDecaySeconds()). decayGain is derived, recomputed at the
+    // top of processSample() whenever decayGainDirty is set (a new Decay, or
+    // a Size step -- every sample while Size glides, one std::pow each,
+    // only during the 300 ms glide). Per sample rather than per block so g
+    // tracks the line lengths exactly and RT60 cannot wobble mid-glide.
+    float decaySeconds = defaultDecaySeconds;
+    float decayGain = decayGainFor (defaultDecaySeconds, defaultSize);
+    bool decayGainDirty = true;
+
+    // Size (see setSize()): smoothedSize is the per-sample ramp, appliedSize
+    // the value the lines were last scaled to.
+    juce::SmoothedValue<float> smoothedSize { defaultSize };
+    float appliedSize = defaultSize;
+
+    // Modulation (see setModulation()): 0..1, ramped per sample;
+    // userModDepthSamples is maxModulationDepthMs at the live sample rate.
+    juce::SmoothedValue<float> smoothedModulation { defaultModulation };
+    float userModDepthSamples = 0.0f;
 
     // Phase 9 Freeze crossfade weight (see setFreezeAmount() and
     // frozenDecayGain above); 0.0f default means processSample()'s
@@ -570,8 +829,6 @@ private:
     // Infinite mode state (see setInfiniteAmount() and the infinite*/mod*/
     // level* constants above). All reset in prepare()/reset().
     juce::SmoothedValue<float> smoothedInfiniteAmount;
-    float allpass1BaseDelayA = 0.0f;         // fixed, unmodulated allpass1 delays in samples
-    float allpass1BaseDelayB = 0.0f;
     float modDepthSamples = 0.0f;
     float modPhaseA = 0.0f;                  // radians; B starts at modPhaseOffsetB
     float modPhaseB = 0.0f;
@@ -582,6 +839,24 @@ private:
     float levelAttackCoeff = 0.0f;
     float levelReleaseCoeff = 0.0f;
     float levelGainCoeff = 0.0f;
+
+    // Hold-level rider state (see the hold* constants). holdRegulatorGain is
+    // exactly 1.0f whenever the rider is inactive.
+    void updateHoldRegulator (float infiniteAmount);
+    float inputEnvelope = 0.0f;
+    float holdEnvelope = 0.0f;
+    float lastOutputAbs = 0.0f;          // 0.5 * (|left| + |right|) of the previous sample
+    float holdInputCoeff = 0.0f;
+    float holdEnvelopeCoeff = 0.0f;
+    float holdIntegralStep = 0.0f;       // holdUpdateInterval / (fs * tau)
+    int holdLatchSamples = 0;
+    int holdQuietSamples = 0;
+    int holdCounter = 0;
+    bool holdLatched = false;
+    float holdTarget = 0.0f;
+    float holdLog2Target = 0.0f;
+    float holdLog2Integral = 0.0f;
+    float holdRegulatorGain = 1.0f;
 
     // Figure-eight cross-feed: branch B's output from the previous sample,
     // fed back into branch A's input this sample by default (via the
@@ -594,22 +869,10 @@ private:
     // note).
     float feedbackFromB = 0.0f;
 
-    // Output tap offsets converted to samples at the live sample rate,
-    // computed once in prepare() rather than every sample.
-    float outputTapBDelay1aSamples = 0.0f;
-    float outputTapBDelay1bSamples = 0.0f;
-    float outputTapBAllpass2Samples = 0.0f;
-    float outputTapBDelay2Samples = 0.0f;
-    float outputTapADelay1Samples = 0.0f;
-    float outputTapAAllpass2Samples = 0.0f;
-    float outputTapADelay2Samples = 0.0f;
-    float outputTapRightADelay1aSamples = 0.0f;
-    float outputTapRightADelay1bSamples = 0.0f;
-    float outputTapRightAAllpass2Samples = 0.0f;
-    float outputTapRightADelay2Samples = 0.0f;
-    float outputTapRightBDelay1Samples = 0.0f;
-    float outputTapRightBAllpass2Samples = 0.0f;
-    float outputTapRightBDelay2Samples = 0.0f;
+    // Output tap offsets in samples at the live sample rate: the Size-1
+    // values from prepare(), and those times the applied Size.
+    std::array<float, numOutputTaps> outputTapBaseSamples {};
+    std::array<float, numOutputTaps> outputTapSamples {};
 
     // See getLastRightOutput().
     float lastRightOutput = 0.0f;

@@ -132,8 +132,10 @@ public:
     void prepare (const juce::dsp::ProcessSpec& spec);
     void reset();
 
-    // Recomputes the cached pitchRatio; safe to call at any time, not just
-    // in prepare() -- Phase 5 will call this from a parameter listener.
+    // Recomputes the cached pitchRatio; safe to call at any time (it is
+    // called from the parameter path). Each grain latches the ratio at its own
+    // launch, so a change takes effect on the next grain launched -- fully
+    // audible up to ~one hop later -- and never displaces live grains.
     void setPitchShiftSemitones (float semitones);
 
     // For inspection/testing of the cached ratio -- this class owns no
@@ -253,6 +255,13 @@ private:
         // always relaunching at the fixed nominal baseDelaySamples with no
         // regard for the phase of the signal they're crossfading against.
         float baseDelayOffset = 0.0f;
+
+        // Pitch ratio latched from pitchRatio at this grain's launch and used
+        // for its whole lifetime (audit fix 7): a later setPitchShiftSemitones()
+        // only affects grains launched afterwards, so live grains never see
+        // their read position jump. Order matters -- launches use aggregate
+        // init {active, age, baseDelayOffset, ratio}.
+        float ratio = 1.0f;
     };
 
     // Fraction of a grain's lifetime spent ramping in (at launch) and out
@@ -365,7 +374,8 @@ private:
     static constexpr float freezeDriftDepthMs = 0.4f;
     static constexpr float freezeDriftRateHz = 0.15f;
 
-    // grainDelaySamples(elapsed) = baseDelaySamples - elapsed * (pitchRatio - 1.0f)
+    // grainDelaySamples(elapsed, ratio) = baseDelaySamples - elapsed * (ratio - 1.0f)
+    // (ratio is the grain's own latched Grain::ratio, not the live pitchRatio.)
     // This makes the delay change by exactly (1 - pitchRatio) per sample as a
     // grain ages by 1 sample per sample -- precisely the rate needed for the
     // read pointer to move through recorded buffer-content at pitchRatio x
@@ -374,7 +384,7 @@ private:
     // accumulated with +=) so drift can't creep in. Every grain in both
     // pools calls this same function -- it has no dependency on which pool a
     // grain belongs to.
-    float grainDelaySamples (int elapsed) const noexcept;
+    float grainDelaySamples (int elapsed, float ratio) const noexcept;
 
     // Raised-cosine ramp: 0 at elapsed=0 ramping to 1 over the first
     // crossfadeSamplesInt samples (masking a new grain's read-position
