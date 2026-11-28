@@ -5642,3 +5642,101 @@ public:
 };
 
 static ShimmerReverbEngineTailSustainTests shimmerReverbEngineTailSustainTests;
+
+//==============================================================================
+// Damping knob range (plugin max raw a = 0.7, see Parameters.cpp): the widest
+// one-pole damping the knob can ask for must not destabilise the shimmer loop.
+// Full engine, +12 st, Shimmer Amount 1, Shimmer Feedback 1, Decay at its
+// maximum, sustained noise.
+class ShimmerReverbEngineDampingExtremeTests : public juce::UnitTest
+{
+public:
+    ShimmerReverbEngineDampingExtremeTests() : juce::UnitTest ("ShimmerReverbEngineDampingExtremeTests", "DSP") {}
+
+    void runTest() override
+    {
+        constexpr double sampleRate = 44100.0;
+        constexpr int blockSize = 512;
+        constexpr int numChannels = 2;
+
+        auto runExtreme = [&] (const char* label, double seconds, bool infinite, bool freeze, juce::int64 seed)
+        {
+            ShimmerReverbEngine engine;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) blockSize, (juce::uint32) numChannels };
+            engine.prepare (spec);
+            engine.reset();
+            engine.setPitchShiftSemitones (12.0f);
+            engine.setShimmerAmount (1.0f);
+            engine.setShimmerFeedback (1.0f);
+            engine.setDecaySeconds (DattorroTank::maxDecaySeconds);
+            engine.setDamping (0.7f);
+            engine.setMix (1.0f);
+            engine.setInfiniteAmount (infinite ? 1.0f : 0.0f);
+
+            const int numBlocks = (int) (seconds * sampleRate / blockSize);
+            const int freezeBlock = numBlocks / 4;
+            const int lastSecondStart = numBlocks - (int) (sampleRate / blockSize);
+            juce::AudioBuffer<float> buffer (numChannels, blockSize);
+            juce::Random random (seed);
+            float maxPeak = 0.0f;
+            int numNonFinite = 0;
+            double lastSumSquares = 0.0;
+            int lastCount = 0;
+
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                if (freeze && b == freezeBlock)
+                    engine.setFreezeAmount (1.0f);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                        buffer.setSample (ch, i, random.nextFloat() * 0.6f - 0.3f);
+
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float v = buffer.getSample (ch, i);
+                        if (! std::isfinite (v))
+                            ++numNonFinite;
+                        else
+                        {
+                            maxPeak = juce::jmax (maxPeak, std::abs (v));
+                            if (b >= lastSecondStart)
+                            {
+                                lastSumSquares += (double) v * v;
+                                ++lastCount;
+                            }
+                        }
+                    }
+            }
+
+            const float lastRms = (float) std::sqrt (lastSumSquares / (double) juce::jmax (1, lastCount));
+            logMessage (juce::String (label) + ", Damping 0.7, Feedback 1: peak " + juce::String (maxPeak, 4)
+                            + ", last-second RMS " + juce::String (lastRms, 5));
+            expectEquals (numNonFinite, 0, juce::String (label) + ": non-finite samples");
+            expect (maxPeak <= 2.0f, juce::String (label) + ": peak exceeded 2.0 (" + juce::String (maxPeak, 4) + ")");
+            return lastRms;
+        };
+
+        beginTest ("Damping 0.7 + Feedback 1 + Decay max, noise: finite and bounded (peak <= 2.0) over 60 s");
+        {
+            runExtreme ("Plain", 60.0, false, false, 90817);
+        }
+
+        beginTest ("Damping 0.7 + Infinite: finite, bounded (peak <= 2.0) and still audible after 90 s (hold rider not starved)");
+        {
+            const float rms = runExtreme ("Infinite", 90.0, true, false, 90818);
+            expect (rms > 1.0e-3f, "Infinite output went near-silent with Damping 0.7: " + juce::String (rms, 6));
+        }
+
+        beginTest ("Damping 0.7 + Infinite + Freeze: finite and bounded (peak <= 2.0) over 60 s");
+        {
+            runExtreme ("Infinite+Freeze", 60.0, true, true, 90819);
+        }
+    }
+};
+
+static ShimmerReverbEngineDampingExtremeTests shimmerReverbEngineDampingExtremeTests;

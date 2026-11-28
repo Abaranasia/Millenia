@@ -558,6 +558,35 @@ ShimmerReverbEngine, Cascade T6, FreezeCrossfade, Space and DattorroTank "Infini
 
 - `StateSchemaTests`: Mix default is 0.4, a fresh APVTS reads 0.4, and loading a state without `mix` resets a moved Mix to that 0.4 default (`APVTS::replaceState` resets parameters missing from the state).
 
+## 2026-11-28 — Damping knob range widened to 0..0.7
+
+### What changed
+
+- The `damping` APVTS range went from `0..0.3` (centre 0.08) to `0..0.7` with the centre at a = 0.5, in `Parameters.cpp`. Default stays 0.0005; the stored value is still the one-pole coefficient; parameter ID and version are unchanged (nothing has shipped, no migration). Engine and tank code are untouched, so golden hashes at the default are bit-identical.
+- Why: measured at 44.1 kHz, Decay 7 s, Size 1, +12 st, the old maximum cost only -2.3 dB per loop pass at 8 kHz and -5.4 dB at Nyquist; the steady white-noise spectrum moved at most 3.4 dB at 16 kHz and 1 dB at 4 kHz; the tail RT60 at 1k/4k/8k/16k went from 6.6/6.3/5.8/5.7 s to 6.9/5.5/3.8/2.7 s. No knob position was audible, and at Size 0.5 Damping is the only lever on the dense, flat tail.
+
+### Measurements (engine, 44.1 kHz, Size 1, Decay 7 s, +12 st)
+
+| Raw a | RT60 1k/4k/8k/16k (s) | 8 kHz per-pass gain | -3 dB corner |
+|---|---|---|---|
+| 0.0005 (default) | 6.6 / 6.3 / 5.8 / 5.7 | 0.0 dB | above Nyquist |
+| 0.3 (old max) | 6.9 / 5.5 / 3.8 / 2.7 | -2.3 dB | 9.7 kHz |
+| 0.5 (new centre) | 6.6 / 4.6 / 2.7 / 1.9 | -5.2 dB | 5.1 kHz |
+| 0.7 (new max) | 5.9 / 3.1 / 1.8 / 1.5 | -10.0 dB | 2.5 kHz |
+
+At 48 kHz the same values give corners of 5.5 kHz (0.5) and 2.75 kHz (0.7), RT60 6.1 / 3.3 / 1.9 / 1.45 s at 0.7. The coefficient is not sample-rate compensated in the tank, so the corner scales with the sample rate.
+
+### Tests
+
+- `StateSchemaTests`: Damping range 0..0.7, centre maps to 0.48-0.52, default 0.0005, round trip of 0.5 and 0.7.
+- `DattorroTankSpaceTests`: 8 kHz and 16 kHz RT60 fall strictly across a = default, 0.25, 0.5, 0.6, 0.7 (bare tank, Size 1, 7 s); at 0.7 the 8 kHz RT60 is at most 45% of the 1 kHz one, 16 kHz at most 1.8 s, 1 kHz keeps 70% of its default decay. `measureRt60` gained an optional damping argument.
+- `ShimmerReverbEngineDampingExtremeTests`: Damping 0.7, Feedback 1, Amount 1, +12 st, Decay max stays finite with peak <= 2.0 (plain 60 s, Infinite 90 s and still audible, Infinite + Freeze 60 s).
+
+### Still open
+
+- Needs a listening pass at the new centre and maximum.
+- The knob's default sits at the far left, so the first few percent of travel jump from "off" to a ~0.2 coefficient.
+
 ## References
 
 - [`shimmer-reverb-implementation-plan.md`](./shimmer-reverb-implementation-plan.md) — the plan this journal tracks against

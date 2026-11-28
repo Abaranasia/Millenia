@@ -96,39 +96,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         0.55f));
 
     // Damping coefficient for DattorroTank's one-pole leaky-integrator
-    // damping filter, y[n] = a*y[n-1] + (1-a)*x[n]. Range fixed 2026-08-22
-    // (by-ear report: "the damping dial provides no noticeable difference") --
-    // the previous 0.0..0.05 range was a real bug, not just an over-cautious
-    // choice: the coefficient-to-cutoff relationship this filter actually
-    // implements is fc = -(sampleRate / 2*pi) * ln(a) (the same relationship
-    // DattorroTank.h's defaultDampingCoefficient comment already uses to
-    // derive "an 8000Hz cutoff maps to a~=0.32"). At the OLD range's own
-    // maximum (0.05), fc ~= 21kHz; at the default (0.0005), fc is already
-    // above Nyquist (~53kHz) -- so the entire old slider only ever swept
-    // cutoff from "no filtering" to "still only rolling off content above
-    // 21kHz," nowhere near the ~8kHz reference point where damping actually
-    // becomes audible. Measured directly (not just derived): a diagnostic
-    // spectral-tilt test (DattorroTankTests.cpp, "Damping's APVTS range
-    // produces almost no audible spectral difference") found the old range
-    // covered only ~20% of the brightness swing between the default and that
-    // ~0.32 reference. New range extends the maximum to 0.3f -- just under
-    // the documented "sounds like a delay, not a reverb" 0.32 extreme, so the
-    // full knob throw actually reaches a genuinely dark/damped tail at full
-    // clockwise, not just a barely-perceptible one. The default (0.0005f,
-    // "bright continuous wash") was left UNCHANGED then -- only the upper
-    // bound was wrong. Still a REASONED value, not an ear-tuned final one --
-    // an actual listening pass across the new range is still open.
+    // damping filter, y[n] = a*y[n-1] + (1-a)*x[n] (DC gain 1, stable for
+    // any |a| < 1), applied twice per loop pass. The stored value is the
+    // coefficient itself; the filter's -3 dB corner is
+    // acos ((1 + a^2 - 2 (1-a)^2) / (2a)) * fs / 2pi (a ~= 0.3 -> 9.7 kHz,
+    // 0.5 -> 5.1 kHz, 0.7 -> 2.5 kHz at 44.1 kHz).
     //
-    // Knob law (2026-11, supersedes the 0.3 skew this range originally
-    // shipped with): the stored value is still the coefficient `a`, but
-    // with that 0.3 skew ~58% of the travel sat above 21 kHz at 44.1 kHz
-    // (centre -> a ~= 0.03 -> ~25 kHz), i.e. inaudible. The skew now puts the
-    // knob centre at a = 0.08 (fc ~= 17.8 kHz at 44.1 kHz). Range, default and
-    // the stored value's meaning are unchanged; only the normalized position
-    // of a given value moves (host automation lanes shift, raw values don't).
+    // History: 0..0.05 (swept only content above 21 kHz), then 0..0.3
+    // (2026-08-22), then a 0.08 knob centre (2026-11). Measured 2026-11-28
+    // at 44.1 kHz, Size 1, Decay 7 s, +12 st, that 0..0.3 travel was still
+    // inaudible: at the maximum the per-pass gain was only -2.3 dB at 8 kHz
+    // and -5.4 dB at Nyquist, the steady white-noise spectrum moved at most
+    // 3.4 dB at 16 kHz and 1 dB at 4 kHz, and the tail RT60 at 1k/4k/8k/16k
+    // went from 6.6/6.3/5.8/5.7 s (default) to only 6.9/5.5/3.8/2.7 s.
+    //
+    // Current law: range 0..0.7, centre a = 0.5. At 0.7 the engine tail has
+    // RT60 5.9/3.1/1.8/1.5 s at 1k/4k/8k/16k (8 kHz at ~30% of the 1 kHz
+    // time), so the whole travel is audible and Damping can tame a dense
+    // tail at small Size. The centre gives about half the maximum high-
+    // frequency loss per loop pass in dB (8 kHz: -5.2 dB at 0.5 vs -10.0 dB at
+    // 0.7). The default stays 0.0005 ("bright continuous wash", effectively no
+    // damping, bit-identical to the engine/tank default); it sits at the far
+    // left of the knob. Only the knob's range and skew changed: the stored
+    // value is still the coefficient and the parameter ID/version are
+    // unchanged (nothing has shipped, so no migration).
     {
-        juce::NormalisableRange<float> dampingRange (0.0f, 0.3f);
-        dampingRange.setSkewForCentre (0.08f);
+        juce::NormalisableRange<float> dampingRange (0.0f, 0.7f);
+        dampingRange.setSkewForCentre (0.5f);
         layout.add (std::make_unique<juce::AudioParameterFloat> (
             juce::ParameterID { ParamIDs::damping, 1 }, "Damping", dampingRange, 0.0005f));
     }

@@ -57,6 +57,8 @@ Defaults checked in `Source/Parameters.cpp`: Damping 0.0005 on 0..0.3 with skew 
 
 **Update (2026-11-21):** the Damping skew of 0.3 quoted above is superseded on `fix/damping-knob-range`: the knob centre now maps to a = 0.08 (about 17.8 kHz at 44.1 kHz) via `setSkewForCentre`. Range, default and stored values are unchanged, so the measurements in this document still hold.
 
+**Update (2026-11-28):** the `0..0.3` range and the 0.08 centre quoted above are superseded on `fix/damping-stronger-range`: the knob now spans `0..0.7` with its centre at a = 0.5 (`Parameters.cpp`). Measured with the old range at 44.1 kHz, Decay 7 s, Size 1, +12 st, the knob maximum cost only -2.3 dB per loop pass at 8 kHz and -5.4 dB at Nyquist, and the tail RT60 at 1k/4k/8k/16k went 6.6/6.3/5.8/5.7 s (default) to 6.9/5.5/3.8/2.7 s, so no position was audible. New law, same engine: at 0.7 the RT60 is 5.9/3.1/1.8/1.5 s (8 kHz at about 30% of 1 kHz), at the centre 6.6/4.6/2.7/1.9 s. The default (0.0005) and the engine/tank behaviour are unchanged. The diagnostic test named `0..0.05` in `DattorroTankTests.cpp` is a historical measurement and still stale in its title.
+
 ## 3. How the Tone filter works since fix 9
 
 `computeShimmerToneCutoffHz()` (`ShimmerReverbEngine.cpp:246-264`): `cap = (fs/4) / max(ratio, 1)`; `scale = min(1, cap / 10 kHz)`; `cutoff = Tone * scale`. At 44.1 kHz and +12 st: cap 5512.5 Hz, scale 0.55125, default cutoff **2756 Hz**, Off cutoff 5512 Hz. Before fix 9 the default was `min(5000, cap)` = 5000 Hz, so **fix 9 moved the default shimmer cutoff down by almost an octave**. That may be the change the user hears as "duller" (hypothesis; not A/B-tested).
