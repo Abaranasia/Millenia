@@ -587,7 +587,7 @@ At 48 kHz the same values give corners of 5.5 kHz (0.5) and 2.75 kHz (0.7), RT60
 - Needs a listening pass at the new centre and maximum.
 - The knob's default sits at the far left, so the first few percent of travel jump from "off" to a ~0.2 coefficient.
 
-## 2026-11-28 — Size glide is rate-limited in the log domain
+## 2026-11-28 â€” Size glide is rate-limited in the log domain
 
 ### What changed
 

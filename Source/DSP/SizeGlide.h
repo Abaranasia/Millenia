@@ -29,8 +29,9 @@
 // overshoots the target, and because v itself is smoothed it starts and stops
 // without a velocity discontinuity (no hard ramp edge). When the saturated
 // phase hands over to the linear one the state (e = maxRate / k, v = maxRate)
-// has a strictly positive critically-damped coefficient, so the error never
-// crosses zero: the glide is monotonic.
+// lies on the critically-damped trajectory (a single repeated pole, so the
+// error is a decaying exponential times a linear term that cannot change
+// sign), so the error never crosses zero: the glide is monotonic.
 //
 // Real-time safety: no allocation, no locks; one std::exp per sample while
 // moving and nothing but a flag test while idle. While idle next() returns the
@@ -99,6 +100,20 @@ public:
     }
 
 private:
+    // Idle gate: the glide lands exactly on the target and goes idle only when
+    // BOTH tests pass.
+    //  - snapDistance (1e-6, ln units, i.e. a relative size error of 1e-6) is
+    //    far below 1/100 of a sample of delay for any delay under ~10^4
+    //    samples (1e-6 * 10^4 = 0.01).
+    //  - snapRate (1e-4, ln units per second) is the speed gate: the snap is a
+    //    discontinuity, so it must not fire while the glide is still moving
+    //    appreciably (e.g. a retarget that flies past the new target). At
+    //    1e-4 /s the residual bend is ~0.17 cents. Without it the glide could
+    //    snap with leftover velocity, or never settle into the idle state.
+    // Retuning: keep snapDistance * 10^4 samples well under 0.01, and keep
+    // snapRate well below maxRate yet above snapDistance / (4 * tau) (the
+    // speed the critically-damped tail has at snapDistance), otherwise the
+    // pair is never satisfied together and the glide chases the target.
     static constexpr double snapDistance = 1.0e-6;
     static constexpr double snapRate = 1.0e-4;
 

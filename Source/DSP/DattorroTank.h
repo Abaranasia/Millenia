@@ -99,15 +99,15 @@ public:
     // Slice 2 (section 9.2): scales the tank allpass/delay lengths of both
     // branches and all 14 output taps by `newSize` (0.5..2), leaving the
     // input diffusers alone. Glided per sample by a log-domain, rate-limited
-    // SizeGlide (see sizeGlideMaxRate below and SizeGlide.h), so the tail's
+    // SizeGlide (see defaultSizeGlideMaxRate below and SizeGlide.h), so the tail's
     // pitch bend is bounded however fast or far the knob moves. Every line
     // is allocated for maxSize in prepare(); a Size change only calls
     // setDelay(). Not clamped here; the engine clamps.
     void setSize (float newSize);
 
-    // Size glide (see SizeGlide.h): ln(size) moves at most sizeGlideMaxRate
-    // per second, with a critically-damped end shape of time constant
-    // sizeGlideTauSeconds.
+    // Size glide (see SizeGlide.h): ln(size) moves at most
+    // defaultSizeGlideMaxRate per second, with a critically-damped end shape
+    // of time constant defaultSizeGlideTauSeconds.
     //
     // The tradeoff is knob response lag versus pitch bend. Moving Size
     // resamples the audio circulating in the loops, bending the wet tail by
@@ -115,17 +115,11 @@ public:
     // ~+165 / ~-182 cents (shrinking / growing), and a 1 -> 0.5 move
     // (ln 2 = 0.693) takes ~7 s plus the end shape. A faster rate answers the
     // knob sooner and bends the tail harder; a slower one is gentler and
-    // laggier. The old 300 ms linear ramp bent a 1 -> 0.5 jump by +400 cents
+    // laggier. The old 300 ms linear ramp bent a 1 -> 0.5 jump by +413 cents
     // and more. The measured candidate table is in
     // docs/reverb-dev-journal.md.
     static constexpr double defaultSizeGlideMaxRate = 0.1;
     static constexpr double defaultSizeGlideTauSeconds = 0.25;
-
-    // Overrides the glide limits (log-rate in 1/s, end-shape time constant in
-    // seconds) for tests and tuning; the defaults are the constants below.
-    // Not real-time safe to call mid-glide (it re-snaps the glide state to
-    // the current target); call it before processing.
-    void setSizeGlideLimits (double maxLogRatePerSecond, double velocityTauSeconds);
 
     // Slice 2 (section 9.3): 0..1 user modulation depth, mapped linearly to
     // 0..maxModulationDepthMs on both allpass1 lines through the same LFOs
@@ -313,11 +307,12 @@ private:
     //
     // Slice 2 adds two faster movers on these same lines. User Modulation at
     // 1 ms / 0.7 Hz is ~0.0044 samples per sample. A Size glide is much
-    // faster: the old 300 ms linear Size glide moved branch B's allpass1 by
-    // 1.5 * 30.51 ms in 300 ms, ~0.153 samples per sample at any sample rate
-    // (one integer crossing every ~6.5 samples). The rate-limited glide is
-    // far slower (see sizeGlideMaxRate), but the bound below still holds. That cannot destabilise
-    // JUCE's Thiran: it keeps the fraction in [0.618, 1.618), so its one
+    // faster. The old 300 ms linear Size glide (the historical worst case)
+    // moved branch B's allpass1 by 1.5 * 30.51 ms in 300 ms, ~0.153 samples
+    // per sample at any sample rate (one integer crossing every ~6.5
+    // samples). The rate-limited glide (defaultSizeGlideMaxRate) is far below
+    // that, but the argument below holds for any rate. Neither can
+    // destabilise JUCE's Thiran: it keeps the fraction in [0.618, 1.618), so its one
     // pole |alpha| stays <= 0.236 whatever the rate. The "fast modulation"
     // cost is only a short transient where alpha jumps at each integer
     // crossing, decaying by ~12.5 dB per sample. Measured as a click
@@ -835,9 +830,6 @@ private:
     // Size (see setSize()): sizeGlide is the per-sample rate-limited glide,
     // appliedSize the value the lines were last scaled to.
     SizeGlide sizeGlide;
-    double sizeGlideSampleRate = 44100.0;
-    double sizeGlideMaxRate = defaultSizeGlideMaxRate;
-    double sizeGlideTauSeconds = defaultSizeGlideTauSeconds;
     float appliedSize = defaultSize;
 
     // Modulation (see setModulation()): 0..1, ramped per sample;
