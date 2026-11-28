@@ -49,6 +49,7 @@ public:
         float mix = 0.0f;
         float lowCut = 0.0f;
         float highCut = 0.0f;
+        float air = 0.0f;
         float shimmerTone = 0.0f;
         float freeze = 0.0f;
     };
@@ -61,7 +62,7 @@ public:
     void prepare (double sampleRate, const Targets& initial)
     {
         for (auto* s : { &pitchShift, &decay, &shimmerAmount, &shimmerFeedback, &damping, &width,
-                         &mix, &lowCut, &highCut, &shimmerTone, &freeze })
+                         &mix, &lowCut, &highCut, &air, &shimmerTone, &freeze })
             s->reset (sampleRate, rampSeconds);
 
         pitchShift.setCurrentAndTargetValue (initial.pitchShift);
@@ -73,6 +74,7 @@ public:
         mix.setCurrentAndTargetValue (initial.mix);
         lowCut.setCurrentAndTargetValue (initial.lowCut);
         highCut.setCurrentAndTargetValue (initial.highCut);
+        air.setCurrentAndTargetValue (initial.air);
         shimmerTone.setCurrentAndTargetValue (initial.shimmerTone);
         freeze.setCurrentAndTargetValue (initial.freeze);
 
@@ -92,6 +94,7 @@ public:
         mix.setTargetValue (targets.mix);
         lowCut.setTargetValue (targets.lowCut);
         highCut.setTargetValue (targets.highCut);
+        air.setTargetValue (targets.air);
         shimmerTone.setTargetValue (targets.shimmerTone);
         freeze.setTargetValue (targets.freeze);
 
@@ -140,6 +143,10 @@ private:
               [&engine] (float v) { engine.setLowCutHz (v); });
         push (highCut.skip (length), lastHighCut,
               [&engine] (float v) { engine.setHighCutHz (v); });
+        // Air: a linear smoother lands exactly on 0 dB, where the engine
+        // gates the shelf off again.
+        push (air.skip (length), lastAir,
+              [&engine] (float v) { engine.setAirDb (v); });
         // Same endpoint reasoning for Shimmer Tone's Off (10 kHz).
         push (shimmerTone.skip (length), lastShimmerTone,
               [&engine] (float v) { engine.setShimmerTone (v); });
@@ -165,10 +172,10 @@ private:
     }
 
     juce::SmoothedValue<float> pitchShift, decay, shimmerAmount, shimmerFeedback, damping, width,
-                               mix, lowCut, highCut, shimmerTone, freeze;
+                               mix, lowCut, highCut, air, shimmerTone, freeze;
 
     float lastPitchShift = 0.0f, lastDecay = 0.0f, lastShimmerAmount = 0.0f, lastShimmerFeedback = 0.0f,
-          lastDamping = 0.0f, lastWidth = 0.0f, lastMix = 0.0f, lastLowCut = 0.0f, lastHighCut = 0.0f,
+          lastDamping = 0.0f, lastWidth = 0.0f, lastMix = 0.0f, lastLowCut = 0.0f, lastHighCut = 0.0f, lastAir = 0.0f,
           lastShimmerTone = 0.0f, lastFreeze = 0.0f;
 
     // True until the first chunk after prepare() has pushed everything.

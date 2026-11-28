@@ -111,6 +111,10 @@ namespace ParamIDs
     constexpr auto lowCut   = "lowCut";
     constexpr auto highCut  = "highCut";
 
+    // Air: wet-only high shelf, 0..+6 dB at a fixed 7 kHz corner, backing
+    // ShimmerReverbEngine::setAirDb(). Range must match the engine's maxAirDb.
+    constexpr auto air = "air";
+
     // Shimmer Tone (2026-10-25, shimmer cascade slice 1 step C, docs/
     // shimmer-character-research.md section 7.1 item 3): low-pass cutoff in
     // Hz on the signal entering the pitch shifter, backing

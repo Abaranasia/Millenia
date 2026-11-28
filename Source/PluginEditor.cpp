@@ -94,9 +94,13 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     configureRotary (preDelaySlider, preDelayLabel, "Pre-Delay");
     configureRotary (lowCutSlider,   lowCutLabel,   "Low Cut");
     configureRotary (highCutSlider,  highCutLabel,  "High Cut");
+    configureRotary (airSlider,      airLabel,      "Air");
     preDelaySlider.setTextValueSuffix (" ms");
     lowCutSlider.setTextValueSuffix (" Hz");
     highCutSlider.setTextValueSuffix (" Hz");
+    airSlider.setTextValueSuffix (" dB");
+    airSlider.setNumDecimalPlacesToDisplay (1);
+    airSlider.setTooltip ("High shelf on the wet signal only (7 kHz corner, 0 to +6 dB). Adds brightness; 0 dB is off.");
 
     // Slice 2 space controls (docs/reverb-space-research.md section 9.4),
     // on the same second row.
@@ -163,6 +167,7 @@ MilleniaAudioProcessorEditor::MilleniaAudioProcessorEditor (MilleniaAudioProcess
     preDelayAttachment   = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::preDelay,   preDelaySlider);
     lowCutAttachment     = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::lowCut,     lowCutSlider);
     highCutAttachment    = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::highCut,    highCutSlider);
+    airAttachment        = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::air,        airSlider);
     sizeAttachment       = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::size,       sizeSlider);
     modulationAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, ParamIDs::modulation, modulationSlider);
 
@@ -227,7 +232,7 @@ void MilleniaAudioProcessorEditor::resized()
     auto spaceRow = bounds.removeFromBottom (130);
     bounds.removeFromBottom (20); // headroom for the second row's labels
     const int knobWidth = bounds.getWidth() / 11; // the first row's per-knob width (11 knobs)
-    for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider, &sizeSlider, &modulationSlider })
+    for (auto* slider : { &preDelaySlider, &lowCutSlider, &highCutSlider, &airSlider, &sizeSlider, &modulationSlider })
         slider->setBounds (spaceRow.removeFromLeft (knobWidth));
 
     auto presetArea = bounds.removeFromBottom (28);

@@ -45,6 +45,7 @@ MilleniaAudioProcessor::MilleniaAudioProcessor()
     preDelayParam   = apvts.getRawParameterValue (ParamIDs::preDelay);
     lowCutParam     = apvts.getRawParameterValue (ParamIDs::lowCut);
     highCutParam    = apvts.getRawParameterValue (ParamIDs::highCut);
+    airParam        = apvts.getRawParameterValue (ParamIDs::air);
     shimmerToneParam = apvts.getRawParameterValue (ParamIDs::shimmerTone);
     sizeParam       = apvts.getRawParameterValue (ParamIDs::size);
     modulationParam = apvts.getRawParameterValue (ParamIDs::modulation);
@@ -212,6 +213,7 @@ EngineParameterSmoothing::Targets MilleniaAudioProcessor::readSmoothingTargets()
     targets.width           = widthParam->load();
     targets.lowCut          = lowCutParam->load();
     targets.highCut         = highCutParam->load();
+    targets.air             = airParam->load();
     targets.shimmerTone     = shimmerToneParam->load();
     targets.freeze          = freezeParam->load();
 

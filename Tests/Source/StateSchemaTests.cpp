@@ -139,6 +139,40 @@ public:
             for (const float v : { 0.0f, 0.0005f, 0.01f, 0.08f, 0.2f, 0.3f })
                 expectWithinAbsoluteError (param->convertFrom0to1 (param->convertTo0to1 (v)), v, 1.0e-6f);
         }
+
+        beginTest ("Air parameter: 0..+6 dB range, 0 dB default, state round-trips, older state keeps the default");
+        {
+            DummyProcessor proc;
+            juce::AudioProcessorValueTreeState apvts (proc, nullptr, "PARAMETERS", createParameterLayout());
+            auto* param = apvts.getParameter (ParamIDs::air);
+            expect (param != nullptr);
+            if (param == nullptr)
+                return;
+
+            const auto& range = param->getNormalisableRange();
+            expectWithinAbsoluteError (range.start, 0.0f, 0.0f);
+            expectWithinAbsoluteError (range.end, 6.0f, 0.0f);
+            expectWithinAbsoluteError (param->convertFrom0to1 (param->getDefaultValue()), 0.0f, 0.0f);
+            expectWithinAbsoluteError (readParam (apvts, ParamIDs::air), 0.0f, 0.0f);
+            expectEquals (param->getName (32), juce::String ("Air"));
+
+            // Round trip through a saved tree.
+            const int v = StateSchema::currentVersion;
+            expect (StateSchema::applyState (apvts, makeState ({ { ParamIDs::air, 4.5f } }, &v)));
+            expectWithinAbsoluteError (readParam (apvts, ParamIDs::air), 4.5f, 1.0e-6f);
+
+            auto saved = apvts.copyState();
+            DummyProcessor proc2;
+            juce::AudioProcessorValueTreeState restored (proc2, nullptr, "PARAMETERS", createParameterLayout());
+            expect (StateSchema::applyState (restored, saved));
+            expectWithinAbsoluteError (readParam (restored, ParamIDs::air), 4.5f, 1.0e-6f);
+
+            // A state saved before Air existed leaves it at 0 dB.
+            DummyProcessor proc3;
+            juce::AudioProcessorValueTreeState legacy (proc3, nullptr, "PARAMETERS", createParameterLayout());
+            expect (StateSchema::applyState (legacy, makeState ({ { ParamIDs::mix, 0.3f } }, &v)));
+            expectWithinAbsoluteError (readParam (legacy, ParamIDs::air), 0.0f, 0.0f);
+        }
     }
 };
 

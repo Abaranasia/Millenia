@@ -37,9 +37,9 @@ private:
     BipolarRotaryLookAndFeel bipolarLookAndFeel;
 
     juce::Slider pitchShiftSlider, decaySlider, shimmerAmountSlider, shimmerFeedbackSlider, shimmerToneSlider, dampingSlider, widthSlider, mixSlider, freezeSlider, loopLengthSlider, loopMixSlider;
-    juce::Slider preDelaySlider, lowCutSlider, highCutSlider, sizeSlider, modulationSlider;
+    juce::Slider preDelaySlider, lowCutSlider, highCutSlider, airSlider, sizeSlider, modulationSlider;
     juce::Label  pitchShiftLabel,  decayLabel,  shimmerAmountLabel,  shimmerFeedbackLabel,  shimmerToneLabel,  dampingLabel,  widthLabel,  mixLabel,  freezeLabel,  loopLengthLabel,  loopMixLabel;
-    juce::Label  preDelayLabel,  lowCutLabel,  highCutLabel,  sizeLabel,  modulationLabel;
+    juce::Label  preDelayLabel,  lowCutLabel,  highCutLabel,  airLabel,  sizeLabel,  modulationLabel;
 
     // Shows the Decay knob's tooltip (the RT60 ceiling note).
     juce::TooltipWindow tooltipWindow { this };
@@ -101,6 +101,7 @@ private:
     std::unique_ptr<SliderAttachment> preDelayAttachment;
     std::unique_ptr<SliderAttachment> lowCutAttachment;
     std::unique_ptr<SliderAttachment> highCutAttachment;
+    std::unique_ptr<SliderAttachment> airAttachment;
 
     // Slice 2 (docs/reverb-space-research.md section 9.4).
     std::unique_ptr<SliderAttachment> sizeAttachment;

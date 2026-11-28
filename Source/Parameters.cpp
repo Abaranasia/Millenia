@@ -170,6 +170,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
             juce::ParameterID { ParamIDs::highCut, 1 }, "High Cut", highCutRange, 20000.0f));
     }
 
+    // Air (see ParamIDs::air): 0 dB default is the off state, where the
+    // engine's output equals no shelf exactly.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::air, 1 },
+        "Air",
+        juce::NormalisableRange<float> (0.0f, 6.0f),
+        0.0f));
+
     // Shimmer Tone (see ParamIDs::shimmerTone): 1.5-10 kHz, default 5 kHz
     // (ShimmerReverbEngine::defaultShimmerToneHz), skewed like the wet EQ
     // corners so the range's geometric midpoint (~3.87 kHz) sits at the

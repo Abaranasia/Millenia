@@ -3476,6 +3476,112 @@ public:
                 allFinite = allFinite && std::isfinite (out.left[i]) && std::isfinite (out.right[i]);
             expect (allFinite, "Non-finite output with out-of-range setter values");
         }
+
+        beginTest ("Air at 0 dB is bit-identical to no shelf, including after being moved away and back");
+        {
+            // Same endpoint-skip proof as the cut filters: the shelf sits
+            // after the recirculating loop, so an engine whose Air was up for
+            // the first second must match an untouched one from then on.
+            const auto untouched = run ([] (ShimmerReverbEngine&) {}, 3.0);
+            const auto explicitZero = run ([] (ShimmerReverbEngine& e) { e.setAirDb (0.0f); }, 3.0);
+            const auto moved = run ([] (ShimmerReverbEngine& e) { e.setAirDb (6.0f); }, 3.0, false,
+                                    [] (ShimmerReverbEngine& e) { e.setAirDb (0.0f); });
+
+            int mismatchesExplicit = 0, mismatchesAfter = 0, differencesWhileActive = 0;
+            const size_t switchSample = (size_t) (switchBlock * blockSize);
+            for (size_t i = 0; i < untouched.left.size(); ++i)
+            {
+                if (untouched.left[i] != explicitZero.left[i] || untouched.right[i] != explicitZero.right[i])
+                    ++mismatchesExplicit;
+                if (i < switchSample)
+                    differencesWhileActive += (untouched.left[i] != moved.left[i]) ? 1 : 0;
+                else if (untouched.left[i] != moved.left[i] || untouched.right[i] != moved.right[i])
+                    ++mismatchesAfter;
+            }
+
+            expectEquals (mismatchesExplicit, 0, "setAirDb (0) changed the output");
+            expect (differencesWhileActive > 0, "Air at +6 dB had no effect");
+            expectEquals (mismatchesAfter, 0, "Output after returning Air to 0 dB differs from an untouched engine");
+        }
+
+        beginTest ("Air at +6 dB lifts the wet by ~6 dB at 12 kHz and ~0 dB at 200 Hz; dry is untouched");
+        {
+            // Linear wet path (shimmer off, no modulation): the same sine
+            // through Air 0 and Air +6 differs only by the shelf's gain.
+            auto sineLevelDb = [] (float airDb, double hz, float mix)
+            {
+                ShimmerReverbEngine engine;
+                engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                engine.reset();
+                engine.setShimmerAmount (0.0f);
+                engine.setModulation (0.0f);
+                engine.setMix (mix);
+                engine.setAirDb (airDb);
+
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                std::vector<float> left;
+                double phase = 0.0;
+                const double inc = juce::MathConstants<double>::twoPi * hz / sampleRate;
+                for (int b = 0; b < (int) (3.0 * sampleRate / blockSize); ++b)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                    {
+                        const float s = 0.3f * (float) std::sin (phase);
+                        phase += inc;
+                        buffer.setSample (0, i, s);
+                        buffer.setSample (1, i, s);
+                    }
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    engine.process (block);
+                    for (int i = 0; i < blockSize; ++i)
+                        left.push_back (buffer.getSample (0, i));
+                }
+                const int n = 32768, start = (int) left.size() - n;
+                return 10.0 * std::log10 (juce::jmax (1.0e-30, ShimmerReverbEngineFreezeCrossfadeTests::goertzelPower (left, start, n, hz)));
+            };
+
+            const double high = sineLevelDb (6.0f, 12000.0, 1.0f) - sineLevelDb (0.0f, 12000.0, 1.0f);
+            const double low = sineLevelDb (6.0f, 200.0, 1.0f) - sineLevelDb (0.0f, 200.0, 1.0f);
+            const double dryDelta = sineLevelDb (6.0f, 12000.0, 0.0f) - sineLevelDb (0.0f, 12000.0, 0.0f);
+            logMessage ("Air +6 dB: " + juce::String (high, 3) + " dB at 12 kHz, " + juce::String (low, 3)
+                            + " dB at 200 Hz, " + juce::String (dryDelta, 6) + " dB on the dry path");
+            expect (std::abs (high - 6.0) < 1.0, "12 kHz boost " + juce::String (high, 3) + " dB, expected ~6");
+            expect (std::abs (low) < 0.2, "200 Hz changed by " + juce::String (low, 3) + " dB, expected ~0");
+            expect (std::abs (dryDelta) < 1.0e-6, "Air changed the dry path by " + juce::String (dryDelta, 6) + " dB");
+        }
+
+        beginTest ("Air setter clamps to 0..+6 dB and stays finite at low sample rates");
+        {
+            const auto over = run ([] (ShimmerReverbEngine& e) { e.setAirDb (60.0f); }, 1.0);
+            const auto six = run ([] (ShimmerReverbEngine& e) { e.setAirDb (6.0f); }, 1.0);
+            expect (over.left == six.left && over.right == six.right, "setAirDb (60) must clamp to 6 dB");
+            const auto under = run ([] (ShimmerReverbEngine& e) { e.setAirDb (-12.0f); }, 1.0);
+            const auto zero = run ([] (ShimmerReverbEngine&) {}, 1.0);
+            expect (under.left == zero.left && under.right == zero.right, "setAirDb (-12) must clamp to 0 dB");
+
+            // 7 kHz is above 0.49 fs at 8 kHz: the corner must be capped.
+            ShimmerReverbEngine engine;
+            engine.prepare ({ 8000.0, 256, 2 });
+            engine.reset();
+            engine.setAirDb (6.0f);
+            juce::AudioBuffer<float> buffer (2, 256);
+            juce::Random random (42);
+            bool allFinite = true;
+            for (int b = 0; b < 100; ++b)
+            {
+                for (int i = 0; i < 256; ++i)
+                {
+                    const float s = random.nextFloat() * 0.6f - 0.3f;
+                    buffer.setSample (0, i, s);
+                    buffer.setSample (1, i, s);
+                }
+                juce::dsp::AudioBlock<float> block (buffer);
+                engine.process (block);
+                for (int i = 0; i < 256; ++i)
+                    allFinite = allFinite && std::isfinite (buffer.getSample (0, i)) && std::isfinite (buffer.getSample (1, i));
+            }
+            expect (allFinite, "Non-finite output with Air at an 8 kHz sample rate");
+        }
     }
 
 private:

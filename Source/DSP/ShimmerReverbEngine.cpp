@@ -82,6 +82,7 @@ void ShimmerReverbEngine::prepare (const juce::dsp::ProcessSpec& spec)
     lowCutFilter.prepare (stereoSpec);
     highCutFilter.prepare (stereoSpec);
     maxFilterCutoffHz = (float) (0.49 * spec.sampleRate);
+    airSampleRate = spec.sampleRate;
 
     // Shimmer Tone (see setShimmerTone()): mono, on dryFeedback. shimmerToneHz
     // itself is NOT re-assigned here (same survive-a-re-prepare rule as
@@ -121,6 +122,8 @@ void ShimmerReverbEngine::reset()
     smoothedPreDelayMs.setCurrentAndTargetValue (smoothedPreDelayMs.getTargetValue());
     lowCutFilter.reset();
     highCutFilter.reset();
+    airShelf.reset();
+    airActive = false;
     lowCutActive = false;
     highCutActive = false;
     shimmerToneFilterA.reset();
@@ -236,6 +239,36 @@ void ShimmerReverbEngine::setLowCutHz (float newLowCutHz)
 void ShimmerReverbEngine::setHighCutHz (float newHighCutHz)
 {
     highCutHz = juce::jlimit (minHighCutHz, maxHighCutHz, newHighCutHz);
+}
+
+void ShimmerReverbEngine::setAirDb (float newAirDb)
+{
+    airDb = juce::jlimit (0.0f, maxAirDb, newAirDb);
+}
+
+void ShimmerReverbEngine::AirShelf::setGain (double sampleRate, double cornerHz, double gainDb) noexcept
+{
+    if (gainDb <= 0.0)
+    {
+        b0 = 1.0f; b1 = b2 = a1 = a2 = 0.0f;
+        return;
+    }
+
+    // RBJ high shelf (same maths as juce::dsp::IIR::Coefficients::makeHighShelf)
+    // with the plateau gain exactly gainDb: A = 10^(dB / 40).
+    constexpr double q = 0.70710678118654752;
+    const double A = std::pow (10.0, gainDb / 40.0);
+    const double omega = juce::MathConstants<double>::twoPi * cornerHz / sampleRate;
+    const double cosO = std::cos (omega);
+    const double beta = std::sin (omega) * std::sqrt (A) / q;
+    const double aMinus = A - 1.0, aPlus = A + 1.0;
+
+    const double a0 = aPlus - aMinus * cosO + beta;
+    b0 = (float) (A * (aPlus + aMinus * cosO + beta) / a0);
+    b1 = (float) (-2.0 * A * (aMinus + aPlus * cosO) / a0);
+    b2 = (float) (A * (aPlus + aMinus * cosO - beta) / a0);
+    a1 = (float) (2.0 * (aMinus - aPlus * cosO) / a0);
+    a2 = (float) ((aPlus - aMinus * cosO - beta) / a0);
 }
 
 void ShimmerReverbEngine::setShimmerTone (float newShimmerToneHz)
@@ -479,6 +512,12 @@ void ShimmerReverbEngine::processChunk (juce::dsp::AudioBlock<float>& block)
     highCutActive = highCutHz < maxHighCutHz;
     lowCutFilter.setCutoffFrequency (juce::jmin (lowCutHz, maxFilterCutoffHz));
     highCutFilter.setCutoffFrequency (juce::jmin (highCutHz, maxFilterCutoffHz));
+
+    // Air shelf (see setAirDb()): same always-running / gated-output scheme.
+    // The corner is capped like the cut filters so it stays below Nyquist at
+    // low sample rates. Idle coefficients are the identity (state stays 0).
+    airActive = airDb > 0.0f;
+    airShelf.setGain (airSampleRate, juce::jmin (airCornerHz, maxFilterCutoffHz), (double) airDb);
 
     // Shimmer Tone, set once per block. The filter is ALWAYS applied to the
     // shifter input -- Off is the alias cap alone, not a bypass (see
@@ -806,6 +845,15 @@ void ShimmerReverbEngine::processChunk (juce::dsp::AudioBlock<float>& block)
         {
             wetLeft = lowCutLeft;
             wetRight = lowCutRight;
+        }
+
+        // Air: high shelf between the low cut and the high cut (wet only).
+        const float airLeft = airShelf.processSample (0, wetLeft);
+        const float airRight = airShelf.processSample (1, wetRight);
+        if (airActive)
+        {
+            wetLeft = airLeft;
+            wetRight = airRight;
         }
 
         const float highCutLeft = highCutFilter.processSample (0, wetLeft);

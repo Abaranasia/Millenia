@@ -244,6 +244,14 @@ public:
     void setLowCutHz (float newLowCutHz);
     void setHighCutHz (float newHighCutHz);
 
+    // Air: wet-only high shelf (fixed airCornerHz corner, Q = 1/sqrt(2)),
+    // placed after the low cut and before the high cut. Clamped to
+    // [0, maxAirDb]. 0 dB (default) is bit-identical to no shelf: the filter
+    // is warm (runs every sample) but its output is only used while the gain
+    // is above 0 dB. Coefficients are decided once per block; callers smooth
+    // the knob (EngineParameterSmoothing).
+    void setAirDb (float newAirDb);
+
     // NEW (Phase 5): dry/wet blend. 0 = fully dry (bypassed engine sounds
     // identical to unprocessed input), 1 = fully wet (today's existing
     // 100%-wet behavior, unchanged). Clamped to [0, 1]. Default 1.0f so
@@ -506,6 +514,8 @@ private:
     static constexpr float maxLowCutHz = 1000.0f;
     static constexpr float minHighCutHz = 1000.0f;
     static constexpr float maxHighCutHz = 20000.0f;
+    static constexpr float maxAirDb = 6.0f;
+    static constexpr float airCornerHz = 7000.0f;
 
     // Shimmer Tone range and default (see setShimmerTone()) -- must match
     // Parameters.cpp. maxShimmerToneHz is the Off endpoint (alias cap only).
@@ -670,6 +680,31 @@ private:
     float maxFilterCutoffHz = maxHighCutHz;
     bool lowCutActive = false;
     bool highCutActive = false;
+
+    // Air (see setAirDb()): stereo RBJ high shelf, transposed direct form II,
+    // plain floats (no allocation when the coefficients change, unlike
+    // juce::dsp::IIR::Coefficients). At 0 dB the coefficients are exactly the
+    // identity, so its state stays zero while idle.
+    struct AirShelf
+    {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+        float s1[2] {}, s2[2] {};
+
+        void setGain (double sampleRate, double cornerHz, double gainDb) noexcept;
+        void reset() noexcept { s1[0] = s1[1] = s2[0] = s2[1] = 0.0f; }
+
+        float processSample (int channel, float x) noexcept
+        {
+            const float y = b0 * x + s1[channel];
+            s1[channel] = b1 * x - a1 * y + s2[channel];
+            s2[channel] = b2 * x - a2 * y;
+            return y;
+        }
+    };
+    AirShelf airShelf;
+    float airDb = 0.0f;
+    double airSampleRate = 44100.0;
+    bool airActive = false;
 
     // Shimmer Tone (see setShimmerTone()): two mono 2nd-order TPT lowpass
     // sections in series (4th order, 24 dB/oct). Both sections run on every

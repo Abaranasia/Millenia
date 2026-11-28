@@ -140,6 +140,7 @@ private:
     std::atomic<float>* preDelayParam = nullptr;
     std::atomic<float>* lowCutParam = nullptr;
     std::atomic<float>* highCutParam = nullptr;
+    std::atomic<float>* airParam = nullptr; // smoothed like highCut
 
     // Shimmer Tone (see ParamIDs::shimmerTone): smoothed like lowCut/highCut
     // -- the engine also updates this cutoff once per 32-sample chunk.

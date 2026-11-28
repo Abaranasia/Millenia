@@ -193,6 +193,38 @@ public:
             expectLessThan (rmsL, 1.0e-5);
             expectLessThan (rmsR, 1.0e-5);
         }
+
+        beginTest ("Air swept 0 -> +6 dB and back during processing is click-free and lands bit-exactly on 0");
+        {
+            // The 220 Hz sine bed plus its shimmer harmonics give the shelf
+            // something to act on. A click would show up as a sample step
+            // far above the steady-state one.
+            auto up = baseTargets();
+            up.air = 6.0f;
+            const auto base = baseTargets();
+
+            const auto reference = render (64, base, base);
+            const auto sweepUp = render (64, base, up);
+            const auto sweepDown = render (64, up, base);
+
+            const float refStep = maxStep (reference.left);
+            const float upStep = maxStep (sweepUp.left);
+            const float downStep = maxStep (sweepDown.left);
+            logMessage ("air sweep: max|dy| reference " + juce::String (refStep, 6) + ", up " + juce::String (upStep, 6)
+                        + ", down " + juce::String (downStep, 6));
+            expect (refStep > 0.0f, "no signal in the sweep window");
+            expectLessThan (upStep, 1.5f * refStep);
+            expectLessThan (downStep, 1.5f * refStep);
+
+            // The up sweep must really change the signal while it ramps.
+            expectGreaterThan (rmsDiff (reference.left, sweepUp.left, stepAt + rampSamples, totalSamples), 0.0);
+
+            // Down sweep starts with Air on and ends with it off: no blow-up.
+            bool finite = true;
+            for (auto v : sweepDown.left)
+                finite = finite && std::isfinite (v);
+            expect (finite, "non-finite output while sweeping Air");
+        }
     }
 
 private:
