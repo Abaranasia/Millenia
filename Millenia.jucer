@@ -25,6 +25,8 @@
               file="Source/DSP/DattorroTank.cpp"/>
         <FILE id="dspDAT2" name="DattorroTank.h" compile="0" resource="0"
               file="Source/DSP/DattorroTank.h"/>
+        <FILE id="dspSZG1" name="SizeGlide.h" compile="0" resource="0"
+              file="Source/DSP/SizeGlide.h"/>
         <FILE id="dspPS1" name="PitchShifter.cpp" compile="1" resource="0"
               file="Source/DSP/PitchShifter.cpp"/>
         <FILE id="dspPS2" name="PitchShifter.h" compile="0" resource="0"

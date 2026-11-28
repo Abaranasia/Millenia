@@ -247,7 +247,7 @@ Branch `feat/reverb-size`. Plan: [`reverb-space-research.md`](./reverb-space-res
 ### What changed
 
 - **Decay (RT60).** A new `decay` parameter (0.3–20 s, log skew, default 7.0 s) replaces `feedback`. The tank derives `g = 10^(−3·L_half·size/RT60)` from it, with `L_half` = 362.70 ms (the mean branch length, since the gain is applied once per branch). g is clamped to 0.85 and recomputed whenever Decay or the smoothed Size changes. Freeze and Infinite override it as before. 7.0 s gives g = 0.6993.
-- **Size.** A new `size` parameter (0.5–2×, default 1). It scales both branches' allpass1/delay1/allpass2/delay2 and all 14 output taps. The input diffusers are not scaled. Lines are allocated for 2× plus modulation headroom in `prepare()`. Size glides per sample over 300 ms (linear), and only `setDelay()` runs while it moves.
+- **Size.** A new `size` parameter (0.5–2×, default 1). It scales both branches' allpass1/delay1/allpass2/delay2 and all 14 output taps. The input diffusers are not scaled. Lines are allocated for 2× plus modulation headroom in `prepare()`. Size glides per sample over 300 ms (linear), and only `setDelay()` runs while it moves. (Superseded 2026-11-28: the glide is now rate-limited in the log domain, see the entry below.)
 - **Modulation.** A new `modulation` parameter (0–1 → 0–1 ms, default 0.3) on both allpass1 lines, reusing Infinite's Thiran lines and its 0.5/0.7 Hz LFOs. Effective depth is `max(user, infinite × 0.5 ms)`. It is ramped per sample over 50 ms.
 - **Tap restore.** `peekTap()` now restores the configured delay from the branch's stored value instead of `getDelay()`. At fractional delays, `getDelay()` can be off by one ulp.
 - **Editor.** Feedback became Decay (seconds, with a tooltip about the ceiling). Size and Modulation joined the second row. The window size is unchanged.
@@ -586,6 +586,37 @@ At 48 kHz the same values give corners of 5.5 kHz (0.5) and 2.75 kHz (0.7), RT60
 
 - Needs a listening pass at the new centre and maximum.
 - The knob's default sits at the far left, so the first few percent of travel jump from "off" to a ~0.2 coefficient.
+
+## 2026-11-28 � Size glide is rate-limited in the log domain
+
+### What changed
+
+- `DattorroTank::setSize()` no longer drives a 300 ms linear `juce::SmoothedValue`. A new header-only `Source/DSP/SizeGlide.h` moves `ln(size)` at no more than `defaultSizeGlideMaxRate` (0.1 per second) per sample, through a critically damped end shape (`defaultSizeGlideTauSeconds` = 0.25 s): the log-rate follows a saturated proportional command through a one-pole, with gain 1/(4 tau). The glide is monotonic (no overshoot), starts and stops without a rate step, and lands exactly on the target.
+- Why: resizing a recirculating loop resamples the audio in it, so the tail's pitch moves by `1 - d ln(size)/dt`. The old ramp bent a 1 -> 0.5 jump's tail by +413 cents (440 Hz sine, 44.1 kHz) and 1 -> 2 by -438 cents, however slowly the knob moved. The rate limit bounds the per-pass bend at about +165 / -182 cents at 0.1 per second.
+- `decayGain` is re-derived from the same glided size the lines were just scaled to (per sample, as before), so RT60 stays consistent mid-glide. Output taps and Thiran lines read the same applied size, so nothing else changed. Freeze and Infinite are untouched.
+- Static behaviour is bit-identical: while idle `next()` returns the target float as set, `prepare()`/`reset()` still snap to it, and the golden hashes did not change.
+- `DattorroTank` gained `getAppliedSize()` and `setSizeGlideLimits()` (tests and tuning only).
+
+### Measurements (engine, 440 Hz sine, 44.1 kHz, tau 0.25 s, Size jump at 3 s)
+
+| rMax (per s) | Bend 1 -> 0.5 (cents) | Bend 1 -> 2 (cents) | 1 -> 0.5 or 1 -> 2 within 1% | 1 -> 1.1 within 1% | HF >6 kHz glide max (dBFS) |
+|---|---|---|---|---|---|
+| old 300 ms ramp | +413 | -438 | 0.3 s | 0.3 s | -62.7 / -62.5 |
+| 0.05 | +89 | -103 | 14.3 s | 2.4 s | -87.8 / -90.1 |
+| 0.1 (chosen) | +89..123 | -123 | 7.8 s | 1.9 s | -86.8 / -84.7 |
+| 0.15 | +132 | -212..-242 | 5.8 s | 1.9 s | -85.3 / -79.6 |
+| 0.25 | +282 | -384..-514 | 4.2 s | 1.9 s | -81.5 / -75.7 |
+
+Bend is the largest deviation of the wet spectral peak in 8192-sample windows; it is noisy by tens of cents. HF is a 4th-order 6 kHz high-pass frame RMS (64 samples); the steady value is -83.5 dBFS. The old build crosses the -70 dBFS limit; every candidate stays under it. At rMax 0.1, tau 0.1 / 0.15 / 0.5 s settled 1 -> 0.5 in 7.1 / 7.3 / 9.5 s, with a full stop at 9.2 / 10.4 / 19.7 s; 0.25 s keeps the gentlest end for 7.8 s.
+
+### Tradeoff
+
+A full 1 -> 0.5 move takes about 7 s to settle within 1%. The knob feels laggy on big moves and a fast sweep is deliberately smoothed. A faster rate answers sooner and bends the tail harder (0.25 per second reaches +282 cents).
+
+### Tests
+
+- `DattorroTankSizeGlideTests` (new): constant target bit-identical; monotonic, no overshoot, exact landing, rate limit; smooth rate start/stop; 1% settle window; random target every block (finite, in range, rate-limited); tank-level bit-identity, reset snap, `decayGain` following the applied size on every sample, wet-tail bend within the rate bound, HF residual under -70 dBFS, and Size jitter at Modulation 1 / Decay ceiling.
+- The old click test (`Size glide 1 -> 2 is click-free`) now covers the first 3 s of the glide instead of 300 ms; the 3x steady-state limit is unchanged.
 
 ## References
 

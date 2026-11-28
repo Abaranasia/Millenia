@@ -149,7 +149,7 @@ private:
     // Slice 2 (docs/reverb-space-research.md section 9). decayParam (above)
     // goes through a chunk-stepped smoother like the other continuous values;
     // size and modulation are read RAW because DattorroTank glides both per
-    // sample itself (300 ms / 50 ms) -- a second, chunk-rate ramp here would
+    // sample itself (rate-limited glide / 50 ms) -- a second, chunk-rate ramp here would
     // only stair-step the target the tank is already ramping toward.
     std::atomic<float>* sizeParam = nullptr;
     std::atomic<float>* modulationParam = nullptr;

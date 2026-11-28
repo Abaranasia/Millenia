@@ -33,6 +33,7 @@
         <FILE id="tstDTC" name="DattorroTank.cpp" compile="1" resource="0"
               file="../Source/DSP/DattorroTank.cpp"/>
         <FILE id="tstDTH" name="DattorroTank.h" compile="0" resource="0" file="../Source/DSP/DattorroTank.h"/>
+        <FILE id="tstSZG" name="SizeGlide.h" compile="0" resource="0" file="../Source/DSP/SizeGlide.h"/>
         <FILE id="tstFEH" name="FormantEnvelopeCorrector.h" compile="0" resource="0"
               file="../Source/DSP/FormantEnvelopeCorrector.h"/>
         <FILE id="tstFEP" name="FormantEnvelopeCorrector.cpp" compile="1" resource="0"

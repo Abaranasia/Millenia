@@ -1447,12 +1447,13 @@ public:
             expect (maxPeak <= 10.0f, "Size automation exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
         }
 
-        beginTest ("Size glide 1 -> 2 is click-free: max sample delta during the 300 ms glide stays within 3x steady state");
+        beginTest ("Size glide 1 -> 2 is click-free: max sample delta during the first 3 s of the glide stays within 3x steady state");
         {
             // Measures what the Thiran-interpolated allpass1 lines do at the
-            // fastest delay change Size can produce (see sizeRampSeconds in
-            // DattorroTank.h). A 220 Hz tone builds a steady tail at Size 1,
-            // then Size jumps to 2 (smoothed over 300 ms). A pitch glide
+            // fastest delay change Size can produce (see defaultSizeGlideMaxRate
+            // in DattorroTank.h). A 220 Hz tone builds a steady tail at Size 1,
+            // then Size jumps to 2 (rate-limited glide; the window below covers
+            // its fastest 3 s, where the log-rate is at the limit). A pitch glide
             // raises the sample-to-sample delta only by the glide's
             // frequency ratio; a Thiran state transient at each integer
             // crossing would show up as spikes well above that.
@@ -1463,7 +1464,7 @@ public:
 
             std::vector<float> left, right;
             const int switchAt = (int) (3.0 * sampleRate);
-            const int total = switchAt + (int) (0.4 * sampleRate);
+            const int total = switchAt + (int) (3.2 * sampleRate);
             const double phaseIncrement = juce::MathConstants<double>::twoPi * 220.0 / sampleRate;
             for (int n = 0; n < total; ++n)
             {
@@ -1482,7 +1483,7 @@ public:
             };
 
             const float steady = maxDelta (switchAt - (int) (0.5 * sampleRate), switchAt);
-            const float glide = maxDelta (switchAt, switchAt + (int) (0.3 * sampleRate));
+            const float glide = maxDelta (switchAt, switchAt + (int) (3.0 * sampleRate));
             logMessage ("Size glide 1 -> 2: max steady delta " + juce::String (steady, 6) + ", max glide delta " + juce::String (glide, 6)
                             + ", ratio " + juce::String (glide / juce::jmax (1.0e-9f, steady), 3));
             expect (steady > 0.0f, "No steady tail");
@@ -1646,3 +1647,389 @@ private:
 };
 
 static DattorroTankSpaceTests dattorroTankSpaceTests;
+
+// Rate-limited, log-domain Size glide (SizeGlide.h, DattorroTank::setSize()).
+// Replaces the old 300 ms linear ramp, which bent a 1 -> 0.5 jump's wet tail
+// by +413 cents (measured on the old build with a 440 Hz sine, 44.1 kHz).
+class DattorroTankSizeGlideTests : public juce::UnitTest
+{
+public:
+    DattorroTankSizeGlideTests() : juce::UnitTest ("DattorroTankSizeGlideTests", "DSP") {}
+
+    void runTest() override
+    {
+        constexpr double maxRate = DattorroTank::defaultSizeGlideMaxRate;
+        constexpr double tau = DattorroTank::defaultSizeGlideTauSeconds;
+        constexpr double floatStepRate = 2.0 * 1.2e-7 * sampleRate; // two float ulps of a Size per sample, in 1/s
+
+        beginTest ("SizeGlide: constant target is returned exactly (bit-identical to a plain value)");
+        {
+            SizeGlide glide;
+            glide.prepare (sampleRate, maxRate, tau);
+            glide.snapTo (1.37f);
+            bool identical = true;
+            for (int n = 0; n < 1000; ++n)
+            {
+                if (n % 10 == 0)
+                    glide.setTarget (1.37f); // re-asserting the same target must not start a glide
+                identical = identical && glide.next() == 1.37f && ! glide.isMoving();
+            }
+            expect (identical, "A constant Size drifted");
+        }
+
+        beginTest ("SizeGlide: monotonic, never overshoots, reaches the exact target, rate never above the limit");
+        {
+            for (const float target : { 0.5f, 2.0f, 1.1f, 0.9f, 1.0f })
+            {
+                const float start = target == 1.0f ? 2.0f : 1.0f;
+                SizeGlide glide;
+                glide.prepare (sampleRate, maxRate, tau);
+                glide.snapTo (start);
+                glide.setTarget (target);
+
+                float previous = start;
+                double worstRate = 0.0;
+                bool monotonic = true, overshoot = false;
+                int samples = 0;
+                while (glide.isMoving() && samples < (int) (60.0 * sampleRate))
+                {
+                    const float value = glide.next();
+                    ++samples;
+                    monotonic = monotonic && (target > start ? value >= previous : value <= previous);
+                    overshoot = overshoot || (target > start ? value > target : value < target);
+                    worstRate = juce::jmax (worstRate, std::abs (std::log ((double) value / (double) previous)) * sampleRate);
+                    previous = value;
+                }
+
+                logMessage ("1 -> " + juce::String (target, 2) + ": " + juce::String ((double) samples / sampleRate, 2) + " s to land, worst log-rate "
+                                + juce::String (worstRate, 4) + " /s");
+                expect (! glide.isMoving(), "Glide to " + juce::String (target) + " never finished");
+                expectEquals (previous, target, "Glide did not land exactly on " + juce::String (target));
+                expect (monotonic, "Glide to " + juce::String (target) + " was not monotonic");
+                expect (! overshoot, "Glide to " + juce::String (target) + " overshot");
+                // Float quantisation: one ulp of a Size in [1, 2) is 1.2e-7 relative, i.e. 5.3e-3 /s at 44.1 kHz; allow two.
+                expect (worstRate <= maxRate * 1.001 + floatStepRate, "Log-rate " + juce::String (worstRate, 5) + " exceeds the limit " + juce::String (maxRate));
+            }
+        }
+
+        beginTest ("SizeGlide: starts and stops without a rate step (the log-rate itself is smooth)");
+        {
+            SizeGlide glide;
+            glide.prepare (sampleRate, maxRate, tau);
+            glide.snapTo (1.0f);
+            glide.setTarget (0.5f);
+
+            double previousRate = 0.0, worstStep = 0.0;
+            while (glide.isMoving())
+            {
+                glide.next();
+                worstStep = juce::jmax (worstStep, std::abs (glide.getLogRate() - previousRate));
+                previousRate = glide.getLogRate();
+            }
+            // One-pole on the rate: the largest per-sample step is about maxRate * dt / tau.
+            const double limit = maxRate / (tau * sampleRate) * 1.01;
+            logMessage ("Largest per-sample log-rate step: " + juce::String (worstStep, 9) + " /s per sample (limit " + juce::String (limit, 9) + ")");
+            expect (worstStep <= limit, "The log-rate stepped by " + juce::String (worstStep, 9));
+        }
+
+        beginTest ("SizeGlide: settle time to within 1 percent matches the rate limit (1 -> 0.5, 1 -> 2, 1 -> 1.1)");
+        {
+            for (const float target : { 0.5f, 2.0f, 1.1f })
+            {
+                SizeGlide glide;
+                glide.prepare (sampleRate, maxRate, tau);
+                glide.snapTo (1.0f);
+                glide.setTarget (target);
+
+                double lastOutside = 0.0;
+                int n = 0;
+                while (glide.isMoving() && n < (int) (60.0 * sampleRate))
+                {
+                    const float value = glide.next();
+                    ++n;
+                    if (std::abs (std::log ((double) value / (double) target)) >= 0.01)
+                        lastOutside = (double) n / sampleRate;
+                }
+
+                const double distance = std::abs (std::log ((double) target));
+                const double fastest = (distance - 0.01) / maxRate; // the rate limit alone
+                const double allowed = distance / maxRate + 6.0 * tau; // rate limit + start lag + end shape
+                logMessage ("1 -> " + juce::String (target, 2) + ": within 1% after " + juce::String (lastOutside, 2) + " s (window "
+                                + juce::String (fastest, 2) + " .. " + juce::String (allowed, 2) + " s)");
+                expect (lastOutside >= fastest * 0.99, "Settled faster than the rate limit allows: " + juce::String (lastOutside, 3));
+                expect (lastOutside <= allowed, "Too slow to settle: " + juce::String (lastOutside, 3) + " s > " + juce::String (allowed, 3));
+            }
+        }
+
+        beginTest ("SizeGlide: random target every 512-sample block stays within [0.5, 2] and respects the rate limit");
+        {
+            SizeGlide glide;
+            glide.prepare (sampleRate, maxRate, tau);
+            glide.snapTo (1.0f);
+
+            juce::Random random (20261128);
+            float previous = 1.0f, lo = 1.0f, hi = 1.0f;
+            double worstRate = 0.0;
+            int numNonFinite = 0;
+            for (int n = 0; n < (int) (120.0 * sampleRate); ++n)
+            {
+                if (n % 512 == 0)
+                    glide.setTarget (0.5f * std::pow (4.0f, random.nextFloat())); // log-uniform 0.5..2
+                const float value = glide.next();
+                if (! std::isfinite (value))
+                    ++numNonFinite;
+                lo = juce::jmin (lo, value);
+                hi = juce::jmax (hi, value);
+                worstRate = juce::jmax (worstRate, std::abs (std::log ((double) value / (double) previous)) * sampleRate);
+                previous = value;
+            }
+            logMessage ("Jitter: size range " + juce::String (lo, 4) + " .. " + juce::String (hi, 4) + ", worst log-rate " + juce::String (worstRate, 4) + " /s");
+            expectEquals (numNonFinite, 0, "Non-finite Size under knob jitter");
+            expect (lo >= 0.5f - 1.0e-6f && hi <= 2.0f + 1.0e-6f, "Size left [0.5, 2]");
+            expect (worstRate <= maxRate * 1.001 + floatStepRate, "Jitter log-rate " + juce::String (worstRate, 5) + " exceeds the limit");
+        }
+
+        beginTest ("Tank: a constant Size is bit-identical whether or not it is re-asserted every sample");
+        {
+            std::vector<float> a, b;
+            for (int run = 0; run < 2; ++run)
+            {
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, 512, 2 });
+                tank.setModulation (0.0f);
+                tank.setSize (0.8f);
+                tank.reset();
+                juce::Random random (5);
+                auto& out = run == 0 ? a : b;
+                for (int n = 0; n < (int) (2.0 * sampleRate); ++n)
+                {
+                    if (run == 1)
+                        tank.setSize (0.8f);
+                    out.push_back (tank.processSample (random.nextFloat() * 0.6f - 0.3f));
+                }
+                expectEquals (tank.getAppliedSize(), 0.8f, "Applied Size is not exactly the snapped value");
+            }
+            expect (a == b, "Re-asserting an unchanged Size changed the output");
+        }
+
+        beginTest ("Tank: the first Size is snapped by reset() (no glide from the default)");
+        {
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setSize (0.6f);
+            tank.reset();
+            expectEquals (tank.getAppliedSize(), 0.6f);
+            tank.processSample (0.0f);
+            expectEquals (tank.getAppliedSize(), 0.6f);
+        }
+
+        beginTest ("Tank: decay gain follows the glided Size sample by sample (RT60 stays consistent)");
+        {
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setDecaySeconds (7.0f);
+            tank.reset();
+            tank.setSize (0.5f);
+            int mismatches = 0;
+            float lastApplied = 1.0f;
+            int moved = 0;
+            for (int n = 0; n < (int) (20.0 * sampleRate); ++n)
+            {
+                tank.processSample (0.0f);
+                if (tank.getCurrentDecayGain() != DattorroTank::decayGainFor (7.0f, tank.getAppliedSize()))
+                    ++mismatches;
+                if (tank.getAppliedSize() != lastApplied)
+                    ++moved;
+                lastApplied = tank.getAppliedSize();
+            }
+            logMessage ("Size changed on " + juce::String (moved) + " samples; gain mismatches " + juce::String (mismatches));
+            expectEquals (mismatches, 0, "decayGain lagged the applied Size");
+            expect (moved > (int) (3.0 * sampleRate), "Size did not glide over several seconds");
+            expectEquals (tank.getAppliedSize(), 0.5f);
+        }
+
+        beginTest ("Tank: the wet tail's pitch bend stays within the bound implied by the rate limit (old build: +413 cents)");
+        {
+            // 440 Hz sine feeding the plain tank; Size jumps 1 -> 0.5 and 1 -> 2 at t = 3 s. The
+            // old 300 ms ramp bent the tail by +413 / -438 cents. The bound is the per-pass limit
+            // 1200 * log2 (1 +/- maxRate) plus 25% for the passes accumulating inside the window.
+            const double upBound = 1200.0 * std::log2 (1.0 + maxRate) * 1.25;
+            const double downBound = 1200.0 * std::abs (std::log2 (1.0 - maxRate)) * 1.25;
+
+            for (const float target : { 0.5f, 2.0f })
+            {
+                const auto bend = measureBendCents (target, 10.0);
+                logMessage ("Size 1 -> " + juce::String (target, 1) + ": peak bend +" + juce::String (bend.up, 1) + " / " + juce::String (bend.down, 1)
+                                + " cents (bounds +" + juce::String (upBound, 1) + " / -" + juce::String (downBound, 1) + ")");
+                expect (bend.up <= upBound, "Upward bend " + juce::String (bend.up, 1) + " cents exceeds " + juce::String (upBound, 1));
+                expect (-bend.down <= downBound, "Downward bend " + juce::String (-bend.down, 1) + " cents exceeds " + juce::String (downBound, 1));
+            }
+        }
+
+        beginTest ("Tank: no click during the glide (HF residual above 6 kHz under -70 dBFS, 440 Hz sine)");
+        {
+            for (const float target : { 0.5f, 2.0f })
+            {
+                DattorroTank tank;
+                tank.prepare ({ sampleRate, 512, 2 });
+                tank.setShimmerAmountGain (0.0f);
+                tank.setModulation (0.0f);
+                tank.reset();
+
+                Highpass hp1 (6000.0), hp2 (6000.0);
+                const int jumpAt = (int) (3.0 * sampleRate);
+                const int total = jumpAt + (int) (12.0 * sampleRate);
+                double steadyMax = 0.0, glideMax = 0.0, frameSum = 0.0;
+                int frameCount = 0;
+                for (int n = 0; n < total; ++n)
+                {
+                    if (n == jumpAt)
+                        tank.setSize (target);
+                    const float out = tank.processSample (0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * n / sampleRate));
+                    const double y = hp2.process (hp1.process ((double) out));
+                    frameSum += y * y;
+                    if (++frameCount == 64)
+                    {
+                        const double rms = std::sqrt (frameSum / 64.0);
+                        if (n > (int) sampleRate && n < jumpAt)
+                            steadyMax = juce::jmax (steadyMax, rms);
+                        else if (n >= jumpAt)
+                            glideMax = juce::jmax (glideMax, rms);
+                        frameSum = 0.0;
+                        frameCount = 0;
+                    }
+                }
+                const double steadyDb = juce::Decibels::gainToDecibels (steadyMax, -200.0);
+                const double glideDb = juce::Decibels::gainToDecibels (glideMax, -200.0);
+                logMessage ("1 -> " + juce::String (target, 1) + ": HF frame-rms steady max " + juce::String (steadyDb, 1) + " dBFS, glide max " + juce::String (glideDb, 1) + " dBFS");
+                expect (glideDb < -70.0, "HF residual during the glide is " + juce::String (glideDb, 1) + " dBFS");
+            }
+        }
+
+        beginTest ("Tank: random Size every 512-sample block (Modulation 1, Decay at the ceiling) stays finite, bounded and rate-limited");
+        {
+            DattorroTank tank;
+            tank.prepare ({ sampleRate, 512, 2 });
+            tank.setShimmerAmountGain (0.0f);
+            tank.setModulation (1.0f);
+            tank.setDecaySeconds (1.0e6f); // g at its ceiling for every Size
+            tank.reset();
+
+            juce::Random random (777);
+            float previous = 1.0f, maxPeak = 0.0f;
+            double worstRate = 0.0;
+            int numNonFinite = 0;
+            for (int n = 0; n < (int) (60.0 * sampleRate); ++n)
+            {
+                if (n % 512 == 0)
+                    tank.setSize (0.5f * std::pow (4.0f, random.nextFloat()));
+                const float left = tank.processSample (random.nextFloat() * 0.6f - 0.3f);
+                const float right = tank.getLastRightOutput();
+                if (! std::isfinite (left) || ! std::isfinite (right))
+                    ++numNonFinite;
+                else
+                    maxPeak = juce::jmax (maxPeak, std::abs (left), std::abs (right));
+                const float applied = tank.getAppliedSize();
+                worstRate = juce::jmax (worstRate, std::abs (std::log ((double) applied / (double) previous)) * sampleRate);
+                previous = applied;
+            }
+            logMessage ("Jittered Size, 60 s noise: peak " + juce::String (maxPeak, 4) + ", worst applied log-rate " + juce::String (worstRate, 4) + " /s");
+            expectEquals (numNonFinite, 0, "Non-finite output under Size jitter");
+            expect (maxPeak <= 10.0f, "Size jitter exceeded the 10.0 bound: " + juce::String (maxPeak, 4));
+            expect (worstRate <= maxRate * 1.001 + floatStepRate, "Applied Size log-rate " + juce::String (worstRate, 5) + " exceeds the limit");
+        }
+    }
+
+private:
+    static constexpr double sampleRate = 44100.0;
+
+    struct Highpass
+    {
+        explicit Highpass (double cutoffHz)
+        {
+            const double w = juce::MathConstants<double>::twoPi * cutoffHz / sampleRate;
+            const double c = std::cos (w), alpha = std::sin (w) / (2.0 * 0.7071);
+            const double a0 = 1.0 + alpha;
+            b0 = (1.0 + c) / 2.0 / a0;
+            b1 = -(1.0 + c) / a0;
+            b2 = b0;
+            a1 = -2.0 * c / a0;
+            a2 = (1.0 - alpha) / a0;
+        }
+
+        double process (double x)
+        {
+            const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1; x1 = x; y2 = y1; y1 = y;
+            return y;
+        }
+
+        double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    };
+
+    // Peak frequency of x[start .. start + window) within [lo, hi] Hz: Hann window, direct DFT in
+    // 1 Hz steps, parabolic refinement on the log magnitude.
+    static double peakFrequency (const std::vector<float>& x, int start, int window, double lo, double hi)
+    {
+        std::vector<double> magnitude;
+        const int steps = (int) (hi - lo) + 1;
+        for (int k = 0; k < steps; ++k)
+        {
+            const double w = juce::MathConstants<double>::twoPi * (lo + k) / sampleRate;
+            double re = 0.0, im = 0.0;
+            for (int i = 0; i < window; ++i)
+            {
+                const double hann = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / window);
+                const double v = hann * x[(size_t) (start + i)];
+                re += v * std::cos (w * i);
+                im -= v * std::sin (w * i);
+            }
+            magnitude.push_back (std::log (re * re + im * im + 1.0e-30));
+        }
+        const int best = (int) (std::max_element (magnitude.begin(), magnitude.end()) - magnitude.begin());
+        double offset = 0.0;
+        if (best > 0 && best + 1 < steps)
+        {
+            const double l = magnitude[(size_t) best - 1], c = magnitude[(size_t) best], r = magnitude[(size_t) best + 1];
+            offset = 0.5 * (l - r) / (l - 2.0 * c + r);
+        }
+        return lo + best + offset;
+    }
+
+    struct Bend { double up = 0.0, down = 0.0; };
+
+    // Steady 440 Hz sine into the plain tank (no shimmer path, no modulation); Size jumps from 1 to
+    // `target` at 3 s. Returns the largest upward / downward deviation of the wet spectral peak.
+    static Bend measureBendCents (float target, double durationSeconds)
+    {
+        DattorroTank tank;
+        tank.prepare ({ sampleRate, 512, 2 });
+        tank.setShimmerAmountGain (0.0f);
+        tank.setModulation (0.0f);
+        tank.reset();
+
+        constexpr double f0 = 440.0;
+        const int jumpAt = (int) (3.0 * sampleRate);
+        const int total = jumpAt + (int) (durationSeconds * sampleRate);
+        std::vector<float> out;
+        out.reserve ((size_t) total);
+        for (int n = 0; n < total; ++n)
+        {
+            if (n == jumpAt)
+                tank.setSize (target);
+            out.push_back (tank.processSample (0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * f0 * n / sampleRate)));
+        }
+
+        Bend bend;
+        constexpr int window = 8192;
+        for (int start = jumpAt; start + window < total; start += (int) (0.5 * sampleRate))
+        {
+            const double cents = 1200.0 * std::log2 (peakFrequency (out, start, window, 0.7 * f0, 1.4 * f0) / f0);
+            bend.up = juce::jmax (bend.up, cents);
+            bend.down = juce::jmin (bend.down, cents);
+        }
+        return bend;
+    }
+};
+
+static DattorroTankSizeGlideTests dattorroTankSizeGlideTests;
