@@ -57,8 +57,7 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
 
     // Same "keep the caller's target, snap to it" rule for Size and
     // Modulation; reset() below then scales the lines to that Size.
-    sizeGlideSampleRate = spec.sampleRate;
-    sizeGlide.prepare (sizeGlideSampleRate, sizeGlideMaxRate, sizeGlideTauSeconds);
+    sizeGlide.prepare (spec.sampleRate, defaultSizeGlideMaxRate, defaultSizeGlideTauSeconds);
     smoothedModulation.reset (spec.sampleRate, modulationRampSeconds);
 
     reset();
@@ -198,13 +197,6 @@ void DattorroTank::setDecaySeconds (float newDecaySeconds)
 void DattorroTank::setSize (float newSize)
 {
     sizeGlide.setTarget (newSize);
-}
-
-void DattorroTank::setSizeGlideLimits (double maxLogRatePerSecond, double velocityTauSeconds)
-{
-    sizeGlideMaxRate = maxLogRatePerSecond;
-    sizeGlideTauSeconds = velocityTauSeconds;
-    sizeGlide.prepare (sizeGlideSampleRate, sizeGlideMaxRate, sizeGlideTauSeconds);
 }
 
 void DattorroTank::setModulation (float newModulation)
