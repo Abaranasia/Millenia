@@ -127,6 +127,8 @@ namespace ParamIDs
 // Every default here must match the corresponding ShimmerReverbEngine/
 // DattorroTank/PitchShifter default exactly (see those classes'
 // defaultPitchShiftSemitones/defaultDecaySeconds/defaultDampingCoefficient/
-// defaultWidth/defaultMix/defaultBypassed) so wiring up APVTS in
-// this step is not a silent behavior change.
+// defaultWidth/defaultBypassed) so wiring up APVTS in this step is not a
+// silent behavior change. The one deliberate exception is Mix: the plugin
+// defaults to 0.4 (typical insert) while ShimmerReverbEngine::defaultMix
+// stays 1.0 for the engine tests.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

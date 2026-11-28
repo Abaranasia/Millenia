@@ -51,7 +51,7 @@ input (L+R mono-summed)                              ShimmerReverbEngine.cpp:406
 | Wet high cut | `ShimmerReverbEngine.cpp:811-817` | inactive at 20 kHz | Not a cause. Output-only, not in the loop |
 | Sample rate | T6 | 44.1 kHz: 16 kHz band 4.3 dB vs 6.5 dB at 96 kHz | Minor (the taps' fractional reads). Fix 10 only changes Damping |
 
-Defaults checked in `Source/Parameters.cpp`: Damping 0.0005 on 0..0.3 with skew 0.3 (`:122-126`), High Cut 20 kHz (`:159-162`), Shimmer Tone 5000 Hz on 1.5-10 kHz, scaled by the alias cap (`:176-191`), Modulation 0.1, Feedback 0.55, Mix 100% wet.
+Defaults checked in `Source/Parameters.cpp`: Damping 0.0005 on 0..0.3 with skew 0.3 (`:122-126`), High Cut 20 kHz (`:159-162`), Shimmer Tone 5000 Hz on 1.5-10 kHz, scaled by the alias cap (`:176-191`), Modulation 0.1, Feedback 0.55, Mix 100% wet (since changed to 40% at the plugin level, 2026-11-28).
 
 **Damping range, verified current:** the APVTS range is `0..0.3` (`Parameters.cpp:125`). The diagnostic's name in `DattorroTankTests.cpp:791` still says `0..0.05` and is stale; the figures it quotes (brightness 1.26 / 1.24 / 1.15) are from the old range. The fix-10 agent's "0 to 0.3" is correct.
 
@@ -182,7 +182,7 @@ Sources: [ValhallaShimmer manual (PDF)](https://www.valhalladsp.com/shimmer/Valh
 |---|---|---|---|
 | 4 | Shimmer Tone 5 kHz, which fix 9 turned into 2.76 kHz | Turn Tone to Off: 8 kHz +9 dB, 16 kHz +23 dB in the shimmer layer | Knob / one constant |
 | 5 | Shimmer Feedback 0.55 | 1.0 + Tone Off: 8 kHz +20 dB vs default (4.5). Trade-off: RT60 falls (4.4: 3.9-5.3 s mids at 1.0) | Knob / one constant |
-| 6 | Mix 100% wet by default | Dry attack HF is entirely replaced by a diffused wet (inferred; not measured). Not a spectrum issue | Knob |
+| 6 | Mix 100% wet by default (plugin default changed to 40% on 2026-11-28) | Dry attack HF is entirely replaced by a diffused wet (inferred; not measured). Not a spectrum issue | Knob |
 | 7 | Size away from 1 | See cause 2 | Knob |
 
 ### (iii) Design gaps
