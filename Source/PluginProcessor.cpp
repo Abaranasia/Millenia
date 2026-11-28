@@ -309,7 +309,7 @@ void MilleniaAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // need no chunking.
     shimmerReverbEngine.setPreDelayMs (preDelayParam->load());
 
-    // Slice 2: raw, the tank ramps Size (300 ms) and Modulation (50 ms) per
+    // Slice 2: raw, the tank glides Size (rate-limited, log domain) and ramps Modulation (50 ms) per
     // sample -- see sizeParam's header comment.
     shimmerReverbEngine.setSize (sizeParam->load());
     shimmerReverbEngine.setModulation (modulationParam->load());

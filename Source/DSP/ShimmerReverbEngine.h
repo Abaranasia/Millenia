@@ -164,7 +164,7 @@ public:
     // forwarded to DattorroTank after clamping to its ranges: Decay as RT60
     // seconds (replaces the old raw-gain setFeedback(); g is derived from
     // RT60 and the current Size, ceiling 0.85), Size 0.5..2 (tank lines
-    // and output taps, glided per sample over 300 ms inside the tank) and
+    // and output taps, glided per sample, rate-limited in the log domain, inside the tank) and
     // Modulation 0..1 (0..1 ms allpass1 depth, ramped per sample inside the
     // tank). Both ramps live in the DSP, so callers pass raw values. The
     // tank keeps all three across prepare()/reset(), like its other state.

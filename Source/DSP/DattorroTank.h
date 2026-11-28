@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <array>
+#include "SizeGlide.h"
 
 // Phase 2 committed topology: Dattorro (1997) plate reverb tank. Input
 // diffuser (4x series hand-rolled Schroeder allpass) feeding two
@@ -97,11 +98,34 @@ public:
 
     // Slice 2 (section 9.2): scales the tank allpass/delay lengths of both
     // branches and all 14 output taps by `newSize` (0.5..2), leaving the
-    // input diffusers alone. Smoothed per sample over sizeRampSeconds, so
-    // a change glides (a short pitch bend, chosen 2026-10-11) instead of
-    // jumping. Every line is allocated for maxSize in prepare(); a Size
-    // change only calls setDelay(). Not clamped here; the engine clamps.
+    // input diffusers alone. Glided per sample by a log-domain, rate-limited
+    // SizeGlide (see sizeGlideMaxRate below and SizeGlide.h), so the tail's
+    // pitch bend is bounded however fast or far the knob moves. Every line
+    // is allocated for maxSize in prepare(); a Size change only calls
+    // setDelay(). Not clamped here; the engine clamps.
     void setSize (float newSize);
+
+    // Size glide (see SizeGlide.h): ln(size) moves at most sizeGlideMaxRate
+    // per second, with a critically-damped end shape of time constant
+    // sizeGlideTauSeconds.
+    //
+    // The tradeoff is knob response lag versus pitch bend. Moving Size
+    // resamples the audio circulating in the loops, bending the wet tail by
+    // 1200 * log2 (1 -/+ d ln(size)/dt) cents. At 0.1 /s that is at most
+    // ~+165 / ~-182 cents (shrinking / growing), and a 1 -> 0.5 move
+    // (ln 2 = 0.693) takes ~7 s plus the end shape. A faster rate answers the
+    // knob sooner and bends the tail harder; a slower one is gentler and
+    // laggier. The old 300 ms linear ramp bent a 1 -> 0.5 jump by +400 cents
+    // and more. The measured candidate table is in
+    // docs/reverb-dev-journal.md.
+    static constexpr double defaultSizeGlideMaxRate = 0.1;
+    static constexpr double defaultSizeGlideTauSeconds = 0.25;
+
+    // Overrides the glide limits (log-rate in 1/s, end-shape time constant in
+    // seconds) for tests and tuning; the defaults are the constants below.
+    // Not real-time safe to call mid-glide (it re-snaps the glide state to
+    // the current target); call it before processing.
+    void setSizeGlideLimits (double maxLogRatePerSecond, double velocityTauSeconds);
 
     // Slice 2 (section 9.3): 0..1 user modulation depth, mapped linearly to
     // 0..maxModulationDepthMs on both allpass1 lines through the same LFOs
@@ -114,6 +138,8 @@ public:
     // The cross-feed decay gain processSample() is currently using (before
     // the Freeze/Infinite overrides). For tests.
     float getCurrentDecayGain() const noexcept { return decayGain; }
+    // The Size the delay lines are currently scaled to (the glided value).
+    float getAppliedSize() const noexcept { return appliedSize; }
 
     // The RT60 -> g mapping above, exposed so tests and callers share one
     // formula. decaySecondsForGain() is its inverse, refined to the float
@@ -287,9 +313,10 @@ private:
     //
     // Slice 2 adds two faster movers on these same lines. User Modulation at
     // 1 ms / 0.7 Hz is ~0.0044 samples per sample. A Size glide is much
-    // faster: 0.5 -> 2 over sizeRampSeconds moves branch B's allpass1 by
+    // faster: the old 300 ms linear Size glide moved branch B's allpass1 by
     // 1.5 * 30.51 ms in 300 ms, ~0.153 samples per sample at any sample rate
-    // (one integer crossing every ~6.5 samples). That cannot destabilise
+    // (one integer crossing every ~6.5 samples). The rate-limited glide is
+    // far slower (see sizeGlideMaxRate), but the bound below still holds. That cannot destabilise
     // JUCE's Thiran: it keeps the fraction in [0.618, 1.618), so its one
     // pole |alpha| stays <= 0.236 whatever the rate. The "fast modulation"
     // cost is only a short transient where alpha jumps at each integer
@@ -388,11 +415,6 @@ private:
                                                          + (double) branchBAllpass1Ms + (double) branchBDelay1Ms
                                                          + (double) branchBAllpass2Ms + (double) branchBDelay2Ms);
 
-    // Size glide time (section 9.2: per sample, ~300 ms, linear). Linear
-    // rather than multiplicative so the largest delay change per sample
-    // (and so the Thiran rate discussed at ModulatedDelayLineType) is a
-    // fixed, known bound: 1.5 * length / 300 ms for a full 0.5 <-> 2 move.
-    static constexpr double sizeRampSeconds = 0.3;
 
     // User Modulation: full scale 1 ms (section 9.3), twice Infinite's
     // modDepthMs. 50 ms smoothing, the same ramp the processor's block-rate
@@ -804,15 +826,18 @@ private:
     // Decay (see setDecaySeconds()). decayGain is derived, recomputed at the
     // top of processSample() whenever decayGainDirty is set (a new Decay, or
     // a Size step -- every sample while Size glides, one std::pow each,
-    // only during the 300 ms glide). Per sample rather than per block so g
+    // only while Size glides). Per sample rather than per block so g
     // tracks the line lengths exactly and RT60 cannot wobble mid-glide.
     float decaySeconds = defaultDecaySeconds;
     float decayGain = decayGainFor (defaultDecaySeconds, defaultSize);
     bool decayGainDirty = true;
 
-    // Size (see setSize()): smoothedSize is the per-sample ramp, appliedSize
-    // the value the lines were last scaled to.
-    juce::SmoothedValue<float> smoothedSize { defaultSize };
+    // Size (see setSize()): sizeGlide is the per-sample rate-limited glide,
+    // appliedSize the value the lines were last scaled to.
+    SizeGlide sizeGlide;
+    double sizeGlideSampleRate = 44100.0;
+    double sizeGlideMaxRate = defaultSizeGlideMaxRate;
+    double sizeGlideTauSeconds = defaultSizeGlideTauSeconds;
     float appliedSize = defaultSize;
 
     // Modulation (see setModulation()): 0..1, ramped per sample;

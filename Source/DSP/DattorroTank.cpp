@@ -57,7 +57,8 @@ void DattorroTank::prepare (const juce::dsp::ProcessSpec& spec)
 
     // Same "keep the caller's target, snap to it" rule for Size and
     // Modulation; reset() below then scales the lines to that Size.
-    smoothedSize.reset (spec.sampleRate, sizeRampSeconds);
+    sizeGlideSampleRate = spec.sampleRate;
+    sizeGlide.prepare (sizeGlideSampleRate, sizeGlideMaxRate, sizeGlideTauSeconds);
     smoothedModulation.reset (spec.sampleRate, modulationRampSeconds);
 
     reset();
@@ -160,9 +161,9 @@ void DattorroTank::reset()
 
     // Size/Modulation: same snap-to-target rule, then scale the lines to
     // the snapped Size and re-derive g from it.
-    smoothedSize.setCurrentAndTargetValue (smoothedSize.getTargetValue());
+    sizeGlide.snapTo (sizeGlide.getTarget());
     smoothedModulation.setCurrentAndTargetValue (smoothedModulation.getTargetValue());
-    appliedSize = smoothedSize.getTargetValue();
+    appliedSize = sizeGlide.getTarget();
     applySize (appliedSize);
     decayGainDirty = true;
 }
@@ -196,7 +197,14 @@ void DattorroTank::setDecaySeconds (float newDecaySeconds)
 
 void DattorroTank::setSize (float newSize)
 {
-    smoothedSize.setTargetValue (newSize);
+    sizeGlide.setTarget (newSize);
+}
+
+void DattorroTank::setSizeGlideLimits (double maxLogRatePerSecond, double velocityTauSeconds)
+{
+    sizeGlideMaxRate = maxLogRatePerSecond;
+    sizeGlideTauSeconds = velocityTauSeconds;
+    sizeGlide.prepare (sizeGlideSampleRate, sizeGlideMaxRate, sizeGlideTauSeconds);
 }
 
 void DattorroTank::setModulation (float newModulation)
@@ -342,11 +350,13 @@ float DattorroTank::peekTap (DelayLineType& delay, float offsetSamples, float co
 
 float DattorroTank::processSample (float input, float externalFeedback)
 {
-    // Size glide and Decay (slice 2, see setSize()/setDecaySeconds()). When
-    // Size is not moving getNextValue() returns exactly appliedSize, so
+    // Size glide and Decay (slice 2, see setSize()/setDecaySeconds()). The
+    // glide is rate-limited in the log domain (SizeGlide.h). When Size is not
+    // moving next() returns exactly the target, which equals appliedSize, so
     // nothing below runs and steady-state cost is one compare; a Decay
-    // change re-derives g once.
-    const float size = smoothedSize.getNextValue();
+    // change re-derives g once. g is re-derived from the SAME glided size the
+    // lines were just scaled to, so RT60 stays consistent mid-glide.
+    const float size = sizeGlide.next();
     if (size != appliedSize)
     {
         appliedSize = size;
