@@ -1328,6 +1328,50 @@ public:
             }
         }
 
+        beginTest ("Damping knob travel is audible: 8 kHz / 16 kHz RT60 fall strictly across default, 0.25, centre 0.5, 0.6, max 0.7");
+        {
+            // The plugin knob spans raw a = 0..0.7 with its centre at 0.5
+            // (Parameters.cpp). Measured at the bare tank, Size 1, RT60 7 s:
+            // with the old 0..0.3 range the whole travel moved the 16 kHz
+            // RT60 only from 5.7 s to 2.7 s and left 1 kHz alone; at 0.7 the
+            // top bands must be clearly damped while the low band keeps most
+            // of its decay.
+            const float knobPositions[] = { 0.0005f, 0.25f, 0.5f, 0.6f, 0.7f };
+            double previous8k = 1.0e9, previous16k = 1.0e9;
+            double rt1kDefault = 0.0, rt1kMax = 0.0, rt8kMax = 0.0, rt16kMax = 0.0;
+
+            for (const float a : knobPositions)
+            {
+                const double rt1k  = measureRt60 (1.0f, 7.0f, 1000.0, a);
+                const double rt8k  = measureRt60 (1.0f, 7.0f, 8000.0, a);
+                const double rt16k = measureRt60 (1.0f, 7.0f, 16000.0, a);
+                logMessage ("Damping a = " + juce::String (a, 4) + ": RT60 1k/8k/16k = " + juce::String (rt1k, 2) + " / "
+                                + juce::String (rt8k, 2) + " / " + juce::String (rt16k, 2) + " s");
+
+                expect (rt8k < previous8k - 0.15, "8 kHz RT60 did not fall by 0.15 s at a = " + juce::String (a, 4)
+                                                      + " (" + juce::String (rt8k, 3) + " vs " + juce::String (previous8k, 3) + ")");
+                expect (rt16k < previous16k - 0.05, "16 kHz RT60 did not fall by 0.05 s at a = " + juce::String (a, 4)
+                                                        + " (" + juce::String (rt16k, 3) + " vs " + juce::String (previous16k, 3) + ")");
+                previous8k = rt8k;
+                previous16k = rt16k;
+
+                if (a == 0.0005f)
+                    rt1kDefault = rt1k;
+                if (a == 0.7f)
+                {
+                    rt1kMax = rt1k;
+                    rt8kMax = rt8k;
+                    rt16kMax = rt16k;
+                }
+            }
+
+            expect (rt8kMax <= 0.45 * rt1kMax, "At max Damping the 8 kHz RT60 (" + juce::String (rt8kMax, 3)
+                                                   + " s) should be <= 45% of the 1 kHz RT60 (" + juce::String (rt1kMax, 3) + " s)");
+            expect (rt16kMax <= 1.8, "At max Damping the 16 kHz RT60 should be <= 1.8 s, got " + juce::String (rt16kMax, 3));
+            expect (rt1kMax >= 0.7 * rt1kDefault, "Max Damping should not kill the low band: 1 kHz RT60 " + juce::String (rt1kMax, 3)
+                                                      + " s vs " + juce::String (rt1kDefault, 3) + " s at the default");
+        }
+
         beginTest ("Decay ceiling: g never exceeds 0.85 for any Decay/Size, statically or while Size glides");
         {
             float maxGain = 0.0f;
@@ -1529,10 +1573,12 @@ private:
     // fitted range. L and R energies are summed.
     // bandHz > 0 band-passes the output around that frequency (Q 2) before
     // the integration, giving the decay of that band alone.
-    static double measureRt60 (float size, float rt60, double bandHz = 0.0)
+    static double measureRt60 (float size, float rt60, double bandHz = 0.0,
+                               float damping = 0.0005f)
     {
         DattorroTank tank;
         tank.prepare ({ sampleRate, 512, 2 });
+        tank.setDamping (damping);
         tank.setShimmerAmountGain (0.0f); // plainWeight = 1.0: the loop gain is exactly g
         tank.setModulation (0.0f);
         tank.setSize (size);
