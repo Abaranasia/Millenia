@@ -4,6 +4,14 @@
 #include <vector>
 #include "../../Source/DSP/PitchShifter.h"
 
+// DIAGNOSTIC (temporary, not a permanent regression test): investigating the
+// 2026-08-14 "metallic/robotic" character complaint (docs/shimmer-reverb-
+// implementation-plan.md, Phase 7 section). The pitch-accuracy tests above
+// already confirm the AVERAGE output frequency is correct -- this checks
+// whether the grain-splice mechanism is injecting periodic amplitude
+// modulation at the grain hop rate, which a zero-crossing/average-frequency
+// measurement would not detect but the ear would hear as buzz/metallicness.
+
 // Phase 3 test-runner target -- unit tests for the hand-rolled dual-delay-
 // line crossfade PitchShifter. See
 // docs/shimmer-reverb-implementation-plan.md, Phase 3.
@@ -438,6 +446,256 @@ public:
                         + "Hz) deviates from expected (" + juce::String (expectedFreq) + "Hz) by "
                         + juce::String (errorPercent, 3) + "% -- this is a REAL pitch error, not just a timbral "
                         "artifact");
+        }
+
+        beginTest ("Spectral sidebands around the shifted fundamental stay below the measured WSOLA-fix thresholds");
+        {
+            // Feeds a sustained pure sine through the shifter at each test
+            // shift, takes a large FFT of the steady-state output, and
+            // asserts the strongest spectral peak OTHER than the fundamental
+            // itself stays below a measured threshold. Originally a
+            // DIAGNOSTIC, log-only test (2026-08-14 "metallic/robotic"
+            // character investigation) -- promoted to a real assertion once
+            // the WSOLA per-grain phase-alignment fix (PitchShifter::
+            // findAlignmentOffset(), see PitchShifter.h/.cpp) was measured to
+            // substantially improve these numbers. If the grain-splice
+            // mechanism were still injecting periodic amplitude modulation at
+            // the hop rate (hopSamples derived from grainLengthMs=20ms and
+            // crossfadeFraction=0.1 -- roughly 55.5Hz at 44.1kHz), that would
+            // show up as sidebands spaced at multiples of the hop rate around
+            // the fundamental, at an amplitude large enough to be audible as
+            // buzz/metallic coloration even though the *average* frequency
+            // (measured by zero-crossing in the test above) comes out
+            // correct.
+            //
+            // Measured before/after the WSOLA fix (relative to fundamental,
+            // this exact test signal/config):
+            //   0st:  -92.24dB -> -92.24dB (unchanged -- already just the
+            //         numerical noise floor, nothing to fix at unity ratio)
+            //  +7st:  -28.33dB -> -67.07dB (~38.7dB improvement)
+            // +12st:  -19.99dB -> -70.60dB (~50.6dB improvement -- comfortably
+            //         past the "-30dB or better" bar set for closing this
+            //         investigation)
+            // +24st: unreliable pre-fix (fundamental-bin magnitude was ~0.14,
+            //        a spectral null from the pre-fix artifact itself, making
+            //        the ratio meaningless) -> -38.17dB post-fix, with a
+            //        healthy non-null fundamental magnitude (~8156 vs ~8175
+            //        for the other shifts) -- the null resolved itself once
+            //        the underlying artifact causing it was fixed.
+            // Thresholds below are set with margin under these measured
+            // post-fix numbers so the test fails on a real regression without
+            // being flaky over harmless numerical noise.
+            //
+            // 2026-08-16 performance-regression follow-up (see
+            // docs/shimmer-reverb-implementation-plan.md's Phase 7 follow-up
+            // paragraph for the full writeup): the WSOLA fix above originally
+            // searched +-grainLengthSamplesInt (~882 samples) from a fixed
+            // origin at EVERY grain launch, which was measured to make
+            // PitchShifter run at only ~1.19x real-time (see the DIAGNOSTIC
+            // test below) -- nowhere near safe once inside the full
+            // ShimmerReverbEngine signal path. Re-measured after switching
+            // findAlignmentOffset() to a much cheaper two-anchor search
+            // (PitchShifter.h/.cpp -- primaryLastOffset/quadratureLastOffset,
+            // alignmentSearchRadiusSamples=22 samples at 44.1kHz): 0st
+            // -92.24dB (unchanged), +7st -59.19dB, +12st -61.00dB, +24st
+            // -44.67dB -- all comfortably clear of the thresholds below and
+            // within a few dB of the original brute-force numbers above,
+            // while real-time factor improved from 1.19x to ~19x (see the
+            // DIAGNOSTIC test's own updated comment).
+            constexpr double sampleRate = 44100.0;
+            constexpr float inputFreq = 220.0f;
+            constexpr int fftOrder = 15; // 32768-point FFT -> ~1.35Hz/bin resolution
+            constexpr int fftSize = 1 << fftOrder;
+
+            struct SidebandCase
+            {
+                float semitones;
+                double maxAllowedRelativeDb; // strongest other peak must be at or below this, relative to the fundamental
+            };
+
+            for (auto testCase : { SidebandCase { 0.0f, -80.0 },
+                                    SidebandCase { 7.0f, -55.0 },
+                                    SidebandCase { 12.0f, -50.0 },
+                                    SidebandCase { 24.0f, -30.0 } })
+            {
+            const float testSemitones = testCase.semitones;
+            PitchShifter shifter;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+            shifter.prepare (spec);
+            shifter.reset();
+            shifter.setPitchShiftSemitones (testSemitones);
+            const float expectedFreq = inputFreq * shifter.getPitchRatio();
+
+            constexpr int warmupSamples = (int) (sampleRate * 1.0);
+            double phase = 0.0;
+            const double phaseInc = juce::MathConstants<double>::twoPi * inputFreq / sampleRate;
+
+            for (int i = 0; i < warmupSamples; ++i)
+            {
+                shifter.processSample ((float) std::sin (phase) * 0.5f);
+                phase += phaseInc;
+                if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+            }
+
+            juce::dsp::FFT fft (fftOrder);
+            juce::HeapBlock<float> fftData (2 * (size_t) fftSize);
+            juce::dsp::WindowingFunction<float> window ((size_t) fftSize, juce::dsp::WindowingFunction<float>::blackmanHarris);
+
+            for (int i = 0; i < fftSize; ++i)
+            {
+                float sample = shifter.processSample ((float) std::sin (phase) * 0.5f);
+                phase += phaseInc;
+                if (phase >= juce::MathConstants<double>::twoPi) phase -= juce::MathConstants<double>::twoPi;
+                fftData[i] = sample;
+            }
+            juce::zeromem (fftData + fftSize, sizeof (float) * (size_t) fftSize);
+            window.multiplyWithWindowingTable (fftData, (size_t) fftSize);
+
+            fft.performFrequencyOnlyForwardTransform (fftData, true);
+
+            const double binHz = sampleRate / (double) fftSize;
+            const int theoreticalFundamentalBin = juce::roundToInt (expectedFreq / binHz);
+            const int numBins = fftSize / 2;
+
+            // The theoretical bin index can land in a spectral null at
+            // extreme ratios (the true peak straddles a bin boundary, or --
+            // pre-fix -- an artifact could hollow out the exact theoretical
+            // bin even though real energy sits one bin over). Search a small
+            // window around the theoretical bin for the actual nearest local
+            // maximum instead of trusting the theoretical index outright.
+            constexpr int fundamentalSearchRadius = 3;
+            int fundamentalBin = theoreticalFundamentalBin;
+            float fundamentalMag = fftData[(size_t) juce::jlimit (0, numBins - 1, theoreticalFundamentalBin)];
+
+            for (int b = theoreticalFundamentalBin - fundamentalSearchRadius; b <= theoreticalFundamentalBin + fundamentalSearchRadius; ++b)
+            {
+                if (b < 0 || b >= numBins)
+                    continue;
+
+                if (fftData[(size_t) b] > fundamentalMag)
+                {
+                    fundamentalMag = fftData[(size_t) b];
+                    fundamentalBin = b;
+                }
+            }
+
+            // Exclude a small guard band around the fundamental itself (its
+            // own windowed main-lobe) when searching for the strongest OTHER
+            // peak.
+            const int guardBins = 6;
+
+            float strongestOtherMag = 0.0f;
+            int strongestOtherBin = -1;
+
+            for (int b = 1; b < numBins; ++b)
+            {
+                if (std::abs (b - fundamentalBin) <= guardBins)
+                    continue;
+
+                if (fftData[(size_t) b] > strongestOtherMag)
+                {
+                    strongestOtherMag = fftData[(size_t) b];
+                    strongestOtherBin = b;
+                }
+            }
+
+            const double strongestOtherHz = strongestOtherBin * binHz;
+            const double offsetFromFundamentalHz = strongestOtherHz - expectedFreq;
+            const double relativeDb = 20.0 * std::log10 ((double) (strongestOtherMag / juce::jmax (fundamentalMag, 1.0e-9f)));
+
+            const int approxHopSamples = juce::roundToInt (20.0 * 0.001 * sampleRate * (1.0f - 0.1f));
+            const double approxHopRateHz = sampleRate / (double) approxHopSamples;
+
+            logMessage ("Spectral sidebands: semitones=" + juce::String (testSemitones) + ", fundamental="
+                        + juce::String (expectedFreq) + "Hz (bin "
+                        + juce::String (fundamentalBin) + ", mag=" + juce::String (fundamentalMag, 6)
+                        + "), strongest other peak=" + juce::String (strongestOtherHz, 2) + "Hz (bin "
+                        + juce::String (strongestOtherBin) + ", mag=" + juce::String (strongestOtherMag, 6)
+                        + ", " + juce::String (relativeDb, 2) + "dB relative to fundamental), offset from "
+                        + "fundamental=" + juce::String (offsetFromFundamentalHz, 2) + "Hz, approx grain hop rate="
+                        + juce::String (approxHopRateHz, 2) + "Hz, bin resolution=" + juce::String (binHz, 3) + "Hz/bin");
+
+            expect (relativeDb <= testCase.maxAllowedRelativeDb,
+                    "Sideband at " + juce::String (testSemitones) + "st measured " + juce::String (relativeDb, 2)
+                        + "dB, expected at or below " + juce::String (testCase.maxAllowedRelativeDb, 2) + "dB");
+            }
+        }
+
+        beginTest ("DIAGNOSTIC: wall-clock real-time factor of processSample() (investigating reported audio dropouts)");
+        {
+            // User reported audible dropouts/interruptions in the Standalone
+            // after the WSOLA alignment-search fix was added. The ORIGINAL
+            // version of that fix searched +-grainLengthSamplesInt candidates
+            // (~882 samples at 44.1kHz) from a FIXED origin at every single
+            // grain launch, in both the primary and quadrature pools --
+            // measured here at only ~1.19x real-time (5.0s of audio took
+            // ~4.2s wall-clock in this Debug build) -- nowhere near enough
+            // margin once this sits inside ShimmerReverbEngine's actual
+            // feedback loop alongside DattorroTank/DC blocker/limiter and
+            // real host/driver overhead. That was the root cause of the
+            // reported dropouts.
+            //
+            // Fix (see PitchShifter.h/.cpp): findAlignmentOffset() now
+            // searches around a running per-pool offset estimate
+            // (primaryLastOffset/quadratureLastOffset) that's carried
+            // forward from one grain launch to the next -- since it already
+            // accounts for all prior drift, each launch only needs to search
+            // a small window covering that one hop's INCREMENTAL drift
+            // instead of re-deriving the full cumulative drift from scratch.
+            // A second small window around the fixed nominal zero is also
+            // checked every call (see findAlignmentOffset()'s own comment
+            // for why: a running-offset-only search was measured to plateau
+            // on a bad local optimum at extreme pitch ratios, no matter how
+            // wide its radius). alignmentSearchRadiusSamples shrank from a
+            // full grain length (~882 samples) down to 22 samples at
+            // 44.1kHz -- tuned via a sweep documented in
+            // docs/shimmer-reverb-implementation-plan.md's Phase 7 follow-up
+            // paragraph.
+            //
+            // Measured after the fix (this exact test, same machine/build):
+            // ~19.3x real-time (5.0s of audio in ~260ms wall-clock) -- a
+            // ~16x improvement over the 1.19x pre-fix figure, and well past
+            // the "3-5x, ideally much more" margin target set for closing
+            // this investigation. The assertion below uses roughly half the
+            // measured figure as its floor, so it fails on a real regression
+            // (e.g. an accidentally-widened search radius) without being
+            // flaky over ordinary machine-to-machine variance.
+            constexpr double sampleRate = 44100.0;
+            constexpr double secondsToProcess = 5.0;
+            constexpr int numSamples = (int) (sampleRate * secondsToProcess);
+
+            PitchShifter shifter;
+            juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, 1 };
+            shifter.prepare (spec);
+            shifter.reset();
+            shifter.setPitchShiftSemitones (12.0f);
+
+            juce::Random random (13579);
+
+            const double startMs = juce::Time::getMillisecondCounterHiRes();
+
+            for (int i = 0; i < numSamples; ++i)
+                shifter.processSample (random.nextFloat() * 0.6f - 0.3f);
+
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+            const double audioMs = secondsToProcess * 1000.0;
+            const double realTimeFactor = audioMs / elapsedMs; // >1 means faster than real-time (good)
+
+            logMessage ("Processed " + juce::String (secondsToProcess, 1) + "s of audio (mono, "
+                        + juce::String ((int) sampleRate) + "Hz) in " + juce::String (elapsedMs, 2)
+                        + "ms wall-clock -> real-time factor " + juce::String (realTimeFactor, 2)
+                        + "x (>1 = faster than real-time; this is a Debug/unoptimized build, so treat as a "
+                        "relative, not absolute, figure)");
+
+            // Measured ~19.3x on this machine/build after the two-anchor
+            // search fix (see this test's comment above); 8x leaves
+            // comfortable margin below that for normal variance while still
+            // catching a real regression (e.g. back toward the pre-fix
+            // ~1.19x, or an accidentally much-widened search radius).
+            expect (realTimeFactor >= 8.0, "Real-time factor " + juce::String (realTimeFactor, 2)
+                        + "x fell below the 8x regression floor -- this is a Debug build, but such a large drop "
+                        "likely means the alignment search got more expensive (radius, anchor count, or window "
+                        "size), not just machine noise");
         }
     }
 };
